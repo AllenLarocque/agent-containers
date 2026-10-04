@@ -35,3 +35,5 @@ jobs:
         run: docker build --load --build-arg BASE_IMAGE=spades-base:ci -t spades-gis:ci images/gis
       - name: Smoke gis
         run: docker run --rm -v "$PWD/tests:/tests:ro" spades-gis:ci bash /tests/smoke/gis.sh
+      - name: Template test
+        run: bash tests/template/test-template.sh
