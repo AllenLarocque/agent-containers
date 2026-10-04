@@ -2,6 +2,8 @@ name: ci
 on:
   pull_request:
   workflow_dispatch:
+permissions:
+  contents: read
 jobs:
   build-test:
     runs-on: ubuntu-24.04
@@ -53,12 +55,13 @@ jobs:
             -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
           docker exec -u root fwdead bash /tests/firewall/test-fail-closed.sh
           docker rm -f fwdead
+      # Child images use plain `docker build`: the buildx container driver cannot see locally loaded images.
       - name: Build gis
-        run: docker build --load --build-arg BASE_IMAGE=spades-base:ci -t spades-gis:ci images/gis
+        run: docker build --build-arg BASE_IMAGE=spades-base:ci -t spades-gis:ci images/gis
       - name: Smoke gis
         run: docker run --rm -v "$PWD/tests:/tests:ro" spades-gis:ci bash /tests/smoke/gis.sh
       - name: Build bio
-        run: docker build --load --build-arg BASE_IMAGE=spades-base:ci -t spades-bio:ci images/bio
+        run: docker build --build-arg BASE_IMAGE=spades-base:ci -t spades-bio:ci images/bio
       - name: Smoke bio
         run: |
           docker run --rm -v "$PWD/tests:/tests:ro" spades-bio:ci bash /tests/smoke/bio.sh

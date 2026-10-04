@@ -19,6 +19,7 @@ services:
       - ./:/workspace
       - claude-config:/home/agent/.claude
       - require-cache:/home/agent/.cache/R/Require
+      - rlib:/home/agent/.local/share/R     # setupProject standAlone library: persists across ./up
       - ./allowlist.txt:/etc/firewall/allowlist.d/50-project.txt:ro
       - type: bind                         # personal conventions, live (rw)
         source: ${SPADES_AI_DIR:-${HOME}/GitHub/spades.ai}
@@ -33,6 +34,8 @@ services:
 volumes:
   claude-config:
     name: claude-${PROJECT:-project-template}    # FIXED name: survives rebuilds
+  rlib:
+    name: rlib-${PROJECT:-project-template}      # FIXED name, per project (each project pins its own versions)
   require-cache:
     name: require-cache-shared                   # shared across all SpaDES projects
     external: true

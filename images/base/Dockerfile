@@ -7,6 +7,8 @@ LABEL org.opencontainers.image.source="https://github.com/AllenLarocque/agent-co
 ARG TZ=America/Los_Angeles
 ARG CLAUDE_CODE_VERSION=2.1.289
 ARG UV_VERSION=0.12.19
+# sha256 of uv-x86_64-unknown-linux-gnu.tar.gz, from the release asset ...tar.gz.sha256 (a mismatch fails the build).
+ARG UV_SHA256=23bf5552d220e0842b65c862097b2ebaeba0064b74eda5e565e77fd25969d8c8
 ARG PE_AI_COMMIT=e7ae689751316dfe742f31b32d0d659accd0cc41
 ENV TZ="$TZ" DEBIAN_FRONTEND=noninteractive
 
@@ -23,6 +25,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 
 # Geospatial system libraries IN BASE: every SpaDES module depends on terra.
 # ⚠️ Ubuntu's own GDAL only — P3M binary R packages are built against it; never add the ubuntugis PPA.
+# libmagick++-dev and libglpk-dev are runtime deps of P3M binaries (magick via SpaDES.project, igraph), so they live in base.
 # libglpk-dev: the igraph P3M binary (SpaDES.core dep) links libglpk.so.40.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libgdal-dev gdal-bin libgeos-dev libproj-dev libudunits2-dev libsqlite3-dev \
@@ -42,13 +45,15 @@ RUN Rscript -e " \
 
 # uv, pinned (light Python tooling; reticulate::py_require()).
 RUN curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz" -o /tmp/uv.tgz \
+    && echo "${UV_SHA256}  /tmp/uv.tgz" | sha256sum -c - \
     && tar xzf /tmp/uv.tgz -C /tmp && install -m 0755 /tmp/uv-x86_64-unknown-linux-gnu/uv /usr/local/bin/uv \
     && rm -rf /tmp/uv.tgz /tmp/uv-x86_64-unknown-linux-gnu
 
 # Non-root user, fixed UID/GID 1000 (matches the WSL user for bind-mount ownership).
 RUN groupadd --gid 1000 agent && useradd --uid 1000 --gid 1000 --create-home --shell /bin/zsh agent \
     && mkdir -p /workspace /etc/firewall/allowlist.d /usr/local/share/npm-global \
-    && chown -R agent:agent /workspace /usr/local/share/npm-global
+    && mkdir -p /home/agent/.local/share/R /home/agent/.cache/R/Require \
+    && chown -R agent:agent /workspace /usr/local/share/npm-global /home/agent/.local /home/agent/.cache
 
 # Firewall: init script + base allowlist (*.txt in allowlist.d; project files mount alongside). sudo ONLY for the firewall script.
 COPY init-firewall.sh /usr/local/bin/init-firewall.sh

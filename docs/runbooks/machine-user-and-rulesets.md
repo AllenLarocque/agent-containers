@@ -33,6 +33,8 @@ Step 1 is done once. Steps 2 and 4 are done per repo. Step 3 is done once per pr
    * @AllenLarocque
    ```
 
+   (For a new project repo, `project-template/.github/CODEOWNERS` ships with an `@OWNER` placeholder: replace it with your username rather than copying this line blindly.)
+
    *Why: with "Require review from Code Owners" (step 4), only an approval from you counts. Without it, any account that is allowed to approve could satisfy the "1 approval" rule.* (`agent-containers` already has this file.)
 3. Repo → Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve pull requests":
    - **`agent-containers` ONLY: tick it and Save.** The `publish` workflow needs it to open the digests PR.

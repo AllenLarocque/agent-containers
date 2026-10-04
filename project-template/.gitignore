@@ -1,3 +1,4 @@
 *.env.resolved
 *.secret
 .env
+.env.tmp

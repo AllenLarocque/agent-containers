@@ -2,7 +2,7 @@
 # Build + push spades-base then spades-gis and spades-bio (children FROM base by REGISTRY digest), then render digests.md.
 # Used by both the publish workflow (REGISTRY=ghcr.io/allenlarocque) and the CI dry-run
 # (REGISTRY=localhost:5000/allenlarocque), so the dry-run exercises the exact same logic.
-# Only the dated tag is pushed during builds; both images are smoke-tested BY DIGEST, and only then
+# Only the dated tag is pushed during builds; all images are smoke-tested BY DIGEST, and only then
 # is `latest` promoted (so a partial failure leaves `latest` untouched).
 # Usage: scripts/build-publish.sh <registry-prefix> <tag> [digests-out-file]
 set -euo pipefail

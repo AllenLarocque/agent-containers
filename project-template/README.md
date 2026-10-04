@@ -22,7 +22,7 @@ Copy this folder into a SpaDES project root. The folder name becomes the compose
 | Start / refresh secrets or env | `./up` | Resolves `op://` refs to `~/.config/agent-containers/<project>.env` (mode 600), recreates the container |
 | Attach | `docker exec -it -u agent <project>-agent-1 zsh` or VS Code "Reopen in Container" | Shell in the container |
 | Edit project allowlist | edit `allowlist.txt`, then `./up` | Firewall re-initialised on start |
-| Update image | change the digest in `compose.yaml`, then `./up` | Claude config persists in volume `claude-<project>` |
+| Update image | change the digest in `compose.yaml`, then `./up` | Claude config persists in volume `claude-<project>`; project R packages persist in volume `rlib-<project>` (no reinstall after `./up`) |
 | Stop | `docker compose -p <project> stop` | Container stopped, volumes kept |
 | Remove | `docker compose -p <project> down` | Container removed; named volumes kept |
 
