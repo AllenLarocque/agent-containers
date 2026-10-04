@@ -8,8 +8,7 @@ diag(){ h=${1#https://}; h=${h%%/*}; echo "::group::DIAG $h"; date -u +%T.%N
   echo "--- dig A"; dig "$h" A @127.0.0.1 +noall +answer +stats
   echo "--- dig AAAA"; dig "$h" AAAA @127.0.0.1 +noall +answer
   echo "--- getent ahosts"; getent ahosts "$h"
-  echo "--- ipset"; sudo ipset list allowed-domains | grep -v '^[0-9a-f.:/]*$' ; sudo ipset list allowed-domains | grep -E '^209\.51\.|^[0-9.]+(/[0-9]+)?( |$)' | head -200
-  echo "--- iptables"; sudo iptables -L OUTPUT -n -v
+  touch /tmp/fw-failed
   echo "--- curl -v (retry now)"; curl -v --connect-timeout 10 -sS -o /dev/null "$1" 2>&1 | head -60; echo "curl rc=${PIPESTATUS[0]}"
   echo "::endgroup::"; }
 allowed(){ out=$(curl -v --connect-timeout 10 -sSf -o /dev/null "$1" 2>&1); rc=$?; if [ $rc -eq 0 ]; then echo "OK:   $1 reachable"; else echo "FAIL: $1 blocked, should be ALLOWED (curl rc=$rc)"; echo "$out" | head -40; diag "$1"; fail=1; fi; }

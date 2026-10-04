@@ -23,8 +23,16 @@ jobs:
             -v /tmp/50-project.txt:/etc/firewall/allowlist.d/50-project.txt:ro \
             -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
           docker exec fw sudo /usr/local/bin/init-firewall.sh
-          docker exec fw bash /tests/firewall/test-firewall.sh
+          rc=0; docker exec fw bash /tests/firewall/test-firewall.sh || rc=$?   # TEMP-DIAG
+          if [ $rc -ne 0 ]; then
+            echo "::group::root diag"
+            docker exec -u root fw ipset list allowed-domains | grep -vE '^(Name|Type|Revision|Header|Size|References|Number|Members|Memory)' | sort | tr '\n' ' '
+            docker exec -u root fw iptables -L OUTPUT -n -v
+            docker exec -u root fw sh -c 'cat /etc/resolv.conf; cat /etc/dnsmasq.d/allowlist.conf | cut -c1-300; pgrep -a dnsmasq; dig www.gnu.org A +noall +answer; ipset test allowed-domains $(dig +short www.gnu.org A | head -1)'
+            echo "::endgroup::"
+          fi
           docker rm -f fw
+          exit $rc
       - name: Firewall rejects invalid allowlist entry without touching iptables
         run: |
           docker run -d --name fwbad --cap-add NET_ADMIN --cap-add NET_RAW \
