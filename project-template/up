@@ -2,8 +2,12 @@
 # HOST ONLY. Resolve secrets, then (re)create the container so it picks up current env.
 set -euo pipefail
 cd "$(dirname "$0")"
-export PROJECT="${PROJECT:-$(basename "$PWD")}"
-./resolve-secrets
+PROJECT="${PROJECT:-$(basename "$PWD")}"
+export PROJECT="$(printf '%s' "$PROJECT" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9_-]/-/g')"
+./check-digest compose.yaml
+sad="${SPADES_AI_DIR:-$HOME/GitHub/spades.ai}"
+[ -d "$sad" ] || { echo "up: spades.ai directory not found: $sad (clone it there or set SPADES_AI_DIR)"; exit 1; }
+./resolve-secrets || { echo "up: secret resolution FAILED. Any container already running still has the OLD env."; exit 1; }
 docker volume inspect require-cache-shared >/dev/null 2>&1 || docker volume create require-cache-shared >/dev/null
 docker compose -p "$PROJECT" up -d --force-recreate
 echo "up: '$PROJECT' running. Attach: docker exec -it -u agent ${PROJECT}-agent-1 zsh   (or VS Code: Reopen in Container)"

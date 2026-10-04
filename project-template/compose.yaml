@@ -1,5 +1,6 @@
 # One compose project per SpaDES project. Copy this folder into the project root.
-# Image: copy a digest from agent-containers/digests.md. Secrets: run ./up (never plain compose).
+# Image: copy a digest from agent-containers/digests.md, then run ./check-digest. Secrets: run ./up (never plain compose).
+# PROJECT / COMPOSE_PROJECT_NAME come from the gitignored .env that ./resolve-secrets writes (read by compose AND VS Code).
 name: ${PROJECT:-project-template}
 services:
   agent:
@@ -19,7 +20,11 @@ services:
       - claude-config:/home/agent/.claude
       - require-cache:/home/agent/.cache/R/Require
       - ./allowlist.txt:/etc/firewall/allowlist.d/50-project.txt:ro
-      - ${SPADES_AI_DIR:-${HOME}/GitHub/spades.ai}:/opt/reference/spades.ai   # personal conventions, live (rw). MUST exist on the host first, or Docker creates a root-owned empty dir
+      - type: bind                         # personal conventions, live (rw)
+        source: ${SPADES_AI_DIR:-${HOME}/GitHub/spades.ai}
+        target: /opt/reference/spades.ai
+        bind:
+          create_host_path: false          # MUST exist on the host: fail loudly, never create a root-owned empty dir
       # - uv-cache:/home/agent/.cache/uv  # OPTIONAL: shared uv cache for reticulate::py_require() (spec §3.4)
       # - ${MEMORY_DIR}:/opt/memory        # RESERVED: future memory repo (spec §2)
     command: >

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Verifies the image in compose.yaml is pinned to a REAL digest (@sha256:<64 hex>), not the placeholder.
+# Used by ./up and by the new-project flow. Usage: ./check-digest [compose.yaml]
+f="${1:-$(dirname "$0")/compose.yaml}"
+if grep -Eq '^\s*image:\s*\S+@sha256:[0-9a-f]{64}\s*$' "$f"; then
+  echo "check-digest: OK"
+else
+  echo "check-digest: $f is not pinned to a real digest (@sha256:<64 hex>). Copy one from agent-containers/digests.md."
+  exit 1
+fi

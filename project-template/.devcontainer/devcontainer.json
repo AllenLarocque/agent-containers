@@ -1,7 +1,9 @@
 {
-  // VS Code "Reopen in Container": runs ./resolve-secrets on the host first, then uses compose.yaml.
+  // VS Code "Reopen in Container": runs ./resolve-secrets on the host first (writes ./.env with PROJECT and
+  // COMPOSE_PROJECT_NAME, which the Dev Containers tooling reads to name the compose project, same as ./up).
+  // Needs OP_SERVICE_ACCOUNT_TOKEN in the environment VS Code was launched from (see README).
   "name": "${localWorkspaceFolderBasename}",
-  "initializeCommand": "PROJECT=${localWorkspaceFolderBasename} ./resolve-secrets",
+  "initializeCommand": "./resolve-secrets",
   "dockerComposeFile": ["../compose.yaml"],
   "service": "agent",
   "workspaceFolder": "/workspace",
