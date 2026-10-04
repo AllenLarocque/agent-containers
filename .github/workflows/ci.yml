@@ -32,6 +32,7 @@ jobs:
           docker exec -u root fwbad bash /tests/firewall/test-invalid-token.sh
           docker rm -f fwbad
       - name: Firewall IPv6 default-deny on an IPv6-enabled Docker network
+        if: always()
         run: |
           docker network create --ipv6 --subnet fd00:dead:beef::/48 v6net
           docker run -d --name fw6 --network v6net --cap-add NET_ADMIN --cap-add NET_RAW \
@@ -40,6 +41,13 @@ jobs:
           docker exec -u root fw6 bash /tests/firewall/test-ipv6.sh
           docker rm -f fw6
           docker network rm v6net
+      - name: Firewall fails closed when setup breaks mid-way (dead resolver)
+        if: always()
+        run: |
+          docker run -d --name fwdead --dns 192.0.2.1 --cap-add NET_ADMIN --cap-add NET_RAW \
+            -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
+          docker exec -u root fwdead bash /tests/firewall/test-fail-closed.sh
+          docker rm -f fwdead
       - name: Build gis
         run: docker build --load --build-arg BASE_IMAGE=spades-base:ci -t spades-gis:ci images/gis
       - name: Smoke gis
