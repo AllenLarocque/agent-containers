@@ -10,6 +10,13 @@ allowed https://cloud.r-project.org/src/contrib/PACKAGES.gz
 allowed https://packagemanager.posit.co/cran/__linux__/noble/latest/src/contrib/PACKAGES.gz
 allowed https://predictiveecology.r-universe.dev/src/contrib/PACKAGES.gz
 allowed https://bioconductor.org/packages/release/bioc/src/contrib/PACKAGES.gz
-# project-file merge: CI mounts a 50-project.txt containing exactly "httpbin.org"
-allowed https://httpbin.org/get
+# Subdomain of a base domain (dnsmasq semantics)
+allowed https://www.bioconductor.org/
+# Project-file parsing fixtures (mounted by CI). Hosts here are NOT in the base allowlist.
+# 40-extra.txt : "www.python.org" with NO trailing newline (file-boundary glue test)
+# 50-project.txt: CRLF line, inline comment, blank, comment-only, last line w/o newline
+allowed https://www.python.org/
+allowed https://www.r-project.org/
+allowed https://cran.r-project.org/
+allowed https://www.gnu.org/
 [ "$fail" -eq 0 ] && echo "FIREWALL: ALL PASSED" || { echo "FIREWALL: FAILURES"; exit 1; }

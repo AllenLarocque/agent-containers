@@ -12,12 +12,22 @@ jobs:
         run: docker buildx build --load -t spades-base:ci images/base
       - name: Smoke base
         run: docker run --rm -v "$PWD/tests:/tests:ro" spades-base:ci bash /tests/smoke/base.sh
-      - name: Firewall test (base + project allowlist merge)
+      - name: Firewall test (base + project allowlist merge + parsing)
         run: |
-          echo "httpbin.org" > /tmp/50-project.txt
+          # 40-extra: last line has NO trailing newline (boundary with 50-project.txt)
+          printf 'www.python.org' > /tmp/40-extra.txt
+          # 50-project: CRLF first line, inline comment, blank, comment-only, last line w/o newline
+          printf 'www.r-project.org\r\ncran.r-project.org  # inline comment\n\n# comment only\nwww.gnu.org' > /tmp/50-project.txt
           docker run -d --name fw --cap-add NET_ADMIN --cap-add NET_RAW \
+            -v /tmp/40-extra.txt:/etc/firewall/allowlist.d/40-extra.txt:ro \
             -v /tmp/50-project.txt:/etc/firewall/allowlist.d/50-project.txt:ro \
             -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
           docker exec fw sudo /usr/local/bin/init-firewall.sh
           docker exec fw bash /tests/firewall/test-firewall.sh
           docker rm -f fw
+      - name: Firewall rejects invalid allowlist entry without touching iptables
+        run: |
+          docker run -d --name fwbad --cap-add NET_ADMIN --cap-add NET_RAW \
+            -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
+          docker exec -u root fwbad bash /tests/firewall/test-invalid-token.sh
+          docker rm -f fwbad

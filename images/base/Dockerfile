@@ -45,7 +45,7 @@ RUN groupadd --gid 1000 agent && useradd --uid 1000 --gid 1000 --create-home --s
     && mkdir -p /workspace /etc/firewall/allowlist.d /usr/local/share/npm-global \
     && chown -R agent:agent /workspace /usr/local/share/npm-global
 
-# Firewall: script + base allowlist (Task 2 fills these in). sudo ONLY for the firewall script.
+# Firewall: init script + base allowlist (*.txt in allowlist.d; project files mount alongside). sudo ONLY for the firewall script.
 COPY init-firewall.sh /usr/local/bin/init-firewall.sh
 COPY allowlist.d/ /etc/firewall/allowlist.d/
 RUN chmod 0755 /usr/local/bin/init-firewall.sh \
