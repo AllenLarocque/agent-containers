@@ -2,3 +2,4 @@
 *.secret
 .env
 .env.tmp
+.env.*

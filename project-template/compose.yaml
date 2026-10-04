@@ -1,5 +1,7 @@
 # One compose project per SpaDES project. Copy this folder into the project root.
 # Image: copy a digest from agent-containers/digests.md, then run ./check-digest. Secrets: run ./up (never plain compose).
+# Any edit to this file (or up, resolve-secrets, check-digest, project.env, .pre-commit-config.yaml,
+# .devcontainer/, .git/hooks/) needs `./up --adopt` after review: the launcher refuses changed files.
 # PROJECT / COMPOSE_PROJECT_NAME come from the gitignored .env that ./resolve-secrets writes (read by compose AND VS Code).
 name: ${PROJECT:-project-template}
 services:
@@ -17,6 +19,18 @@ services:
       CLAUDE_CONFIG_DIR: /home/agent/.claude
     volumes:
       - ./:/workspace
+      # Files the HOST reads or executes (./up, VS Code, compose, git), overlaid READ-ONLY on the rw
+      # workspace: the agent cannot edit, rename or delete them (a mount point cannot be unlinked).
+      # ./up and resolve-secrets also verify them against the owner-adopted hashes before every start.
+      - {type: bind, source: ./compose.yaml, target: /workspace/compose.yaml, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: ./up, target: /workspace/up, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: ./resolve-secrets, target: /workspace/resolve-secrets, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: ./check-digest, target: /workspace/check-digest, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: ./project.env, target: /workspace/project.env, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: ./.env, target: /workspace/.env, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: ./.pre-commit-config.yaml, target: /workspace/.pre-commit-config.yaml, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: ./.devcontainer, target: /workspace/.devcontainer, read_only: true, bind: {create_host_path: false}}
+      - {type: bind, source: ./.git/hooks, target: /workspace/.git/hooks, read_only: true, bind: {create_host_path: false}}
       - claude-config:/home/agent/.claude
       - require-cache:/home/agent/.cache/R/Require
       - rlib:/home/agent/.local/share/R     # setupProject standAlone library: persists across ./up
