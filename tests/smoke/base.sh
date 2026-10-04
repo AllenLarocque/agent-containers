@@ -26,6 +26,10 @@ check "claude 2.1.289"                 bash -c 'claude --version | grep -qE "^2\
 check "firewall script present"        test -x /usr/local/bin/init-firewall.sh
 check "ip6tables present"             command -v ip6tables
 check "allowlist dir present"          test -d /etc/firewall/allowlist.d
+check "allowlist dir root-owned 755"   bash -c '[ "$(stat -c %U:%a /etc/firewall/allowlist.d)" = root:755 ]'
+check "dnsmasq system user exists"     bash -c 'u=$(id -u dnsmasq) && [ "$u" -ne 0 ] && [ "$u" -ne 1000 ] && [ "$u" -lt 1000 ]'
+check "conntrack present"              command -v conntrack
+check "setpriv present"                command -v setpriv
 check "sudo limited to firewall"       bash -c 'sudo -n -l | grep -q "/usr/local/bin/init-firewall.sh"'
 
 check "PE/AI on disk at pinned commit" bash -c 'git -C /opt/reference/pe-ai rev-parse HEAD | grep -q "^e7ae689751316dfe742f31b32d0d659accd0cc41$"'

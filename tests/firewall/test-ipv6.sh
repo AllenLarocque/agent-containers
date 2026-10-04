@@ -11,13 +11,20 @@ else bad "no IPv6 address on this network - the IPv6 path is NOT being exercised
 for ch in INPUT FORWARD OUTPUT; do
   ip6tables -S "$ch" 2>&1 | grep -qx -- "-P $ch DROP" && ok "ip6tables policy $ch DROP" || bad "ip6tables policy $ch is not DROP"
 done
+# EXACT ruleset: no IPv6 allowlist, so ANY rule beyond these (or a broadened one) is a failure.
+expect=$(cat <<'EOF2'
+-P INPUT DROP
+-P FORWARD DROP
+-P OUTPUT DROP
+-A INPUT -i lo -j ACCEPT
+-A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+-A OUTPUT -o lo -j ACCEPT
+-A OUTPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+EOF2
+)
 rules=$(ip6tables -S 2>&1)
-echo "$rules" | grep -q -- '-A INPUT -i lo -j ACCEPT'  && ok "ip6 INPUT allows lo"  || bad "ip6 INPUT lo accept missing"
-echo "$rules" | grep -q -- '-A OUTPUT -o lo -j ACCEPT' && ok "ip6 OUTPUT allows lo" || bad "ip6 OUTPUT lo accept missing"
-echo "$rules" | grep -Eq -- '-A OUTPUT .*ESTABLISHED,RELATED.*-j ACCEPT|-A OUTPUT .*RELATED,ESTABLISHED.*-j ACCEPT' && ok "ip6 OUTPUT allows ESTABLISHED,RELATED" || bad "ip6 OUTPUT established accept missing"
-# No IPv6 allowlist: the only ACCEPTs may be lo and established/related.
-extra=$(echo "$rules" | grep -- '-j ACCEPT' | grep -v -- '-[io] lo ' | grep -v -- 'ESTABLISHED' | grep -v -- 'RELATED' || true)
-[ -z "$extra" ] && ok "no other ip6 ACCEPT rules" || { bad "unexpected ip6 ACCEPT rules: $extra"; }
+if [ "$rules" = "$expect" ]; then ok "ip6tables -S equals the expected snapshot"
+else bad "ip6tables -S differs from the expected snapshot (- expected, + actual):"; diff <(echo "$expect") <(echo "$rules") | sed 's/^/        /'; fi
 if curl -6 --connect-timeout 5 -s https://www.google.com >/dev/null 2>&1; then bad "curl -6 reached https://www.google.com"; else ok "curl -6 blocked"; fi
 if curl -6 --connect-timeout 5 -s 'https://[2606:4700:4700::1111]/' >/dev/null 2>&1; then bad "curl -6 reached a literal IPv6 address"; else ok "curl -6 literal address blocked"; fi
 [ "$fail" -eq 0 ] && echo "IPV6: ALL PASSED" || { echo "IPV6: FAILURES"; exit 1; }

@@ -19,19 +19,49 @@ jobs:
           # setupProject's project library lives under ~/.local/share/R; a fresh named volume must inherit agent ownership.
           docker run --rm -v rlib-fresh:/home/agent/.local/share/R -v reqcache-fresh:/home/agent/.cache/R/Require \
             -u 1000:1000 spades-base:ci bash -c 'touch /home/agent/.local/share/R/w && touch /home/agent/.cache/R/Require/w && echo "volumes writable"'
-      - name: Firewall test (base + project allowlist merge + parsing)
+      - name: Firewall IPv6 classifier unit test (no NET_ADMIN, sources the shipped script)
+        if: always()
+        run: docker run --rm -v "$PWD/tests:/tests:ro" spades-base:ci bash /tests/firewall/test-v6-classifier.sh
+      - name: Firewall test (default bridge; base + project allowlist merge + parsing; root + agent)
+        if: always()
         run: |
           # 40-extra: last line has NO trailing newline (boundary with 50-project.txt)
           printf 'www.python.org' > /tmp/40-extra.txt
           # 50-project: CRLF first line, inline comment, blank, comment-only, last line w/o newline
           printf 'www.r-project.org\r\ncran.r-project.org  # inline comment\n\n# comment only\nwww.mozilla.org' > /tmp/50-project.txt
+          # A NON-allowlisted host that really listens on TCP 22, proven reachable from the runner,
+          # so a block inside the container is the firewall (not a dead port).
+          SSH_PROBE_IP=$(getent ahostsv4 gitlab.com | awk 'NR==1{print $1}')
+          timeout 8 bash -c "</dev/tcp/$SSH_PROBE_IP/22" && echo "runner reaches $SSH_PROBE_IP:22"
           docker run -d --name fw --cap-add NET_ADMIN --cap-add NET_RAW \
             -v /tmp/40-extra.txt:/etc/firewall/allowlist.d/40-extra.txt:ro \
             -v /tmp/50-project.txt:/etc/firewall/allowlist.d/50-project.txt:ro \
             -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
+          UP=$(docker exec fw awk '/^nameserver/{print $2; exit}' /etc/resolv.conf); echo "original resolver: $UP"
           docker exec fw sudo /usr/local/bin/init-firewall.sh
-          docker exec -u root fw bash /tests/firewall/test-firewall.sh
+          docker exec -u root -e EXPECT_UPSTREAM="$UP" fw bash /tests/firewall/test-firewall.sh
+          docker exec -u agent -e EXPECT_UPSTREAM="$UP" -e SSH_PROBE_IP="$SSH_PROBE_IP" fw bash /tests/firewall/test-agent-egress.sh
           docker rm -f fw
+      - name: Firewall on a compose-like network (Docker DNS 127.0.0.11) + idempotent re-run
+        if: always()
+        run: |
+          printf 'www.python.org' > /tmp/40-extra.txt
+          printf 'www.r-project.org\r\ncran.r-project.org  # inline comment\n\n# comment only\nwww.mozilla.org' > /tmp/50-project.txt
+          docker network create fwnet
+          docker run -d --name fwn --network fwnet --cap-add NET_ADMIN --cap-add NET_RAW \
+            -v /tmp/40-extra.txt:/etc/firewall/allowlist.d/40-extra.txt:ro \
+            -v /tmp/50-project.txt:/etc/firewall/allowlist.d/50-project.txt:ro \
+            -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
+          UP=$(docker exec fwn awk '/^nameserver/{print $2; exit}' /etc/resolv.conf); echo "original resolver: $UP"
+          # Non-vacuity: before the firewall, the agent CAN use Docker's resolver directly.
+          docker exec -u agent fwn dig @127.0.0.11 example.com A +short +time=3 +tries=2 | grep -E '^[0-9.]+$'
+          docker exec fwn sudo /usr/local/bin/init-firewall.sh
+          # Second run: resolv.conf now says 127.0.0.1; the original resolver must come from /run/firewall-upstream.
+          docker exec fwn sudo /usr/local/bin/init-firewall.sh
+          docker exec -u root -e EXPECT_UPSTREAM="$UP" fwn bash /tests/firewall/test-firewall.sh
+          docker exec -u agent -e EXPECT_UPSTREAM="$UP" -e REQUIRE_DOCKER_DNS=1 fwn bash /tests/firewall/test-agent-egress.sh
+          docker rm -f fwn
+          docker network rm fwnet
       - name: Firewall rejects invalid allowlist entry without touching iptables
         run: |
           docker run -d --name fwbad --cap-add NET_ADMIN --cap-add NET_RAW \
@@ -55,6 +85,13 @@ jobs:
             -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
           docker exec -u root fwdead bash /tests/firewall/test-fail-closed.sh
           docker rm -f fwdead
+      - name: Firewall fails closed when setup breaks LATE (dnsmasq cannot bind, after the meta fetch)
+        if: always()
+        run: |
+          docker run -d --name fwlate --cap-add NET_ADMIN --cap-add NET_RAW \
+            -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
+          docker exec -u root fwlate bash /tests/firewall/test-late-failure.sh
+          docker rm -f fwlate
       # Child images use plain `docker build`: the buildx container driver cannot see locally loaded images.
       - name: Build gis
         run: docker build --build-arg BASE_IMAGE=spades-base:ci -t spades-gis:ci images/gis
@@ -75,8 +112,9 @@ jobs:
           docker exec fwbio sudo /usr/local/bin/init-firewall.sh | tee /tmp/fwbio.log
           grep -q 'Allowlist: .* 50-project.txt' /tmp/fwbio.log
           docker rm -f fwbio
-      - name: Template test
-        run: bash tests/template/test-template.sh
+      - name: Template test (static + behavioural against the built base image)
+        if: always()
+        run: TEMPLATE_IMAGE=spades-base:ci bash tests/template/test-template.sh
       - name: Acceptance (setupProject behind firewall, plain Rscript)
         run: |
           # CI-ONLY: agent (UID 1000) must be able to write .Rprofile and the project library in the

@@ -22,4 +22,7 @@ try "url"            'https://bad.example/x\n'
 try "internal space" 'foo bar\n'
 try "wildcard"       '*.bad.example\n'
 try "port"           'bad.example:443\n'
+# A CR is only a line-ending artefact at the END of a line; mid-line it must not be silently deleted
+# ("foo\\rbar.example" would otherwise become the different, valid domain foobar.example).
+try "mid-line CR"    'foo\rbar.example\n'
 [ "$fail" -eq 0 ] && echo "INVALID-TOKEN: ALL PASSED" || { echo "INVALID-TOKEN: FAILURES"; exit 1; }
