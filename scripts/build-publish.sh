@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build + push spades-base then spades-gis (gis FROM base by REGISTRY digest), then render digests.md.
+# Build + push spades-base then spades-gis and spades-bio (children FROM base by REGISTRY digest), then render digests.md.
 # Used by both the publish workflow (REGISTRY=ghcr.io/allenlarocque) and the CI dry-run
 # (REGISTRY=localhost:5000/allenlarocque), so the dry-run exercises the exact same logic.
 # Only the dated tag is pushed during builds; both images are smoke-tested BY DIGEST, and only then
@@ -27,17 +27,24 @@ docker buildx build --push --build-arg "BASE_IMAGE=$registry/spades-base@$base_d
 gis_digest=$(digest_of "$registry/spades-gis:$tag")
 [[ $gis_digest =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "bad gis digest: '$gis_digest'" >&2; exit 1; }
 
+docker buildx build --push --build-arg "BASE_IMAGE=$registry/spades-base@$base_digest" \
+  -t "$registry/spades-bio:$tag" "$here/images/bio"
+bio_digest=$(digest_of "$registry/spades-bio:$tag")
+[[ $bio_digest =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "bad bio digest: '$bio_digest'" >&2; exit 1; }
+
 # Smoke-test exactly what was pushed, pulled by digest (also proves pull-by-digest resolves).
-for img in base gis; do
-  d=$base_digest; [[ $img == gis ]] && d=$gis_digest
+for img in base gis bio; do
+  case $img in base) d=$base_digest;; gis) d=$gis_digest;; bio) d=$bio_digest;; esac
   docker run --rm -v "$here/tests:/tests:ro" "$registry/spades-$img@$d" bash "/tests/smoke/$img.sh"
 done
 
-# Promote latest only after both built and smoke-passed.
+# Promote latest only after all built and smoke-passed.
 docker buildx imagetools create -t "$registry/spades-base:latest" "$registry/spades-base@$base_digest"
 docker buildx imagetools create -t "$registry/spades-gis:latest" "$registry/spades-gis@$gis_digest"
+docker buildx imagetools create -t "$registry/spades-bio:latest" "$registry/spades-bio@$bio_digest"
 [[ $(digest_of "$registry/spades-base:latest") == "$base_digest" ]] || { echo "latest != base digest" >&2; exit 1; }
 [[ $(digest_of "$registry/spades-gis:latest") == "$gis_digest" ]] || { echo "latest != gis digest" >&2; exit 1; }
+[[ $(digest_of "$registry/spades-bio:latest") == "$bio_digest" ]] || { echo "latest != bio digest" >&2; exit 1; }
 
-"$here/scripts/render-digests.sh" "$tag" "$base_digest" "$gis_digest" > "$out"
+"$here/scripts/render-digests.sh" "$tag" "$base_digest" "$gis_digest" "$bio_digest" > "$out"
 echo "--- $out ---"; cat "$out"
