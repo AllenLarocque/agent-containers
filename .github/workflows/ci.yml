@@ -17,22 +17,14 @@ jobs:
           # 40-extra: last line has NO trailing newline (boundary with 50-project.txt)
           printf 'www.python.org' > /tmp/40-extra.txt
           # 50-project: CRLF first line, inline comment, blank, comment-only, last line w/o newline
-          printf 'www.r-project.org\r\ncran.r-project.org  # inline comment\n\n# comment only\nwww.gnu.org' > /tmp/50-project.txt
+          printf 'www.r-project.org\r\ncran.r-project.org  # inline comment\n\n# comment only\nwww.mozilla.org' > /tmp/50-project.txt
           docker run -d --name fw --cap-add NET_ADMIN --cap-add NET_RAW \
             -v /tmp/40-extra.txt:/etc/firewall/allowlist.d/40-extra.txt:ro \
             -v /tmp/50-project.txt:/etc/firewall/allowlist.d/50-project.txt:ro \
             -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
           docker exec fw sudo /usr/local/bin/init-firewall.sh
-          rc=0; docker exec fw bash /tests/firewall/test-firewall.sh || rc=$?   # TEMP-DIAG
-          if [ $rc -ne 0 ]; then
-            echo "::group::root diag"
-            docker exec -u root fw ipset list allowed-domains | grep -vE '^(Name|Type|Revision|Header|Size|References|Number|Members|Memory)' | sort | tr '\n' ' '
-            docker exec -u root fw iptables -L OUTPUT -n -v
-            docker exec -u root fw sh -c 'cat /etc/resolv.conf; cat /etc/dnsmasq.d/allowlist.conf | cut -c1-300; pgrep -a dnsmasq; dig www.gnu.org A +noall +answer; ipset test allowed-domains $(dig +short www.gnu.org A | head -1)'
-            echo "::endgroup::"
-          fi
+          docker exec fw bash /tests/firewall/test-firewall.sh
           docker rm -f fw
-          exit $rc
       - name: Firewall rejects invalid allowlist entry without touching iptables
         run: |
           docker run -d --name fwbad --cap-add NET_ADMIN --cap-add NET_RAW \

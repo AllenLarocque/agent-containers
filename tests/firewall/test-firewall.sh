@@ -3,15 +3,7 @@
 set -uo pipefail
 fail=0
 blocked(){ if curl --connect-timeout 5 -s "$1" >/dev/null 2>&1; then echo "FAIL: $1 reachable, should be BLOCKED"; fail=1; else echo "OK:   $1 blocked"; fi; }
-# TEMP-DIAG
-diag(){ h=${1#https://}; h=${h%%/*}; echo "::group::DIAG $h"; date -u +%T.%N
-  echo "--- dig A"; dig "$h" A @127.0.0.1 +noall +answer +stats
-  echo "--- dig AAAA"; dig "$h" AAAA @127.0.0.1 +noall +answer
-  echo "--- getent ahosts"; getent ahosts "$h"
-  touch /tmp/fw-failed
-  echo "--- curl -v (retry now)"; curl -v --connect-timeout 10 -sS -o /dev/null "$1" 2>&1 | head -60; echo "curl rc=${PIPESTATUS[0]}"
-  echo "::endgroup::"; }
-allowed(){ out=$(curl -v --connect-timeout 10 -sSf -o /dev/null "$1" 2>&1); rc=$?; if [ $rc -eq 0 ]; then echo "OK:   $1 reachable"; else echo "FAIL: $1 blocked, should be ALLOWED (curl rc=$rc)"; echo "$out" | head -40; diag "$1"; fail=1; fi; }
+allowed(){ if curl --connect-timeout 10 -sSf "$1" >/dev/null 2>&1; then echo "OK:   $1 reachable"; else echo "FAIL: $1 blocked, should be ALLOWED"; fail=1; fi; }
 blocked https://example.com
 allowed https://api.github.com/zen
 allowed https://cloud.r-project.org/src/contrib/PACKAGES.gz
@@ -26,5 +18,5 @@ allowed https://www.bioconductor.org/
 allowed https://www.python.org/
 allowed https://www.r-project.org/
 allowed https://cran.r-project.org/
-allowed https://www.gnu.org/
+allowed https://www.mozilla.org/
 [ "$fail" -eq 0 ] && echo "FIREWALL: ALL PASSED" || { echo "FIREWALL: FAILURES"; exit 1; }

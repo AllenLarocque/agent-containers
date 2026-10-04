@@ -2,23 +2,24 @@ name: tmp-flake
 on:
   pull_request:
 jobs:
-  control:
+  loop:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: host, no firewall at all
+      - uses: docker/setup-buildx-action@v3
+      - run: docker buildx build --load -t spades-base:ci images/base
+      - name: loop real test, new fixture
         run: |
-          for i in $(seq 1 20); do
-            curl -4 -sS -o /dev/null --connect-timeout 10 -w "host $i rc-ok connect=%{time_connect}s total=%{time_total}s code=%{http_code} ip=%{remote_ip}\n" https://www.gnu.org/ 2>&1 || echo "host $i FAILED rc=$?"
-            sleep 2
+          printf 'www.python.org' > /tmp/40-extra.txt
+          printf 'www.r-project.org\r\ncran.r-project.org  # inline comment\n\n# comment only\nwww.mozilla.org' > /tmp/50-project.txt
+          bad=0
+          for i in $(seq 1 25); do
+            docker run -d --name fw$i --cap-add NET_ADMIN --cap-add NET_RAW \
+              -v /tmp/40-extra.txt:/etc/firewall/allowlist.d/40-extra.txt:ro \
+              -v /tmp/50-project.txt:/etc/firewall/allowlist.d/50-project.txt:ro \
+              -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity >/dev/null
+            docker exec fw$i sudo /usr/local/bin/init-firewall.sh >/dev/null 2>&1 || echo "init failed"
+            docker exec fw$i bash /tests/firewall/test-firewall.sh | grep -E "FAIL|ALL PASSED" || bad=$((bad+1))
+            docker rm -f fw$i >/dev/null
           done
-      - name: host, other hosts same way (control for runner egress)
-        run: |
-          for h in www.python.org www.r-project.org; do for i in 1 2 3 4 5; do
-            curl -4 -sS -o /dev/null --connect-timeout 10 -w "$h connect=%{time_connect}s code=%{http_code}\n" https://$h/ 2>&1 || echo "$h FAILED"
-          done; done
-      - name: tcp probe gnu.org 443 vs 80 with timing
-        run: |
-          for i in $(seq 1 10); do
-            s=$(date +%s.%N); timeout 6 bash -c 'exec 3<>/dev/tcp/209.51.188.116/443' && r=ok || r=fail; echo "443 $i $r $(echo "$(date +%s.%N)-$s"|bc)s"
-          done
+          echo "FAILED ITERATIONS: $bad"
