@@ -152,7 +152,10 @@ ipset create allowed-domains hash:net
 
 # Fetch GitHub meta information and aggregate + add their IP ranges
 echo "Fetching GitHub IP ranges..."
-gh_ranges=$(curl -sS --connect-timeout 10 --max-time 30 https://api.github.com/meta)
+# --resolve pins curl to exactly the IPs allowed above (api.github.com is multi-A/rotating, so a
+# fresh lookup inside curl could pick an IP the temporary rules do not permit).
+GH_RESOLVE="api.github.com:443:$(IFS=,; echo "${SETUP_GH_IPS[*]}")"
+gh_ranges=$(curl -sS --connect-timeout 10 --max-time 30 --resolve "$GH_RESOLVE" https://api.github.com/meta)
 if [ -z "$gh_ranges" ]; then
     echo "ERROR: Failed to fetch GitHub IP ranges"
     exit 1
