@@ -2,6 +2,19 @@
 # Default-deny egress firewall. GitHub ranges from api.github.com/meta; every other allowed
 # domain is authorised lazily by dnsmasq inserting each resolved IP into the ipset (CDN IPs rotate).
 # Domains come from /etc/firewall/allowlist.d/*.txt (base baked in; project mounted).
+#
+# FAIL-CLOSED INVARIANT: from the first mutation onward, EVERY intermediate state is deny-by-default.
+#   0. Allowlist validation and the ip6tables step run first. A bad token exits having changed
+#      nothing; an ip6tables failure exits with IPv4 still untouched; once IPv6 is DROP it stays so.
+#   1. IPv4 INPUT/FORWARD/OUTPUT policies are set to DROP BEFORE the first flush. Flushing a DROP
+#      chain only removes the ACCEPTs, so there is never a moment with an ACCEPT policy.
+#   2. While building, only what setup itself needs is allowed: loopback, ESTABLISHED/RELATED,
+#      DNS (UDP any, TCP only to $UPSTREAM_DNS), and HTTPS to api.github.com's resolved IPs (for
+#      the meta fetch; GitHub ranges are in the final allowlist anyway, and the temporary rules are
+#      removed once the ipset is populated).
+#   3. Therefore ANY failure (meta fetch, dnsmasq, HOST_IP, ...) under set -e leaves the container
+#      closed, never open. The final rules only ADD allowances (host network, ipset match) and the
+#      closing REJECT. Failure BEFORE step 1 leaves the pre-existing state untouched (never half-set).
 set -euo pipefail
 IFS=$'\n\t'
 ALLOWLIST_DIR=/etc/firewall/allowlist.d
@@ -80,6 +93,11 @@ echo "Upstream DNS detected as: $UPSTREAM_DNS"
 # 1. Extract Docker DNS info BEFORE any flushing
 DOCKER_DNS_RULES=$(iptables-save -t nat | grep "127\.0\.0\.11" || true)
 
+# Default-DENY first (invariant step 1), THEN flush: no window with an ACCEPT policy.
+iptables -P INPUT DROP
+iptables -P FORWARD DROP
+iptables -P OUTPUT DROP
+
 # Flush existing rules and delete existing ipsets
 iptables -F
 iptables -X
@@ -114,13 +132,27 @@ iptables -A INPUT -p tcp --sport 22 -m state --state ESTABLISHED -j ACCEPT
 # Allow localhost
 iptables -A INPUT -i lo -j ACCEPT
 iptables -A OUTPUT -o lo -j ACCEPT
+# Replies to anything setup itself initiated (needed for the meta fetch)
+iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+# Temporary: HTTPS to api.github.com's current IPv4s so the meta fetch can run under default-deny.
+# Resolved through the still-intact upstream resolver (UDP 53 allowed above). Empty => abort (closed).
+mapfile -t SETUP_GH_IPS < <(getent ahostsv4 api.github.com | awk '{print $1}' | sort -u)
+if [ "${#SETUP_GH_IPS[@]}" -eq 0 ]; then
+    echo "ERROR: could not resolve api.github.com (firewall left closed)"
+    exit 1
+fi
+for ip in "${SETUP_GH_IPS[@]}"; do
+    iptables -A OUTPUT -p tcp -d "$ip" --dport 443 -j ACCEPT
+done
 
 # Create ipset with CIDR support
 ipset create allowed-domains hash:net
 
 # Fetch GitHub meta information and aggregate + add their IP ranges
 echo "Fetching GitHub IP ranges..."
-gh_ranges=$(curl -s https://api.github.com/meta)
+gh_ranges=$(curl -sS --connect-timeout 10 --max-time 30 https://api.github.com/meta)
 if [ -z "$gh_ranges" ]; then
     echo "ERROR: Failed to fetch GitHub IP ranges"
     exit 1
@@ -140,6 +172,11 @@ while read -r cidr; do
     echo "Adding GitHub range $cidr"
     ipset add allowed-domains "$cidr"
 done < <(echo "$gh_ranges" | jq -r '(.web + .api + .git)[]' | aggregate -q)
+
+# Meta ranges are in the ipset now: drop the temporary setup-only rules.
+for ip in "${SETUP_GH_IPS[@]}"; do
+    iptables -D OUTPUT -p tcp -d "$ip" --dport 443 -j ACCEPT
+done
 
 # Resolve all non-GitHub allowed domains dynamically via a local dnsmasq
 # resolver. dnsmasq inserts exactly the IPs each lookup returns into the
@@ -190,14 +227,7 @@ echo "Host network detected as: $HOST_NETWORK"
 iptables -A INPUT -s "$HOST_NETWORK" -j ACCEPT
 iptables -A OUTPUT -d "$HOST_NETWORK" -j ACCEPT
 
-# Set default policies to DROP first
-iptables -P INPUT DROP
-iptables -P FORWARD DROP
-iptables -P OUTPUT DROP
-
-# First allow established connections for already approved traffic
-iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+# (Default policies are already DROP and ESTABLISHED,RELATED already allowed: see the invariant.)
 
 # Then allow only specific outbound traffic to allowed domains
 iptables -A OUTPUT -m set --match-set allowed-domains dst -j ACCEPT
@@ -207,6 +237,12 @@ iptables -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
 
 echo "Firewall configuration complete"
 echo "Verifying firewall rules..."
+for ch in INPUT FORWARD OUTPUT; do
+    if ! iptables -S "$ch" | grep -qx -- "-P $ch DROP"; then
+        echo "ERROR: Firewall verification failed - iptables $ch policy is not DROP"
+        exit 1
+    fi
+done
 if curl --connect-timeout 5 https://example.com >/dev/null 2>&1; then
     echo "ERROR: Firewall verification failed - was able to reach https://example.com"
     exit 1
