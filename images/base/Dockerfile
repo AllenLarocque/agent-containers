@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libgdal-dev gdal-bin libgeos-dev libproj-dev libudunits2-dev libsqlite3-dev \
       libcurl4-openssl-dev libssl-dev libxml2-dev \
       libfontconfig1-dev libharfbuzz-dev libfribidi-dev libfreetype6-dev \
-      libpng-dev libtiff5-dev libjpeg-dev cmake \
+      libpng-dev libtiff5-dev libjpeg-dev cmake libmagick++-dev \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # R bootstrap ONLY: enough to run setupProject(). Everything else is provisioned per project
