@@ -54,3 +54,16 @@ jobs:
         run: docker run --rm -v "$PWD/tests:/tests:ro" spades-gis:ci bash /tests/smoke/gis.sh
       - name: Template test
         run: bash tests/template/test-template.sh
+      - name: Acceptance (setupProject behind firewall, plain Rscript)
+        run: |
+          # agent (UID 1000) must be able to write .Rprofile and the project library here
+          mkdir -p tests/acceptance/minimal-project
+          sudo chown -R 1000:1000 tests/acceptance/minimal-project
+          docker run -d --name acc --cap-add NET_ADMIN --cap-add NET_RAW \
+            -v "$PWD/tests/acceptance/minimal-project:/workspace" spades-gis:ci sleep infinity
+          docker exec acc sudo /usr/local/bin/init-firewall.sh
+          start=$(date +%s)
+          docker exec -u agent -w /workspace acc Rscript global.R
+          echo "provisioning+run seconds: $(( $(date +%s) - start ))"
+          docker exec -u agent -w /workspace acc Rscript -e 'library(SpaDES.core); cat("second run OK\n")'
+          docker rm -f acc
