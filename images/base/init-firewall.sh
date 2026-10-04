@@ -38,7 +38,31 @@ echo "Allowlist: ${#ALLOWED_DOMAINS[@]} domains from $(printf '%s ' "${ALLOWLIST
 # NOTHING touched; an ip6tables failure here aborts (non-zero) with IPv4 still in its original
 # state; and once this block has run, a later IPv4 failure cannot leave IPv6 open. Policies go to
 # DROP before the flush so there is no window where IPv6 is unfiltered.
-IPV6_STATE=unavailable  # TEMP: ip6tables block removed to prove the IPv6 CI job can go red
+IPV6_STATE=filtered
+v6_unavailable(){ # true only if the kernel genuinely has no usable IPv6 to leak
+  [ ! -e /proc/net/if_inet6 ] && return 0
+  # ip6tables table missing: acceptable only if there is no non-loopback IPv6 address either
+  grep -qE "can't initialize ip6tables table|Table does not exist|Perhaps ip6tables or your kernel needs to be upgraded" <<<"$1" || return 1
+  ! awk '$6!="lo"{f=1} END{exit !f}' /proc/net/if_inet6
+}
+command -v ip6tables >/dev/null || { echo "ERROR: ip6tables not installed - cannot enforce IPv6 default-deny"; exit 1; }
+if v6_err=$(ip6tables -S 2>&1 >/dev/null); then
+  ip6tables -P INPUT DROP
+  ip6tables -P FORWARD DROP
+  ip6tables -P OUTPUT DROP
+  ip6tables -F
+  ip6tables -X
+  ip6tables -A INPUT -i lo -j ACCEPT
+  ip6tables -A OUTPUT -o lo -j ACCEPT
+  ip6tables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+  ip6tables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+  echo "IPv6 default-deny applied (loopback + established only)"
+elif v6_unavailable "$v6_err"; then
+  IPV6_STATE=unavailable
+  echo "IPv6 unavailable in kernel — nothing to filter"
+else
+  echo "ERROR: ip6tables failed, refusing to continue with IPv6 unfiltered: $v6_err"; exit 1
+fi
 
 # Capture the current upstream nameserver BEFORE we rewrite resolv.conf.
 # In Docker this is normally the embedded DNS at 127.0.0.11.
