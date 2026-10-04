@@ -78,14 +78,19 @@ extra_nat=$(iptables -t nat -S | grep -v -- '^-P ' | grep -v -- '^-N DOCKER_OUTP
 grep -qx 'nameserver 127.0.0.1' /etc/resolv.conf && ok "resolv.conf points at dnsmasq" || bad "resolv.conf does not point at 127.0.0.1"
 
 # --- dnsmasq: dedicated user, allowlist-only forwarding (no default server) ---
-# Every dnsmasq process: real, effective, saved and fs uid must all be the dnsmasq uid.
-dpids=$(pgrep -x dnsmasq || true)
-[ -n "$dpids" ] || bad "dnsmasq is not running"
-for p in $dpids; do
-  uids=$(awk '/^Uid:/{print $2,$3,$4,$5}' "/proc/$p/status")
-  echo "        dnsmasq pid $p: Uid $uids | $(grep -E '^(Gid|CapEff)' "/proc/$p/status" | tr '\t\n' '  ') | $(tr '\0' ' ' < "/proc/$p/cmdline")"
+# Every LIVE dnsmasq process: real, effective, saved and fs uid must all be the dnsmasq uid.
+# (Zombies are skipped: dnsmasq's daemonising fork leaves one when PID 1 does not reap, e.g.
+# `sleep infinity` without --init. A zombie holds no sockets and runs no code.)
+live=0
+for p in $(pgrep -x dnsmasq || true); do
+  st=$(awk '/^State:/{print $2}' "/proc/$p/status" 2>/dev/null)
+  uids=$(awk '/^Uid:/{print $2,$3,$4,$5}' "/proc/$p/status" 2>/dev/null)
+  echo "        dnsmasq pid $p: State $st Uid $uids | $(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)"
+  [ "$st" = Z ] && continue
+  live=$((live+1))
   [ "$uids" = "$DUID $DUID $DUID $DUID" ] && ok "dnsmasq pid $p runs as uid $DUID (dnsmasq)" || bad "dnsmasq pid $p has Uid '$uids', want all $DUID"
 done
+[ "$live" -ge 1 ] && ok "$live live dnsmasq process(es)" || bad "no live dnsmasq process"
 conf=/etc/dnsmasq.d/allowlist.conf
 grep -Eq '^server=[^/]' "$conf" && bad "dnsmasq has a default server= line (forwards every name)" || ok "dnsmasq has no default server= line"
 grep -qx "server=/github.com/$EXPECT_UPSTREAM" "$conf" && ok "dnsmasq forwards github.com" || bad "no server=/github.com/ line"
