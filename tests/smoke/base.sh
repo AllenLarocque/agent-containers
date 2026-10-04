@@ -27,4 +27,11 @@ check "firewall script present"        test -x /usr/local/bin/init-firewall.sh
 check "allowlist dir present"          test -d /etc/firewall/allowlist.d
 check "sudo limited to firewall"       bash -c 'sudo -n -l | grep -q "/usr/local/bin/init-firewall.sh"'
 
+check "PE/AI on disk at pinned commit" bash -c 'git -C /opt/reference/pe-ai rev-parse HEAD | grep -q "^e7ae689751316dfe742f31b32d0d659accd0cc41$"'
+check "agent-init present"             test -x /usr/local/bin/agent-init.sh
+check "agent-init succeeds"            bash -c 'CLAUDE_CONFIG_DIR=/tmp/cc /usr/local/bin/agent-init.sh'
+check "PE/AI plugins installed"        bash -c 'jq -e ".plugins | keys | map(select(test(\"@predictiveecology-ai$\"))) | length == 3" /tmp/cc/plugins/installed_plugins.json'
+check "superpowers installed"          bash -c 'jq -e ".plugins | has(\"superpowers@superpowers-marketplace\")" /tmp/cc/plugins/installed_plugins.json'
+check "NO hooks in settings"           bash -c 'jq -e "has(\"hooks\") | not" /tmp/cc/settings.json'
+
 [ "$fail" -eq 0 ] && echo "SMOKE base: ALL PASSED" || { echo "SMOKE base: FAILURES"; exit 1; }
