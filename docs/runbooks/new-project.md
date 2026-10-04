@@ -12,7 +12,7 @@ Prerequisites on the host: Docker, 1Password CLI (`op`), `pre-commit`, and a clo
    cp -r agent-containers/project-template/. <project>/
    ```
 
-   This gives you `compose.yaml`, `project.env`, `allowlist.txt`, `up`, `resolve-secrets`, `check-digest`, `.devcontainer/devcontainer.json`, `.pre-commit-config.yaml`, `.gitignore` and `README.md`.
+   This gives you `.github/CODEOWNERS` (replace the `@OWNER` placeholder with your GitHub username, then commit it; see the machine-user runbook step 2), `compose.yaml`, `project.env`, `allowlist.txt`, `up`, `resolve-secrets`, `check-digest`, `.devcontainer/devcontainer.json`, `.pre-commit-config.yaml`, `.gitignore` and `README.md`.
 2. **Set the image digest.** In `compose.yaml`, replace `REPLACE_WITH_DIGEST_FROM_digests.md` with a digest copied from `agent-containers/digests.md` (the `spades-gis` row, unless you have a reason to use another image). Check it: `./check-digest` prints `check-digest: OK`. `./up` refuses to run until this passes. *Why: pinning by digest means the container never changes underneath you.*
 3. **Set the project name.** In `project.env`, replace `PROJECTNAME` with the project name so the line reads `GH_TOKEN=op://agent-<project>/github-agent/token`. Do not put real secrets in this file: it holds `op://` references only and is committed.
 4. **Run the vault runbook:** [1password-project-vault.md](1password-project-vault.md) (vault, service account, host token).
@@ -27,6 +27,8 @@ Prerequisites on the host: Docker, 1Password CLI (`op`), `pre-commit`, and a clo
     ```bash
     Rscript -e 'SpaDES.project::setupProject(...)'
     ```
+
+12. **Add the required check.** When the project repo's first CI run has completed, **you** (the owner) edit the ruleset (Settings → Rules → Rulesets → `protect-main`) and add `build-test` (or the project's CI job) under Require status checks. It is not selectable before CI has run once. Then re-run the gate verification once (step 10) so the check is covered.
 
 Update later with `./up` (new digest, edited allowlist, changed secret). The full command table is in the template `README.md`.
 

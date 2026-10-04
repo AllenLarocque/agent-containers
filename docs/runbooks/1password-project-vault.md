@@ -16,14 +16,15 @@ The GitHub token goes in as item `github-agent`, field `token` (see [machine-use
 1. 1Password.com (web) → Developer → Directory → **Service Accounts** → New Service Account (under Infrastructure Secrets).
 2. Name: `agent-<project>`.
 3. Vault access: add **only** `agent-<project>`, permission **Read** (read-only).
-4. Create and copy the token. 1Password shows it once.
+4. Create and copy the token. 1Password shows it **once**.
+5. **Immediately** save it as an item in your **Private** vault (for example item `agent-<project> service account`, field `credential`). Only you can read that vault; no service account is given access to it. If you lose the token you must revoke the account and create a new one.
 
 ## 3. Put the token on the host (never in a repo)
 
 Do **not** `export OP_SERVICE_ACCOUNT_TOKEN=...` in a global shell profile: that leaves the token in plaintext on disk and exposes it to every process you start, for every project. Prefer one of:
 
 - **Per-project `direnv`:** a `.envrc` kept **outside the repo** (for example `~/.config/agent-containers/envrc/<project>.envrc`, sourced from a directory-level `.envrc` that is not committed) that sets `OP_SERVICE_ACCOUNT_TOKEN` only when you are in that project. Keep that file mode 600.
-- **Read at use time:** fetch the token from the macOS Keychain, the Windows credential store, or `op` itself (using your own biometric-unlocked session) into the **current shell only**, then run `./up`, for example `export OP_SERVICE_ACCOUNT_TOKEN="$(op read 'op://<your-vault>/<item>/credential')"` where that item lives in your Private vault.
+- **Read at use time:** fetch the token from the macOS Keychain, the Windows credential store, or `op` itself (using your own biometric-unlocked session) into the **current shell only**, then run `./up`, for example `export OP_SERVICE_ACCOUNT_TOKEN="$(op read 'op://Private/agent-<project> service account/credential')"` (the Private-vault item saved in step 2).
 
 `./resolve-secrets` reads `OP_SERVICE_ACCOUNT_TOKEN` from the host environment and stops with an error if it is missing.
 **Warning:** if the wrong project's token is in your environment, `resolve-secrets` either fails (vault not readable) or reads a different vault than you intended. Check the project before `./up`.

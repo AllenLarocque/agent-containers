@@ -1,0 +1,3 @@
+# Replace @OWNER with your GitHub username, then commit. With the ruleset option
+# "Require review from Code Owners", only this account's approval satisfies the gate.
+* @OWNER

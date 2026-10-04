@@ -8,9 +8,10 @@ Copy this folder into a SpaDES project root. The folder name becomes the compose
 
 1. Replace `REPLACE_WITH_DIGEST_FROM_digests.md` in `compose.yaml` with a digest from `agent-containers/digests.md`.
 2. Replace `PROJECTNAME` in `project.env` with the project name (vault `agent-<project>`).
-3. Put this project's `OP_SERVICE_ACCOUNT_TOKEN` in your host environment (never in the repo).
-4. Ensure `~/GitHub/spades.ai` (or `$SPADES_AI_DIR`) exists on the host.
-5. `pre-commit install` once per clone (gitleaks).
+3. Make this project's `OP_SERVICE_ACCOUNT_TOKEN` available in your host shell: a per-project `direnv` `.envrc` kept outside the repo, or `op read` into the current shell at use time. Not a global shell-profile export, and never in the repo (see `docs/runbooks/1password-project-vault.md`).
+4. Replace `@OWNER` in `.github/CODEOWNERS` with your GitHub username.
+5. Ensure `~/GitHub/spades.ai` (or `$SPADES_AI_DIR`) exists on the host.
+6. `pre-commit install` once per clone (gitleaks).
 
 ## Lifecycle
 
@@ -28,7 +29,7 @@ Copy this folder into a SpaDES project root. The folder name becomes the compose
 ### VS Code and `OP_SERVICE_ACCOUNT_TOKEN`
 
 "Reopen in Container" runs `./resolve-secrets` on the host with VS Code's own environment. A VS Code started from the
-dock/Start menu may NOT inherit variables from your shell profile. Either launch it from a shell that has the token
+dock/Start menu may NOT inherit variables from your shell environment. Either launch it from a shell that has the token
 (`code .`), or run `./up` in a terminal first and then attach. If the token is missing, `resolve-secrets` stops with a clear message.
 
 ### Project name

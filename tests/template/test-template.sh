@@ -28,6 +28,7 @@ check "devcontainer does not set PROJECT only for resolve-secrets" \
   bash -c '! grep -q "PROJECT=" .devcontainer/devcontainer.json'
 check "gitignore covers .env.resolved" grep -q "\.env\.resolved" .gitignore
 check "gitignore covers .env"        grep -qx "\.env" .gitignore
+check "CODEOWNERS present with placeholder owner" grep -q "^\* @OWNER" .github/CODEOWNERS
 check "gitleaks pre-commit"          grep -q "gitleaks/gitleaks" .pre-commit-config.yaml
 check "spades.ai mount never auto-created" \
   bash -c 'grep -q "create_host_path: false" compose.yaml'
