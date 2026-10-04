@@ -12,6 +12,11 @@ jobs:
         run: docker buildx build --load -t spades-base:ci images/base
       - name: Smoke base
         run: docker run --rm -v "$PWD/tests:/tests:ro" spades-base:ci bash /tests/smoke/base.sh
+      - name: Fresh named volumes are writable by agent (R library + Require cache)
+        run: |
+          # setupProject's project library lives under ~/.local/share/R; a fresh named volume must inherit agent ownership.
+          docker run --rm -v rlib-fresh:/home/agent/.local/share/R -v reqcache-fresh:/home/agent/.cache/R/Require \
+            -u 1000:1000 spades-base:ci bash -c 'touch /home/agent/.local/share/R/w && touch /home/agent/.cache/R/Require/w && echo "volumes writable"'
       - name: Firewall test (base + project allowlist merge + parsing)
         run: |
           # 40-extra: last line has NO trailing newline (boundary with 50-project.txt)

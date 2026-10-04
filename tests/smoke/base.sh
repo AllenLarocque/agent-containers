@@ -16,13 +16,13 @@ check "terra NOT preinstalled"         Rscript -e 'stopifnot(!requireNamespace("
 check "gdalinfo"                       gdalinfo --version
 check "gdal can write+read a GeoTIFF"  bash -c 'gdal_create -outsize 2 2 -bands 1 -burn 1 -of GTiff /tmp/s.tif && gdalinfo /tmp/s.tif | grep -q "Driver: GTiff"'
 check "geos/proj present"              bash -c 'dpkg -s libgeos-dev libproj-dev libudunits2-dev'
-check "no ubuntugis PPA"               bash -c '! grep -rqi ubuntugis /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null'
+check "no ubuntugis PPA"               bash -c 'f=(/etc/apt/sources.list.d/); [ -f /etc/apt/sources.list ] && f+=(/etc/apt/sources.list); test -d /etc/apt/sources.list.d; set +e; grep -rqi ubuntugis "${f[@]}" >/dev/null 2>&1; test $? -eq 1'
 check "tmux"                           tmux -V
 check "exiftool"                       exiftool -ver
 check "gh"                             gh --version
-check "uv 0.12.19"                     bash -c 'uv --version | grep -q "0.12.19"'
+check "uv 0.12.19"                     bash -c 'uv --version | grep -qE "^uv 0\.12\.19( |$)"'
 check "node 22"                        bash -c 'node --version | grep -q "^v22\."'
-check "claude 2.1.289"                 bash -c 'claude --version | grep -q "2.1.289"'
+check "claude 2.1.289"                 bash -c 'claude --version | grep -qE "^2\.1\.289( |$)"'
 check "firewall script present"        test -x /usr/local/bin/init-firewall.sh
 check "ip6tables present"             command -v ip6tables
 check "allowlist dir present"          test -d /etc/firewall/allowlist.d

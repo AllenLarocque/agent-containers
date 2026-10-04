@@ -80,5 +80,8 @@ J="$(cfg)"
 check "compose project name == $NAME (not project-template)" test "$(jq -r .name <<<"$J")" = "$NAME"
 check "env_file resolved to THIS project's env file" test "$(jq -r .services.agent.environment.STUB_MARK <<<"$J")" = ok
 check "claude volume is claude-$NAME" test "$(jq -r '.volumes["claude-config"].name' <<<"$J")" = "claude-$NAME"
+check "rlib volume is rlib-$NAME" test "$(jq -r '.volumes["rlib"].name' <<<"$J")" = "rlib-$NAME"
+check "rlib mounted at the setupProject library root" \
+  test "$(jq -r '.services.agent.volumes[] | select(.source=="rlib") | .target' <<<"$J")" = "/home/agent/.local/share/R"
 
 [ "$fail" -eq 0 ] && echo "TEMPLATE: ALL PASSED" || { echo "TEMPLATE: FAILURES"; exit 1; }
