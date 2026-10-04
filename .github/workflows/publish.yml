@@ -1,0 +1,36 @@
+name: publish
+on:
+  push:
+    branches: [main]
+    paths: ["images/**", "scripts/build-publish.sh", "scripts/render-digests.sh", ".github/workflows/publish.yml"]
+  schedule:
+    - cron: "17 9 * * 1"        # Mondays: rebuild for OS security patches -> digest PR
+  workflow_dispatch:
+permissions:
+  contents: write
+  packages: write
+  pull-requests: write
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: tag
+        run: echo "tag=$(date -u +%Y.%m.%d)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - name: Build + push base and gis, render digests.md
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: scripts/build-publish.sh ghcr.io/allenlarocque "$TAG" digests.md
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          branch: chore/digests-${{ steps.tag.outputs.tag }}
+          title: "chore: image digests ${{ steps.tag.outputs.tag }}"
+          commit-message: "chore: image digests ${{ steps.tag.outputs.tag }}"
+          add-paths: digests.md
+          body: "Published by the `publish` workflow. Merge, then bump projects when convenient."
