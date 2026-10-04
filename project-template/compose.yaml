@@ -20,7 +20,12 @@ services:
       - claude-config:/home/agent/.claude
       - require-cache:/home/agent/.cache/R/Require
       - rlib:/home/agent/.local/share/R     # setupProject standAlone library: persists across ./up
-      - ./allowlist.txt:/etc/firewall/allowlist.d/50-project.txt:ro
+      - type: bind                         # project allowlist: OWNER-maintained on the host, OUTSIDE the
+        source: ${HOME}/.config/agent-containers/${PROJECT:-project-template}.allowlist   # agent-writable workspace
+        target: /etc/firewall/allowlist.d/50-project.txt
+        read_only: true
+        bind:
+          create_host_path: false          # MUST exist (./resolve-secrets checks): never an empty root-owned dir
       - type: bind                         # personal conventions, live (rw)
         source: ${SPADES_AI_DIR:-${HOME}/GitHub/spades.ai}
         target: /opt/reference/spades.ai

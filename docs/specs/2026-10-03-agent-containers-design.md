@@ -106,7 +106,8 @@ Copied into each project. Four files plus a helper:
     - `require-cache` → Require's package cache, **one shared external volume** across all
       SpaDES projects;
     - `uv-cache` (optional, shared);
-    - `./allowlist.txt` → `/etc/firewall/allowlist.d/project.txt:ro`;
+    - `~/.config/agent-containers/<project>.allowlist` (host, owner-maintained, outside the
+      agent-writable workspace) → `/etc/firewall/allowlist.d/50-project.txt:ro` (amended 2026-10-04);
     - **reserved:** a `memory` mount point (empty until the memory repo exists).
   - Ports, if ever needed, publish on **`127.0.0.1` only**. The compose project name gives one
     group in lazydocker/Dockge.
@@ -114,7 +115,9 @@ Copied into each project. Four files plus a helper:
   `workspaceFolder`), so VS Code's "Reopen in Container" still works.
 - **`project.env`:** **`op://` references only**; committable. Example:
   `GH_TOKEN=op://agent-<project>/github/token`.
-- **`allowlist.txt`:** domains beyond the base list. The base list is CRAN/P3M, PredictiveEcology
+- **`allowlist.txt`:** a seed only (amended 2026-10-04): copied once to
+  `~/.config/agent-containers/<project>.allowlist` on the host, which the firewall reads; edits in the
+  repo have no effect. Domains beyond the base list; SSH to own servers needs an entry too. The base list is CRAN/P3M, PredictiveEcology
   r-universe, Bioconductor, GitHub (+ GHCR), Anthropic, and the npm registry for the CLI.
 - **`up`** (helper): `op run --env-file project.env -- docker compose up -d --force-recreate`.
 
@@ -124,7 +127,7 @@ Copied into each project. Four files plus a helper:
 |---|---|
 | New project | copy the template; create vault `agent-<project>` + its service account + scoped GitHub token; `./up` |
 | Upgrade the image | bump the digest in `compose.yaml` (from `digests.md`); `./up` |
-| Change the allowlist | edit `allowlist.txt`; restart the container |
+| Change the allowlist | edit `~/.config/agent-containers/<project>.allowlist` on the host; `./up` |
 | Change a secret | edit it in 1Password; `./up` (env is fixed at container creation) |
 
 ⚠️ **Memory limits vs. memory gates:** with `mem_limit` set, `/proc/meminfo` inside the container

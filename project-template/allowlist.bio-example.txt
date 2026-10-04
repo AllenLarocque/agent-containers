@@ -1,4 +1,4 @@
-# Example allowlist for an amplicon (spades-bio) project: copy to your project's allowlist.txt.
+# Example allowlist for an amplicon (spades-bio) project: copy to ~/.config/agent-containers/<project>.allowlist on the host.
 # Domains only, one per line; a base domain also matches its subdomains.
 # Hosts and comments carried over from the SpaDES dev-environment init-firewall.sh.
 
