@@ -44,6 +44,10 @@ v6_unavailable(){
 [[ "${BASH_SOURCE[0]}" != "$0" ]] && return 0
 
 set -euo pipefail
+# Pin root's environment (sudo resets most of it; this does not depend on that): only system
+# binaries, root's own HOME, no curl/dig rc files (curl -q, dig -r below).
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin HOME=/root
+unset CURL_HOME
 IFS=$'\n\t'
 ALLOWLIST_DIR=/etc/firewall/allowlist.d
 UPSTREAM_FILE=/run/firewall-upstream
@@ -131,11 +135,19 @@ cleanup_on_failure(){
 }
 trap cleanup_on_failure EXIT
 
-# IPv6: default-DENY, no allowlist (tools fall back to IPv4).
+# Default-DENY policies for BOTH families before EITHER flush (OUTPUT first in each), so from the
+# first mutation on neither family is ever open, even on the very first run.
 if [ "$IPV6_STATE" = filtered ]; then
   ip6tables -P OUTPUT DROP
   ip6tables -P INPUT DROP
   ip6tables -P FORWARD DROP
+fi
+iptables -P OUTPUT DROP
+iptables -P INPUT DROP
+iptables -P FORWARD DROP
+
+# IPv6: no allowlist (tools fall back to IPv4).
+if [ "$IPV6_STATE" = filtered ]; then
   ip6tables -F
   ip6tables -X
   ip6tables -A INPUT -i lo -j ACCEPT
@@ -147,10 +159,6 @@ else
   echo "IPv6 unavailable in kernel — nothing to filter"
 fi
 
-# IPv4: default-DENY first, THEN flush.
-iptables -P OUTPUT DROP
-iptables -P INPUT DROP
-iptables -P FORWARD DROP
 iptables -F
 iptables -X
 iptables -t nat -F
@@ -194,20 +202,21 @@ iptables -A OUTPUT -d "$UPSTREAM_DNS" -p tcp --dport 53 -m owner --uid-owner "$D
 # Temporary: HTTPS to api.github.com's current IPv4s so the meta fetch can run under default-deny.
 # Resolved with the dnsmasq uid (the only uid with upstream DNS), straight at the original resolver.
 mapfile -t SETUP_GH_IPS < <(setpriv --reuid="$DNSMASQ_UID" --regid="$DNSMASQ_GID" --clear-groups \
-  dig +short +time=3 +tries=2 A api.github.com @"$UPSTREAM_DNS" 2>/dev/null | grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' | sort -u || true)
+  dig -r +short +time=3 +tries=2 A api.github.com @"$UPSTREAM_DNS" 2>/dev/null | grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' | sort -u || true)
 if [ "${#SETUP_GH_IPS[@]}" -eq 0 ]; then
   echo "ERROR: could not resolve api.github.com (firewall left closed)"; exit 1
 fi
 for ip in "${SETUP_GH_IPS[@]}"; do
   iptables -A OUTPUT -p tcp -d "$ip" --dport 443 -j ACCEPT
 done
+echo "Temporary setup rules: HTTPS to api.github.com at $(printf '%s ' "${SETUP_GH_IPS[@]}")"
 
 ipset create allowed-domains hash:net
 
 echo "Fetching GitHub IP ranges..."
 # --resolve pins curl to exactly the IPs allowed above.
 GH_RESOLVE="api.github.com:443:$(IFS=,; echo "${SETUP_GH_IPS[*]}")"
-gh_ranges=$(curl -sS --connect-timeout 10 --max-time 30 --resolve "$GH_RESOLVE" https://api.github.com/meta)
+gh_ranges=$(curl -q -sS --connect-timeout 10 --max-time 30 --resolve "$GH_RESOLVE" https://api.github.com/meta)
 if [ -z "$gh_ranges" ]; then
   echo "ERROR: Failed to fetch GitHub IP ranges"; exit 1
 fi
@@ -216,6 +225,7 @@ if ! echo "$gh_ranges" | jq -e '.web and .api and .git' >/dev/null; then
 fi
 
 echo "Processing GitHub IPs..."
+added=0
 while read -r cidr; do
   if [[ ! "$cidr" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})/([0-9]{1,2})$ ]]; then
     echo "ERROR: Invalid CIDR range from GitHub meta: $cidr"; exit 1
@@ -229,7 +239,13 @@ while read -r cidr; do
   fi
   echo "Adding GitHub range $cidr"
   ipset add allowed-domains "$cidr"
+  added=$((added+1))
 done < <(echo "$gh_ranges" | jq -r '(.web + .api + .git)[]' | aggregate -q)
+# A jq/aggregate failure inside the process substitution would otherwise pass silently.
+if [ "$added" -eq 0 ]; then
+  echo "ERROR: no GitHub IP ranges were added from api.github.com/meta"; exit 1
+fi
+echo "Added $added GitHub range(s)"
 
 # Meta ranges are in the ipset now: drop the temporary setup-only rules.
 for ip in "${SETUP_GH_IPS[@]}"; do
@@ -246,8 +262,9 @@ mkdir -p /etc/dnsmasq.d
   echo "user=dnsmasq"
   echo "listen-address=127.0.0.1"
   echo "bind-interfaces"
+  # One line per domain: a single joined ipset= line overflows dnsmasq's config line limit.
   for d in "${ALLOWED_DOMAINS[@]}"; do echo "server=/$d/$UPSTREAM_DNS"; done
-  echo "ipset=/$(IFS=/; echo "${ALLOWED_DOMAINS[*]}")/allowed-domains"
+  for d in "${ALLOWED_DOMAINS[@]}"; do echo "ipset=/$d/allowed-domains"; done
 } > "$DNSMASQ_CONF.tmp"
 chmod 0644 "$DNSMASQ_CONF.tmp"
 mv "$DNSMASQ_CONF.tmp" "$DNSMASQ_CONF"
@@ -258,7 +275,7 @@ echo "nameserver 127.0.0.1" > /etc/resolv.conf
 
 # Prime the ipset for the allowlisted domains (also a dnsmasq sanity check).
 for domain in "${ALLOWED_DOMAINS[@]}"; do
-  dig +short "$domain" @127.0.0.1 >/dev/null 2>&1 || true
+  dig -r +short "$domain" @127.0.0.1 >/dev/null 2>&1 || true
 done
 
 # Only allowlisted destinations, only on SSH/HTTP/HTTPS.
@@ -276,10 +293,10 @@ done
 if iptables -S OUTPUT | grep -q -- '--dport 443 -j ACCEPT'; then
   echo "ERROR: Firewall verification failed - a temporary setup rule (--dport 443 -j ACCEPT) is still present"; exit 1
 fi
-if curl --connect-timeout 5 https://1.1.1.1/ >/dev/null 2>&1; then
+if curl -q --connect-timeout 5 https://1.1.1.1/ >/dev/null 2>&1; then
   echo "ERROR: Firewall verification failed - was able to reach https://1.1.1.1 (literal IP)"; exit 1
 fi
-if dig +short +time=3 +tries=1 example.com @127.0.0.1 2>/dev/null | grep -qE '^[0-9.]+$'; then
+if dig -r +short +time=3 +tries=1 example.com @127.0.0.1 2>/dev/null | grep -qE '^[0-9.]+$'; then
   echo "ERROR: Firewall verification failed - dnsmasq resolved non-allowlisted example.com"; exit 1
 fi
 echo "Firewall verification passed - literal IP blocked, non-allowlisted names not resolved"
@@ -290,7 +307,7 @@ if [ "$IPV6_STATE" = filtered ]; then
       echo "ERROR: Firewall verification failed - ip6tables $ch policy is not DROP"; exit 1
     fi
   done
-  if curl -6 --connect-timeout 5 https://www.google.com >/dev/null 2>&1; then
+  if curl -q -6 --connect-timeout 5 https://www.google.com >/dev/null 2>&1; then
     echo "ERROR: Firewall verification failed - was able to reach https://www.google.com over IPv6"; exit 1
   fi
   echo "Firewall verification passed - IPv6 egress denied (ip6tables policies DROP)"
@@ -298,14 +315,14 @@ else
   echo "IPv6 verification skipped - IPv6 unavailable in kernel"
 fi
 
-if ! curl --connect-timeout 5 https://api.github.com/zen >/dev/null 2>&1; then
+if ! curl -q --connect-timeout 5 https://api.github.com/zen >/dev/null 2>&1; then
   echo "ERROR: Firewall verification failed - unable to reach https://api.github.com"; exit 1
 fi
 echo "Firewall verification passed - able to reach https://api.github.com as expected"
 
 # Soft check: a transient CRAN outage should not brick container startup, but a broken
 # dynamic allowlist should be visible in the log.
-if curl --connect-timeout 8 -sSf https://cloud.r-project.org/src/contrib/PACKAGES.gz >/dev/null 2>&1; then
+if curl -q --connect-timeout 8 -sSf https://cloud.r-project.org/src/contrib/PACKAGES.gz >/dev/null 2>&1; then
   echo "Firewall verification passed - CRAN reachable via dnsmasq dynamic allowlist"
 else
   echo "WARNING: could not reach CRAN (cloud.r-project.org) right now - if this persists, check dnsmasq/resolv.conf"

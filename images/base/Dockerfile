@@ -14,7 +14,7 @@ ENV TZ="$TZ" DEBIAN_FRONTEND=noninteractive
 
 # OS + agent tooling. tmux: detached long runs. exiftool: photo metadata (field data).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      less git procps sudo fzf zsh man-db unzip gnupg2 gh iptables ipset dnsmasq iproute2 conntrack \
+      less git procps sudo fzf zsh man-db unzip gnupg2 gh iptables ipset dnsmasq iproute2 conntrack libcap2-bin \
       dnsutils aggregate jq nano vim curl wget ca-certificates tmux libimage-exiftool-perl \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
