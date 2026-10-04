@@ -96,6 +96,25 @@ jobs:
             -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
           docker exec -u root fwlate bash /tests/firewall/test-late-failure.sh
           docker rm -f fwlate
+      - name: Firewall EXIT trap removes the temporary rules when the meta fetch fails
+        if: always()
+        run: |
+          docker run -d --name fwtrap --cap-add NET_ADMIN --cap-add NET_RAW \
+            -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
+          docker exec -u root fwtrap bash /tests/firewall/test-trap-cleanup.sh
+          docker rm -f fwtrap
+      - name: Firewall with a long (200-domain) allowlist
+        if: always()
+        run: |
+          for i in $(seq -w 0 199); do echo "host$i.long-allowlist-test-padding-label.example.org"; done > /tmp/70-long.txt
+          docker run -d --name fwlong --cap-add NET_ADMIN --cap-add NET_RAW \
+            -v /tmp/70-long.txt:/etc/firewall/allowlist.d/70-long.txt:ro \
+            -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
+          rc=0
+          docker exec fwlong sudo /usr/local/bin/init-firewall.sh || rc=1
+          docker exec -u root fwlong bash /tests/firewall/test-long-allowlist.sh || rc=1
+          docker rm -f fwlong
+          exit $rc
       # Child images use plain `docker build`: the buildx container driver cannot see locally loaded images.
       - name: Build gis
         run: docker build --build-arg BASE_IMAGE=spades-base:ci -t spades-gis:ci images/gis
@@ -136,6 +155,24 @@ jobs:
       - name: Acceptance cleanup
         if: always()
         run: docker rm -f acc || true
+
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck (warning and above)
+        if: always()
+        run: |
+          shellcheck --version
+          shellcheck -S warning images/base/*.sh tests/*/*.sh scripts/*.sh \
+            project-template/up project-template/resolve-secrets project-template/check-digest
+      - name: actionlint
+        if: always()
+        run: |
+          curl -fsSL -o /tmp/actionlint.tgz https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz
+          echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  /tmp/actionlint.tgz" | sha256sum -c -
+          tar xzf /tmp/actionlint.tgz -C /tmp actionlint
+          /tmp/actionlint -color
 
   # Dry-run of the publish workflow (build, smoke-by-digest, latest promotion): same script, but against a local registry:2 instead of GHCR.
   # buildx runs in a docker-container builder with network=host so it can reach localhost:5000

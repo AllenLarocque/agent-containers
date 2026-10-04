@@ -31,6 +31,31 @@ check "dnsmasq system user exists"     bash -c 'u=$(id -u dnsmasq) && [ "$u" -ne
 check "conntrack present"              command -v conntrack
 check "setpriv present"                command -v setpriv
 check "sudo limited to firewall"       bash -c 'sudo -n -l | grep -q "/usr/local/bin/init-firewall.sh"'
+# EXACTLY one sudo rule, and sudo's own environment hygiene on (the script also pins PATH/HOME).
+sudo_cmds=$(sudo -n -l 2>/dev/null | awk 'f && NF {sub(/^[ \t]+/, ""); print} /may run the following commands/ {f=1}')
+[ "$sudo_cmds" = "(root) NOPASSWD: /usr/local/bin/init-firewall.sh" ] && ok "sudo -l lists exactly the firewall script" \
+  || bad "sudo -l commands are: $(printf '%q' "$sudo_cmds")"
+check "sudo secure_path set"           bash -c 'sudo -n -l | grep -q "secure_path="'
+check "sudo env_reset on"              bash -c 'sudo -n -l | grep -q "env_reset"'
+# "The agent cannot become uid 997 (dnsmasq) or root" rests on this inventory: any new setuid binary
+# or file capability must be reviewed and added here deliberately.
+expect_suid='/usr/bin/chfn
+/usr/bin/chsh
+/usr/bin/gpasswd
+/usr/bin/mount
+/usr/bin/newgrp
+/usr/bin/passwd
+/usr/bin/su
+/usr/bin/sudo
+/usr/bin/umount'
+got_suid=$(find / -xdev -perm -4000 -type f 2>/dev/null | LC_ALL=C sort)
+[ "$got_suid" = "$expect_suid" ] && ok "setuid binaries match the reviewed list" \
+  || { bad "setuid binaries differ from the reviewed list:"; diff <(echo "$expect_suid") <(echo "$got_suid") | sed 's/^/        /'; }
+check "getcap present"                 command -v getcap
+got_caps=$(getcap -r / 2>/dev/null | grep -v '^/proc/\|^/sys/' | LC_ALL=C sort)
+[ -z "$got_caps" ] && ok "no file capabilities anywhere" || { bad "file capabilities found:"; echo "$got_caps" | sed 's/^/        /'; }
+check "dnsmasq account locked, no login shell" bash -c 'getent passwd dnsmasq | cut -d: -f7 | grep -Eq "(nologin|false)$"'
+check "no ssh client in base (git uses HTTPS via gh)" bash -c '! command -v ssh'
 
 check "PE/AI on disk at pinned commit" bash -c 'git -C /opt/reference/pe-ai rev-parse HEAD | grep -q "^e7ae689751316dfe742f31b32d0d659accd0cc41$"'
 check "agent-init present"             test -x /usr/local/bin/agent-init.sh
