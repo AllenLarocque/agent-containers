@@ -1,5 +1,7 @@
 # Runbook: 1Password project vault and service account
 
+UI paths are as of 2026-10 and may move.
+
 **Human procedure.** The agent must never perform these steps.
 
 **Why this exists.** Each project gets its own vault and its own read-only service account. A compromised or mistaken container can then only ever see that one project's tier A secrets, and you can cut it off in one click. Replace `<project>` below with the project folder name (lowercase).
@@ -18,16 +20,15 @@ The GitHub token goes in as item `github-agent`, field `token` (see [machine-use
 
 ## 3. Put the token on the host (never in a repo)
 
-Store it where only your host login sees it: your OS keychain, or a line in your shell profile:
+Do **not** `export OP_SERVICE_ACCOUNT_TOKEN=...` in a global shell profile: that leaves the token in plaintext on disk and exposes it to every process you start, for every project. Prefer one of:
 
-```bash
-export OP_SERVICE_ACCOUNT_TOKEN='<paste token here>'
-```
+- **Per-project `direnv`:** a `.envrc` kept **outside the repo** (for example `~/.config/agent-containers/envrc/<project>.envrc`, sourced from a directory-level `.envrc` that is not committed) that sets `OP_SERVICE_ACCOUNT_TOKEN` only when you are in that project. Keep that file mode 600.
+- **Read at use time:** fetch the token from the macOS Keychain, the Windows credential store, or `op` itself (using your own biometric-unlocked session) into the **current shell only**, then run `./up`, for example `export OP_SERVICE_ACCOUNT_TOKEN="$(op read 'op://<your-vault>/<item>/credential')"` where that item lives in your Private vault.
 
 `./resolve-secrets` reads `OP_SERVICE_ACCOUNT_TOKEN` from the host environment and stops with an error if it is missing.
-Only one project's token can be in the environment at a time: if you work on several projects, set it per shell (for example in a small per-project `direnv`/profile snippet kept outside the repo).
-Never commit it. The template ships a gitleaks pre-commit hook as a backstop (`pre-commit install` once per clone).
-VS Code started from the dock or Start menu may not see your shell profile: see "VS Code and `OP_SERVICE_ACCOUNT_TOKEN`" in the project template `README.md`.
+**Warning:** if the wrong project's token is in your environment, `resolve-secrets` either fails (vault not readable) or reads a different vault than you intended. Check the project before `./up`.
+Never commit the token. The template ships a gitleaks pre-commit hook as a backstop (`pre-commit install` once per clone).
+VS Code started from the dock or Start menu may not see your shell environment: see "VS Code and `OP_SERVICE_ACCOUNT_TOKEN`" in the project template `README.md`.
 
 Check it works (host terminal): `op vault list` should list `agent-<project>` and nothing else.
 
@@ -38,9 +39,10 @@ Recovery codes and anything else tier C live in your **Private** vault, also nev
 
 ## 5. Rotation and revocation
 
-- **Revoke now** (suspected leak, or finished with the project): 1Password.com → Developer → Service Accounts → `agent-<project>` → Revoke/Delete. Effective immediately; the agent can no longer read the vault.
-- **Rotate**: create a new token for the same service account (or a new account with the same access), update `OP_SERVICE_ACCOUNT_TOKEN` on the host.
-- **Change any secret**: edit it in 1Password, then run `./up` in the project. The container's environment is fixed at creation, so it must be recreated to see the new value.
+- **Revoke now** (suspected leak, or finished with the project): delete the service account on 1Password.com (Developer → Service Accounts). It takes effect at once; the agent can no longer read the vault.
+- **Rotate a service-account token:** revoke the service account and create a new one with the same vault access (tokens cannot be shown again, and vault access is set when the account is created). Then update the token on the host and run `./up`.
+- **Change any secret:** edit it in 1Password, then `./up`. The container's environment is fixed at creation, so it must be recreated.
 - Also revoke the matching GitHub fine-grained token if it may have leaked (GitHub, signed in as `allen-agent` → Developer settings).
+- Rotate the tier-A token every 90 days regardless: once resolved, it is visible to anyone on the host who can run `docker inspect` on the container.
 
 Files written by `./resolve-secrets`: `~/.config/agent-containers/<project>.env` (mode 600; the directory is mode 700). These are outside every repo.
