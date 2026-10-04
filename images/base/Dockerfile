@@ -14,7 +14,7 @@ ENV TZ="$TZ" DEBIAN_FRONTEND=noninteractive
 
 # OS + agent tooling. tmux: detached long runs. exiftool: photo metadata (field data).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      less git procps sudo fzf zsh man-db unzip gnupg2 gh iptables ipset dnsmasq iproute2 \
+      less git procps sudo fzf zsh man-db unzip gnupg2 gh iptables ipset dnsmasq iproute2 conntrack \
       dnsutils aggregate jq nano vim curl wget ca-certificates tmux libimage-exiftool-perl \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
@@ -55,7 +55,11 @@ RUN groupadd --gid 1000 agent && useradd --uid 1000 --gid 1000 --create-home --s
     && mkdir -p /home/agent/.local/share/R /home/agent/.cache/R/Require \
     && chown -R agent:agent /workspace /usr/local/share/npm-global /home/agent/.local /home/agent/.cache
 
-# Firewall: init script + base allowlist (*.txt in allowlist.d; project files mount alongside). sudo ONLY for the firewall script.
+# Firewall: init script + base allowlist (*.txt in allowlist.d; the project file is mounted read-only
+# from the owner's host). sudo ONLY for the firewall script. dnsmasq runs as its own unprivileged
+# system user: the firewall lets ONLY that uid reach the upstream resolver.
+RUN getent passwd dnsmasq >/dev/null \
+    || useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin dnsmasq
 COPY init-firewall.sh /usr/local/bin/init-firewall.sh
 COPY allowlist.d/ /etc/firewall/allowlist.d/
 RUN chmod 0755 /usr/local/bin/init-firewall.sh \

@@ -1,6 +1,7 @@
 # Base egress allowlist for every agent container. One domain per line; a base domain
-# also matches its subdomains (dnsmasq ipset semantics). Project additions go in the
-# project's allowlist.txt, mounted as 50-project.txt. Domain rationale is carried over from
+# also matches its subdomains (dnsmasq semantics). dnsmasq resolves ONLY these names (and the
+# project's): every other name is REFUSED. Project additions live on the OWNER's host in
+# ~/.config/agent-containers/<project>.allowlist, mounted read-only as 50-project.txt. Domain rationale is carried over from
 # spades-dev-environment/.devcontainer/init-firewall.sh (2026-09).
 # --- Claude Code / npm
 api.anthropic.com
@@ -11,7 +12,10 @@ statsig.com
 marketplace.visualstudio.com
 vscode.blob.core.windows.net
 update.code.visualstudio.com
-# --- GitHub (API/web/git ranges are added from api.github.com/meta; these cover downloads + GHCR)
+# --- GitHub (API/web/git IP ranges come from api.github.com/meta; the names must still be listed
+# here or dnsmasq will not resolve them). github.com covers api./codeload./uploads./gist.
+github.com
+release-assets.githubusercontent.com
 raw.githubusercontent.com
 codeload.github.com
 objects.githubusercontent.com
