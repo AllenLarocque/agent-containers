@@ -33,6 +33,50 @@ fi
 mapfile -t ALLOWED_DOMAINS < <(printf '%s\n' "${RAW_DOMAINS[@]}" | sort -u)
 echo "Allowlist: ${#ALLOWED_DOMAINS[@]} domains from $(printf '%s ' "${ALLOWLIST_FILES[@]##*/}")"
 
+# IPv6: default-DENY, no allowlist (tools fall back to IPv4). Applied BEFORE any IPv4 mutation, and
+# after token validation, so the two failure modes are both safe: a bad token aborts above with
+# NOTHING touched; an ip6tables failure here aborts (non-zero) with IPv4 still in its original
+# state; and once this block has run, a later IPv4 failure cannot leave IPv6 open. Policies go to
+# DROP before the flush so there is no window where IPv6 is unfiltered.
+IPV6_STATE=filtered
+v6_unavailable(){ # true only if the kernel genuinely has no usable IPv6 to leak
+  [ ! -e /proc/net/if_inet6 ] && return 0
+  # ip6tables table missing: acceptable only if there is no non-loopback IPv6 address either
+  grep -qE "can't initialize ip6tables table|Table does not exist|Perhaps ip6tables or your kernel needs to be upgraded" <<<"$1" || return 1
+  ! awk '$6!="lo"{f=1} END{exit !f}' /proc/net/if_inet6
+}
+command -v ip6tables >/dev/null || { echo "ERROR: ip6tables not installed - cannot enforce IPv6 default-deny"; exit 1; }
+if v6_err=$(ip6tables -S 2>&1 >/dev/null); then
+  ip6tables -P INPUT DROP
+  ip6tables -P FORWARD DROP
+  ip6tables -P OUTPUT DROP
+  ip6tables -F
+  ip6tables -X
+  ip6tables -A INPUT -i lo -j ACCEPT
+  ip6tables -A OUTPUT -o lo -j ACCEPT
+  ip6tables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+  ip6tables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+  echo "IPv6 default-deny applied (loopback + established only)"
+elif v6_unavailable "$v6_err"; then
+  IPV6_STATE=unavailable
+  echo "IPv6 unavailable in kernel — nothing to filter"
+else
+  echo "ERROR: ip6tables failed, refusing to continue with IPv6 unfiltered: $v6_err"; exit 1
+fi
+
+# Capture the current upstream nameserver BEFORE we rewrite resolv.conf.
+# In Docker this is normally the embedded DNS at 127.0.0.11.
+UPSTREAM_DNS=$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf)
+if [ -z "$UPSTREAM_DNS" ]; then
+    echo "ERROR: Could not determine upstream nameserver from /etc/resolv.conf"
+    exit 1
+fi
+if [[ ! $UPSTREAM_DNS =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+    echo "ERROR: upstream nameserver '$UPSTREAM_DNS' is not an IPv4 address (IPv6 egress is denied)"
+    exit 1
+fi
+echo "Upstream DNS detected as: $UPSTREAM_DNS"
+
 # 1. Extract Docker DNS info BEFORE any flushing
 DOCKER_DNS_RULES=$(iptables-save -t nat | grep "127\.0\.0\.11" || true)
 
@@ -60,6 +104,9 @@ fi
 iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
 # Allow inbound DNS responses
 iptables -A INPUT -p udp --sport 53 -j ACCEPT
+# DNS over TCP (dnsmasq retries over TCP on truncated answers): ONLY to the upstream resolver.
+# Replies are covered by the ESTABLISHED,RELATED INPUT rule added below.
+iptables -A OUTPUT -p tcp -d "$UPSTREAM_DNS" --dport 53 -j ACCEPT
 # Allow outbound SSH
 iptables -A OUTPUT -p tcp --dport 22 -j ACCEPT
 # Allow inbound SSH responses
@@ -102,14 +149,6 @@ done < <(echo "$gh_ranges" | jq -r '(.web + .api + .git)[]' | aggregate -q)
 # after a while. Now every DNS lookup lazily authorizes its own resolved IP
 # just-in-time, immediately before the connection.)
 
-# Capture the current upstream nameserver BEFORE we rewrite resolv.conf.
-# In Docker this is normally the embedded DNS at 127.0.0.11.
-UPSTREAM_DNS=$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf)
-if [ -z "$UPSTREAM_DNS" ]; then
-    echo "ERROR: Could not determine upstream nameserver from /etc/resolv.conf"
-    exit 1
-fi
-echo "Upstream DNS detected as: $UPSTREAM_DNS"
 
 
 # Build the dnsmasq ipset directive: ipset=/dom1/dom2/.../allowed-domains
@@ -173,6 +212,20 @@ if curl --connect-timeout 5 https://example.com >/dev/null 2>&1; then
     exit 1
 else
     echo "Firewall verification passed - unable to reach https://example.com as expected"
+fi
+
+if [ "$IPV6_STATE" = filtered ]; then
+    if ! ip6tables -S | grep -qx -- '-P OUTPUT DROP'; then
+        echo "ERROR: Firewall verification failed - ip6tables OUTPUT policy is not DROP"
+        exit 1
+    fi
+    if curl -6 --connect-timeout 5 https://www.google.com >/dev/null 2>&1; then
+        echo "ERROR: Firewall verification failed - was able to reach https://www.google.com over IPv6"
+        exit 1
+    fi
+    echo "Firewall verification passed - IPv6 egress denied (ip6tables OUTPUT policy DROP)"
+else
+    echo "IPv6 verification skipped - IPv6 unavailable in kernel"
 fi
 
 # Verify GitHub API access
