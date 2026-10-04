@@ -1,6 +1,9 @@
 # spades-base: everything every SpaDES agent container needs. See docs/specs/2026-10-03-agent-containers-design.md §3.1.
 FROM rocker/r-ver:4.5.3@sha256:c3f39b365d1077fe24f8e9ab2742e352b6d3950897f51af1624a5bb5550c21c0
 
+LABEL org.opencontainers.image.source="https://github.com/AllenLarocque/agent-containers" \
+      org.opencontainers.image.description="spades-base: SpaDES agent container base (R, geospatial libs, Claude Code, egress firewall)"
+
 ARG TZ=America/Los_Angeles
 ARG CLAUDE_CODE_VERSION=2.1.289
 ARG UV_VERSION=0.12.19

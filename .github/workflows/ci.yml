@@ -72,7 +72,7 @@ jobs:
         if: always()
         run: docker rm -f acc || true
 
-  # Dry-run of the publish workflow: same script, but against a local registry:2 instead of GHCR.
+  # Dry-run of the publish workflow (build, smoke-by-digest, latest promotion): same script, but against a local registry:2 instead of GHCR.
   # buildx runs in a docker-container builder with network=host so it can reach localhost:5000
   # (as it reaches ghcr.io in the real workflow); gis is built FROM base by registry digest.
   publish-dryrun:
@@ -88,7 +88,7 @@ jobs:
           driver-opts: network=host
       - name: Build + push to local registry, render digests.md
         run: scripts/build-publish.sh localhost:5000/allenlarocque "2000.01.01-dryrun" /tmp/digests.md
-      - name: Verify digests.md and that gis is built on the published base digest
+      - name: Verify digests.md
         run: |
           cat /tmp/digests.md
           grep -Pq '^\| spades-base \| 2000\.01\.01-dryrun \| \x60sha256:[0-9a-f]{64}\x60 \|$' /tmp/digests.md
