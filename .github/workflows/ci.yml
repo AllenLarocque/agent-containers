@@ -56,8 +56,8 @@ jobs:
         run: bash tests/template/test-template.sh
       - name: Acceptance (setupProject behind firewall, plain Rscript)
         run: |
-          # agent (UID 1000) must be able to write .Rprofile and the project library here
-          mkdir -p tests/acceptance/minimal-project
+          # CI-ONLY: agent (UID 1000) must be able to write .Rprofile and the project library in the
+          # bind mount. Do NOT copy this chown into local scripts (it would hand your files to UID 1000).
           sudo chown -R 1000:1000 tests/acceptance/minimal-project
           docker run -d --name acc --cap-add NET_ADMIN --cap-add NET_RAW \
             -v "$PWD/tests/acceptance/minimal-project:/workspace" spades-gis:ci sleep infinity
@@ -65,5 +65,9 @@ jobs:
           start=$(date +%s)
           docker exec -u agent -w /workspace acc Rscript global.R
           echo "provisioning+run seconds: $(( $(date +%s) - start ))"
-          docker exec -u agent -w /workspace acc Rscript -e 'library(SpaDES.core); cat("second run OK\n")'
-          docker rm -f acc
+          # Second plain Rscript: must load SpaDES.core from the setupProject standAlone library
+          # (via the .Rprofile it wrote), not the site library.
+          docker exec -u agent -w /workspace acc Rscript -e 'library(SpaDES.core); print(.libPaths()); p <- find.package("SpaDES.core"); cat("SpaDES.core from:", p, "\n"); stopifnot(startsWith(p, "/home/agent/.local/share/R/workspace/packages")); cat("second run OK\n")'
+      - name: Acceptance cleanup
+        if: always()
+        run: docker rm -f acc || true
