@@ -52,6 +52,21 @@ jobs:
         run: docker build --load --build-arg BASE_IMAGE=spades-base:ci -t spades-gis:ci images/gis
       - name: Smoke gis
         run: docker run --rm -v "$PWD/tests:/tests:ro" spades-gis:ci bash /tests/smoke/gis.sh
+      - name: Build bio
+        run: docker build --load --build-arg BASE_IMAGE=spades-base:ci -t spades-bio:ci images/bio
+      - name: Smoke bio
+        run: |
+          docker run --rm -v "$PWD/tests:/tests:ro" spades-bio:ci bash /tests/smoke/bio.sh
+          docker image ls spades-bio:ci
+      - name: Bio allowlist example passes firewall validation
+        run: |
+          # A malformed example would break every real bio project that copies it.
+          docker run -d --name fwbio --cap-add NET_ADMIN --cap-add NET_RAW \
+            -v "$PWD/project-template/allowlist.bio-example.txt:/etc/firewall/allowlist.d/50-project.txt:ro" \
+            spades-base:ci sleep infinity
+          docker exec fwbio sudo /usr/local/bin/init-firewall.sh | tee /tmp/fwbio.log
+          grep -q 'Allowlist: .* 50-project.txt' /tmp/fwbio.log
+          docker rm -f fwbio
       - name: Template test
         run: bash tests/template/test-template.sh
       - name: Acceptance (setupProject behind firewall, plain Rscript)
@@ -92,7 +107,8 @@ jobs:
         run: |
           cat /tmp/digests.md
           grep -Pq '^\| spades-base \| 2000\.01\.01-dryrun \| \x60sha256:[0-9a-f]{64}\x60 \|$' /tmp/digests.md
+          grep -Pq '^\| spades-bio \| 2000\.01\.01-dryrun \| \x60sha256:[0-9a-f]{64}\x60 \|$' /tmp/digests.md
           grep -Pq '^\| spades-gis \| 2000\.01\.01-dryrun \| \x60sha256:[0-9a-f]{64}\x60 \|$' /tmp/digests.md
-          [ "$(grep -c '^| spades-' /tmp/digests.md)" = 2 ]
+          [ "$(grep -c '^| spades-' /tmp/digests.md)" = 3 ]
           # header must match the committed skeleton
           diff <(head -7 digests.md) <(head -7 /tmp/digests.md)
