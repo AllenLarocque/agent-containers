@@ -39,9 +39,11 @@ jobs:
             -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
           UP=$(docker exec fw awk '/^nameserver/{print $2; exit}' /etc/resolv.conf); echo "original resolver: $UP"
           docker exec fw sudo /usr/local/bin/init-firewall.sh
-          docker exec -u root -e EXPECT_UPSTREAM="$UP" fw bash /tests/firewall/test-firewall.sh
-          docker exec -u agent -e EXPECT_UPSTREAM="$UP" -e SSH_PROBE_IP="$SSH_PROBE_IP" fw bash /tests/firewall/test-agent-egress.sh
+          rc=0   # run both suites, fail at the end
+          docker exec -u root -e EXPECT_UPSTREAM="$UP" fw bash /tests/firewall/test-firewall.sh || rc=1
+          docker exec -u agent -e EXPECT_UPSTREAM="$UP" -e SSH_PROBE_IP="$SSH_PROBE_IP" fw bash /tests/firewall/test-agent-egress.sh || rc=1
           docker rm -f fw
+          exit $rc
       - name: Firewall on a compose-like network (Docker DNS 127.0.0.11) + idempotent re-run
         if: always()
         run: |
@@ -58,10 +60,12 @@ jobs:
           docker exec fwn sudo /usr/local/bin/init-firewall.sh
           # Second run: resolv.conf now says 127.0.0.1; the original resolver must come from /run/firewall-upstream.
           docker exec fwn sudo /usr/local/bin/init-firewall.sh
-          docker exec -u root -e EXPECT_UPSTREAM="$UP" fwn bash /tests/firewall/test-firewall.sh
-          docker exec -u agent -e EXPECT_UPSTREAM="$UP" -e REQUIRE_DOCKER_DNS=1 fwn bash /tests/firewall/test-agent-egress.sh
+          rc=0   # run both suites, fail at the end
+          docker exec -u root -e EXPECT_UPSTREAM="$UP" fwn bash /tests/firewall/test-firewall.sh || rc=1
+          docker exec -u agent -e EXPECT_UPSTREAM="$UP" -e REQUIRE_DOCKER_DNS=1 fwn bash /tests/firewall/test-agent-egress.sh || rc=1
           docker rm -f fwn
           docker network rm fwnet
+          exit $rc
       - name: Firewall rejects invalid allowlist entry without touching iptables
         run: |
           docker run -d --name fwbad --cap-add NET_ADMIN --cap-add NET_RAW \

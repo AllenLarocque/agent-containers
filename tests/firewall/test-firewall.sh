@@ -78,10 +78,14 @@ extra_nat=$(iptables -t nat -S | grep -v -- '^-P ' | grep -v -- '^-N DOCKER_OUTP
 grep -qx 'nameserver 127.0.0.1' /etc/resolv.conf && ok "resolv.conf points at dnsmasq" || bad "resolv.conf does not point at 127.0.0.1"
 
 # --- dnsmasq: dedicated user, allowlist-only forwarding (no default server) ---
-dpid=$(pgrep -x dnsmasq | head -1)
-if [ -n "$dpid" ]; then
-  [ "$(ps -o user= -p "$dpid" | tr -d ' ')" = dnsmasq ] && ok "dnsmasq runs as user dnsmasq" || bad "dnsmasq runs as $(ps -o user= -p "$dpid")"
-else bad "dnsmasq is not running"; fi
+# Every dnsmasq process: real, effective, saved and fs uid must all be the dnsmasq uid.
+dpids=$(pgrep -x dnsmasq || true)
+[ -n "$dpids" ] || bad "dnsmasq is not running"
+for p in $dpids; do
+  uids=$(awk '/^Uid:/{print $2,$3,$4,$5}' "/proc/$p/status")
+  echo "        dnsmasq pid $p: Uid $uids | $(grep -E '^(Gid|CapEff)' "/proc/$p/status" | tr '\t\n' '  ') | $(tr '\0' ' ' < "/proc/$p/cmdline")"
+  [ "$uids" = "$DUID $DUID $DUID $DUID" ] && ok "dnsmasq pid $p runs as uid $DUID (dnsmasq)" || bad "dnsmasq pid $p has Uid '$uids', want all $DUID"
+done
 conf=/etc/dnsmasq.d/allowlist.conf
 grep -Eq '^server=[^/]' "$conf" && bad "dnsmasq has a default server= line (forwards every name)" || ok "dnsmasq has no default server= line"
 grep -qx "server=/github.com/$EXPECT_UPSTREAM" "$conf" && ok "dnsmasq forwards github.com" || bad "no server=/github.com/ line"

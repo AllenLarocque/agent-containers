@@ -96,7 +96,8 @@ check "exactly one mount provides $FWT" test "$(fwm | wc -l)" -eq 1
 check "allowlist source is the owner-maintained host file" \
   test "$(fwm | jq -r .source)" = "$T/home/.config/agent-containers/$NAME.allowlist"
 check "allowlist mount is read-only" test "$(fwm | jq -r .read_only)" = true
-check "allowlist mount never auto-creates its source" test "$(fwm | jq -r .bind.create_host_path)" = false
+# (compose renders create_host_path only when true; absent == false for the long syntax)
+check "allowlist mount never auto-creates its source" test "$(fwm | jq -r '.bind.create_host_path // false')" = false
 check "nothing else is mounted under /etc/firewall" \
   test "$(jq -r '[.services.agent.volumes[] | select(.target | startswith("/etc/firewall"))] | length' <<<"$J")" = 1
 # No rw bind may contain (or equal) the allowlist source: the workspace bind in particular.
