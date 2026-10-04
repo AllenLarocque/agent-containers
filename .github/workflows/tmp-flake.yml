@@ -1,0 +1,33 @@
+name: tmp-flake
+on:
+  pull_request:
+jobs:
+  loop:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - run: docker buildx build --load -t spades-base:ci images/base
+      - name: loop
+        run: |
+          printf 'www.python.org' > /tmp/40-extra.txt
+          printf 'www.r-project.org\r\ncran.r-project.org  # inline comment\n\n# comment only\nwww.gnu.org' > /tmp/50-project.txt
+          bad=0
+          for i in $(seq 1 25); do
+            echo "=== iteration $i"
+            docker run -d --name fw$i --cap-add NET_ADMIN --cap-add NET_RAW \
+              -v /tmp/40-extra.txt:/etc/firewall/allowlist.d/40-extra.txt:ro \
+              -v /tmp/50-project.txt:/etc/firewall/allowlist.d/50-project.txt:ro \
+              -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity >/dev/null
+            docker exec fw$i sudo /usr/local/bin/init-firewall.sh >/dev/null 2>&1 || echo "init failed"
+            if ! docker exec fw$i bash /tests/firewall/test-firewall.sh; then
+              bad=$((bad+1))
+              echo "::group::root diag $i"
+              docker exec -u root fw$i ipset list allowed-domains | grep -vE '^(Name|Type|Revision|Header|Size|References|Number|Members|Memory)' | sort | tr '\n' ' '
+              docker exec -u root fw$i iptables -L OUTPUT -n -v
+              docker exec -u root fw$i sh -c 'cat /etc/resolv.conf; pgrep -a dnsmasq; dig www.gnu.org A +noall +answer; ipset test allowed-domains $(dig +short www.gnu.org A | head -1)'
+              echo "::endgroup::"
+            fi
+            docker rm -f fw$i >/dev/null
+          done
+          echo "FAILED ITERATIONS: $bad"
