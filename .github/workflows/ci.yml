@@ -32,6 +32,6 @@ jobs:
           docker exec -u root fwbad bash /tests/firewall/test-invalid-token.sh
           docker rm -f fwbad
       - name: Build gis
-        run: docker buildx build --load --build-arg BASE_IMAGE=spades-base:ci -t spades-gis:ci images/gis
+        run: docker build --load --build-arg BASE_IMAGE=spades-base:ci -t spades-gis:ci images/gis
       - name: Smoke gis
         run: docker run --rm -v "$PWD/tests:/tests:ro" spades-gis:ci bash /tests/smoke/gis.sh
