@@ -1,0 +1,33 @@
+# One compose project per SpaDES project. Copy this folder into the project root.
+# Image: copy a digest from agent-containers/digests.md. Secrets: run ./up (never plain compose).
+name: ${PROJECT:-project-template}
+services:
+  agent:
+    image: ghcr.io/allenlarocque/spades-gis@sha256:REPLACE_WITH_DIGEST_FROM_digests.md
+    user: "1000:1000"
+    working_dir: /workspace
+    init: true
+    cap_add: [NET_ADMIN, NET_RAW]          # firewall
+    mem_limit: 100g                        # state it explicitly; memory gates must read the cgroup limit
+    env_file:
+      - path: ${HOME}/.config/agent-containers/${PROJECT:-project-template}.env   # written by ./resolve-secrets (mode 600)
+        required: true
+    environment:
+      CLAUDE_CONFIG_DIR: /home/agent/.claude
+    volumes:
+      - ./:/workspace
+      - claude-config:/home/agent/.claude
+      - require-cache:/home/agent/.cache/R/Require
+      - ./allowlist.txt:/etc/firewall/allowlist.d/50-project.txt:ro
+      - ${SPADES_AI_DIR:-${HOME}/GitHub/spades.ai}:/opt/reference/spades.ai   # personal conventions, live (rw). MUST exist on the host first, or Docker creates a root-owned empty dir
+      # - uv-cache:/home/agent/.cache/uv  # OPTIONAL: shared uv cache for reticulate::py_require() (spec §3.4)
+      # - ${MEMORY_DIR}:/opt/memory        # RESERVED: future memory repo (spec §2)
+    command: >
+      bash -c "sudo /usr/local/bin/init-firewall.sh && /usr/local/bin/agent-init.sh && exec sleep infinity"
+    # ports: ["127.0.0.1:3100:3100"]       # if ever needed: localhost ONLY
+volumes:
+  claude-config:
+    name: claude-${PROJECT:-project-template}    # FIXED name: survives rebuilds
+  require-cache:
+    name: require-cache-shared                   # shared across all SpaDES projects
+    external: true

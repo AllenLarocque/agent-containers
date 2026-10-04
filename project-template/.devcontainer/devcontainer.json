@@ -1,0 +1,12 @@
+{
+  // VS Code "Reopen in Container": runs ./resolve-secrets on the host first, then uses compose.yaml.
+  "name": "${localWorkspaceFolderBasename}",
+  "initializeCommand": "PROJECT=${localWorkspaceFolderBasename} ./resolve-secrets",
+  "dockerComposeFile": ["../compose.yaml"],
+  "service": "agent",
+  "workspaceFolder": "/workspace",
+  "remoteUser": "agent",
+  "overrideCommand": false,
+  "shutdownAction": "none",
+  "customizations": { "vscode": { "extensions": ["anthropic.claude-code", "eamodio.gitlens"] } }
+}

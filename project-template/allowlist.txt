@@ -1,0 +1,2 @@
+# Domains THIS project needs beyond the base allowlist (agent-containers images/base/allowlist.d/00-base.txt).
+# One per line; a base domain also matches its subdomains. Restart the container after editing.
