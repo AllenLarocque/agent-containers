@@ -23,7 +23,7 @@ jobs:
             -v /tmp/50-project.txt:/etc/firewall/allowlist.d/50-project.txt:ro \
             -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
           docker exec fw sudo /usr/local/bin/init-firewall.sh
-          docker exec fw bash /tests/firewall/test-firewall.sh
+          docker exec -u root fw bash /tests/firewall/test-firewall.sh
           docker rm -f fw
       - name: Firewall rejects invalid allowlist entry without touching iptables
         run: |
@@ -31,6 +31,15 @@ jobs:
             -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
           docker exec -u root fwbad bash /tests/firewall/test-invalid-token.sh
           docker rm -f fwbad
+      - name: Firewall IPv6 default-deny on an IPv6-enabled Docker network
+        run: |
+          docker network create --ipv6 --subnet fd00:dead:beef::/48 v6net
+          docker run -d --name fw6 --network v6net --cap-add NET_ADMIN --cap-add NET_RAW \
+            -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
+          docker exec fw6 sudo /usr/local/bin/init-firewall.sh
+          docker exec -u root fw6 bash /tests/firewall/test-ipv6.sh
+          docker rm -f fw6
+          docker network rm v6net
       - name: Build gis
         run: docker build --load --build-arg BASE_IMAGE=spades-base:ci -t spades-gis:ci images/gis
       - name: Smoke gis

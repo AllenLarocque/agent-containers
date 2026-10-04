@@ -24,6 +24,7 @@ check "uv 0.12.19"                     bash -c 'uv --version | grep -q "0.12.19"
 check "node 22"                        bash -c 'node --version | grep -q "^v22\."'
 check "claude 2.1.289"                 bash -c 'claude --version | grep -q "2.1.289"'
 check "firewall script present"        test -x /usr/local/bin/init-firewall.sh
+check "ip6tables present"             command -v ip6tables
 check "allowlist dir present"          test -d /etc/firewall/allowlist.d
 check "sudo limited to firewall"       bash -c 'sudo -n -l | grep -q "/usr/local/bin/init-firewall.sh"'
 
