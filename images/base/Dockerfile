@@ -52,7 +52,16 @@ RUN chmod 0755 /usr/local/bin/init-firewall.sh \
     && echo "agent ALL=(root) NOPASSWD: /usr/local/bin/init-firewall.sh" > /etc/sudoers.d/agent-firewall \
     && chmod 0440 /etc/sudoers.d/agent-firewall
 
+# PredictiveEcology/AI at the pinned commit: reading copy AND plugin marketplace source.
+RUN git clone --quiet https://github.com/PredictiveEcology/AI.git /opt/reference/pe-ai \
+    && git -C /opt/reference/pe-ai checkout --quiet "${PE_AI_COMMIT}" \
+    && chown -R agent:agent /opt/reference
+COPY agent-init.sh /usr/local/bin/agent-init.sh
+COPY configure-claude-settings.js /usr/local/lib/agent/configure-claude-settings.js
+RUN chmod 0755 /usr/local/bin/agent-init.sh
+
 USER agent
+ENV CLAUDE_CONFIG_DIR=/home/agent/.claude
 ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
 ENV PATH=/usr/local/share/npm-global/bin:$PATH SHELL=/bin/zsh EDITOR=nano
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
