@@ -12,3 +12,12 @@ jobs:
         run: docker buildx build --load -t spades-base:ci images/base
       - name: Smoke base
         run: docker run --rm -v "$PWD/tests:/tests:ro" spades-base:ci bash /tests/smoke/base.sh
+      - name: Firewall test (base + project allowlist merge)
+        run: |
+          echo "httpbin.org" > /tmp/50-project.txt
+          docker run -d --name fw --cap-add NET_ADMIN --cap-add NET_RAW \
+            -v /tmp/50-project.txt:/etc/firewall/allowlist.d/50-project.txt:ro \
+            -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
+          docker exec fw sudo /usr/local/bin/init-firewall.sh
+          docker exec fw bash /tests/firewall/test-firewall.sh
+          docker rm -f fw
