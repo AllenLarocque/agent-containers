@@ -1,0 +1,1 @@
+# Base allowlist — populated in Task 2.

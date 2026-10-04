@@ -8,8 +8,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      - name: TEMP resolve digest
-        run: docker buildx imagetools inspect rocker/r-ver:4.5.3 --format '{{json .Manifest.Digest}}'
       - name: Build base
         run: docker buildx build --load -t spades-base:ci images/base
       - name: Smoke base
