@@ -20,11 +20,13 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 
 # Geospatial system libraries IN BASE: every SpaDES module depends on terra.
 # ⚠️ Ubuntu's own GDAL only — P3M binary R packages are built against it; never add the ubuntugis PPA.
+# libglpk-dev: the igraph P3M binary (SpaDES.core dep) links libglpk.so.40.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libgdal-dev gdal-bin libgeos-dev libproj-dev libudunits2-dev libsqlite3-dev \
       libcurl4-openssl-dev libssl-dev libxml2-dev \
       libfontconfig1-dev libharfbuzz-dev libfribidi-dev libfreetype6-dev \
       libpng-dev libtiff5-dev libjpeg-dev cmake libmagick++-dev \
+      libglpk-dev \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # R bootstrap ONLY: enough to run setupProject(). Everything else is provisioned per project
