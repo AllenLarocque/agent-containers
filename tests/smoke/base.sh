@@ -48,11 +48,13 @@ expect_suid='/usr/bin/chfn
 /usr/bin/su
 /usr/bin/sudo
 /usr/bin/umount'
-got_suid=$(find / -xdev -perm -4000 -type f 2>/dev/null | LC_ALL=C sort)
+# (find/getcap exit non-zero on unreadable paths, which pipefail + set -e would turn into a silent abort)
+got_suid=$( { find / -xdev -perm -4000 -type f 2>/dev/null || true; } | LC_ALL=C sort)
 [ "$got_suid" = "$expect_suid" ] && ok "setuid binaries match the reviewed list" \
   || { bad "setuid binaries differ from the reviewed list:"; diff <(echo "$expect_suid") <(echo "$got_suid") | sed 's/^/        /'; }
 check "getcap present"                 command -v getcap
-got_caps=$(getcap -r / 2>/dev/null | grep -v '^/proc/\|^/sys/' | LC_ALL=C sort)
+mapfile -t capdirs < <(find / -mindepth 1 -maxdepth 1 -type d ! -name proc ! -name sys ! -name dev)
+got_caps=$( { getcap -r "${capdirs[@]}" 2>/dev/null || true; } | LC_ALL=C sort)
 [ -z "$got_caps" ] && ok "no file capabilities anywhere" || { bad "file capabilities found:"; echo "$got_caps" | sed 's/^/        /'; }
 check "dnsmasq account locked, no login shell" bash -c 'getent passwd dnsmasq | cut -d: -f7 | grep -Eq "(nologin|false)$"'
 check "no ssh client in base (git uses HTTPS via gh)" bash -c '! command -v ssh'
