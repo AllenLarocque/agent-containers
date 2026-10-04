@@ -6,12 +6,32 @@ set -euo pipefail
 IFS=$'\n\t'
 ALLOWLIST_DIR=/etc/firewall/allowlist.d
 
-mapfile -t ALLOWED_DOMAINS < <(cat "$ALLOWLIST_DIR"/*.txt 2>/dev/null \
-  | sed 's/#.*//' | tr -d ' \t\r' | grep -v '^$' | sort -u)
-if [ "${#ALLOWED_DOMAINS[@]}" -eq 0 ]; then
+# Parse every file line by line (never `cat` them together: a file without a trailing newline
+# would glue its last line to the next file's first). Validate EVERY token here, before any
+# iptables change, so a bad entry aborts with the existing rules untouched (never fail open).
+shopt -s nullglob
+ALLOWLIST_FILES=("$ALLOWLIST_DIR"/*.txt)
+shopt -u nullglob
+DOMAIN_RE='^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$'
+RAW_DOMAINS=()
+for f in "${ALLOWLIST_FILES[@]}"; do
+  n=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n+1))
+    line=${line%%#*}; line=${line//$'\r'/}
+    [[ $line =~ ^[[:space:]]*(.*[^[:space:]])[[:space:]]*$ ]] || continue   # blank
+    tok=${BASH_REMATCH[1]}
+    if [[ ! $tok =~ $DOMAIN_RE ]]; then
+      echo "ERROR: invalid allowlist entry in $f line $n: '$tok' (want a bare domain, e.g. example.org)"; exit 1
+    fi
+    RAW_DOMAINS+=("$tok")
+  done < "$f"
+done
+if [ "${#RAW_DOMAINS[@]}" -eq 0 ]; then
   echo "ERROR: no domains found in $ALLOWLIST_DIR/*.txt"; exit 1
 fi
-echo "Allowlist: ${#ALLOWED_DOMAINS[@]} domains from $(ls "$ALLOWLIST_DIR"/*.txt | xargs -n1 basename | tr '\n' ' ')"
+mapfile -t ALLOWED_DOMAINS < <(printf '%s\n' "${RAW_DOMAINS[@]}" | sort -u)
+echo "Allowlist: ${#ALLOWED_DOMAINS[@]} domains from $(printf '%s ' "${ALLOWLIST_FILES[@]##*/}")"
 
 # 1. Extract Docker DNS info BEFORE any flushing
 DOCKER_DNS_RULES=$(iptables-save -t nat | grep "127\.0\.0\.11" || true)
