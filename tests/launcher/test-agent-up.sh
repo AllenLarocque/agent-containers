@@ -238,5 +238,51 @@ else
   echo "SKIP: render checks (docker compose not available here; CI runs them)"
 fi
 
+# ---- behavioural: the rendered sandbox against the CI-built image (TEMPLATE_IMAGE=spades-base:ci).
+# `agent-up up` needs a registry digest, so this uses the SAME compose arguments agent-up uses
+# (pinned above) plus one override that swaps in the local image and skips agent-init.
+if [ -n "${TEMPLATE_IMAGE:-}" ]; then
+  docker image inspect "$TEMPLATE_IMAGE" >/dev/null 2>&1 || { echo "FAIL: TEMPLATE_IMAGE=$TEMPLATE_IMAGE not present"; exit 1; }
+  printf 'www.python.org\n' >> "$CFG/allowlist"
+  cat > "$T/override.yaml" <<OVR
+services:
+  agent:
+    image: $TEMPLATE_IMAGE
+    mem_limit: 4g
+    command: bash -c "sudo /usr/local/bin/init-firewall.sh && touch /tmp/fw-ready && exec sleep infinity"
+OVR
+  dc(){ env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u COMPOSE_FILE HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" \
+          docker compose --env-file "$CFG/project.conf" -f "$CFG/compose.yaml" -f "$CFG/.generated/env-passthrough.yaml" \
+          -f "$T/override.yaml" --project-directory "$CFG" -p "$NAME" "$@"; }
+  trap 'dc down -v >/dev/null 2>&1 || true; rm -rf "$T"' EXIT
+  docker volume inspect require-cache-shared >/dev/null 2>&1 || docker volume create require-cache-shared >/dev/null
+  # CI runner UID != 1000. In real use these are the agent's own (UID 1000) directories.
+  chmod -R a+rwX "$P" "$H/GitHub/spades.ai" "$H/agent-memory"
+  check "sandbox starts" dc up -d
+  CID="$(dc ps -q agent)"
+  for _ in $(seq 1 90); do docker exec "$CID" test -e /tmp/fw-ready 2>/dev/null && break; sleep 2; done
+  check "firewall initialised" docker exec "$CID" test -e /tmp/fw-ready
+  check "in-container allowlist == the config dir's allowlist" \
+    bash -c 'diff <(docker exec "$1" cat /etc/firewall/allowlist.d/50-project.txt) "$2"' _ "$CID" "$CFG/allowlist"
+  check "agent cannot write the in-container allowlist" \
+    bash -c '! docker exec -u agent "$1" sh -c "echo example.com >> /etc/firewall/allowlist.d/50-project.txt" 2>/dev/null' _ "$CID"
+  for d in /workspace /opt/memory /opt/reference/spades.ai; do
+    check "agent can write $d" docker exec -u agent "$CID" sh -c "echo x > $d/.agent-up-test && rm $d/.agent-up-test"
+  done
+  check "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 in the container" \
+    test "$(docker exec "$CID" printenv CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)" = 1
+  for host in sentry.io statsig.com; do
+    check "$host does not resolve (decision B)" \
+      bash -c '[ -z "$(docker exec -u agent "$1" dig @127.0.0.1 "$2" A +short +time=2 +tries=1 | grep -E "^[0-9.]+$")" ]' _ "$CID" "$host"
+  done
+  check "release-assets.githubusercontent.com still resolves (decision C)" \
+    bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 release-assets.githubusercontent.com A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID"
+  check "project-allowlisted www.python.org resolves" \
+    bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 www.python.org A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID"
+  dc down -v >/dev/null 2>&1 || true
+else
+  echo "SKIP: behavioural sandbox checks (set TEMPLATE_IMAGE to a built image; CI does)"
+fi
+
 # ---- END OF SECTIONS (later tasks insert above this line)
 [ "$fail" -eq 0 ] && echo "LAUNCHER: ALL PASSED" || { echo "LAUNCHER: FAILURES"; exit 1; }
