@@ -166,6 +166,25 @@ PT="$CFG/.generated/env-passthrough.yaml"
 check "passthrough lists the key NAME" grep -qx "      - GH_TOKEN" "$PT"
 check "  ...and holds no value or reference" bash -c '! grep -Eq "fake-secret|op://|=" "$1"' _ "$PT"
 
+# ---- passthrough coverage
+cp "$CFG/project.env" "$T/penv2.bak"
+cat > "$CFG/project.env" <<'PENV'
+ZED=op://v/i/f
+# a comment
+GH_TOKEN=op://agent-demo-proj/github-agent/token
+ALPHA=op://v/i/f
+PENV
+au config "$NAME" > /dev/null 2>&1
+check "passthrough: sorted names, comments ignored" bash -c '[ "$(grep "^      - " "$1" | sed "s/^      - //" | paste -sd, -)" = "ALPHA,GH_TOKEN,ZED" ]' _ "$PT"
+cat > "$CFG/project.env" <<'PENV'
+# nothing here
+PENV
+au config "$NAME" > /dev/null 2>&1
+check "passthrough: empty list when only comments" bash -c 'grep -qx "    environment: \[\]" "$1"' _ "$PT"
+cp "$T/penv2.bak" "$CFG/project.env"
+au config "$NAME" > /dev/null 2>&1
+check "passthrough: restored to single GH_TOKEN" grep -qx "      - GH_TOKEN" "$PT"
+
 # ---- lifecycle commands
 : > "$DLOG"
 check "shell" au shell "$NAME"
