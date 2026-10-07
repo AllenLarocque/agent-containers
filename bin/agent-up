@@ -83,7 +83,7 @@ CONFEOF
     echo "agent-up: created the shared agent memory repo $mem (spec §13.2)"
   fi
 
-  local f rel parts cur linked
+  local f rel parts part cur linked
   while IFS= read -r -d '' f; do
     rel="${f#"$SEEDS/repo/"}"
     # Never write through a symlink: the project dir is agent-writable.
@@ -123,26 +123,34 @@ cfg_dir(){ # $1 project -> its config dir (must exist)
   printf '%s' "$CFG_ROOT/$p"
 }
 check_files(){
-  local f cfgname proj
+  local f cfgname proj prof img
   for f in compose.yaml project.env allowlist project.conf; do
     [ -f "$1/$f" ] || die "missing $1/$f (re-create it from agent-containers/project-template/config)"
   done
   cfgname="$(basename "$1")"
   proj="$(conf_get "$1/project.conf" PROJECT)"
   [ "$proj" = "$cfgname" ] || die "PROJECT in $1/project.conf ($proj) must equal the config dir name ($cfgname)"
+  prof="$(conf_get "$1/project.conf" PROFILE)"
+  [ "$prof" = builder ] || die "PROFILE=$prof in $1/project.conf: only builder is built (research is spec §2 Phase 1b)"
+  img="$(conf_get "$1/project.conf" IMAGE)"
+  case "$img" in base|gis|bio) ;; *) die "IMAGE=$img in $1/project.conf: must be base, gis or bio" ;; esac
 }
 check_digest(){
   grep -Eq '^[[:space:]]*image:[[:space:]]*[^[:space:]]+@sha256:[0-9a-f]{64}[[:space:]]*$' "$1" \
     || die "$1: the image is not pinned to a real digest (@sha256:<64 hex>). Copy one from agent-containers/digests.md."
 }
 check_project_env(){ # op:// references only; never echo a line (it could hold a pasted secret)
-  local bad
+  local bad reserved
+  reserved="$(grep -nE '^[[:space:]]*(PROJECT|PROJECT_DIR|PROFILE|IMAGE|SPADES_AI_DIR|AGENT_MEMORY_DIR|PATH|HOME|(COMPOSE|DOCKER|OP)_[A-Za-z0-9_]*)=' "$1" | sed 's/^\([0-9]*\):[[:space:]]*\([A-Za-z0-9_]*\)=.*/line \1: \2/' | paste -sd, - || true)"
+  [ -z "$reserved" ] || die "$1 uses reserved key name(s) that would override compose or the launcher ($reserved); rename them"
   bad="$(grep -nEv '^[[:space:]]*(#|$)' "$1" | grep -Ev '^[0-9]+:[A-Za-z_][A-Za-z0-9_]*=op://[^[:space:]]+$' | cut -d: -f1 | paste -sd, - || true)"
   [ -z "$bad" ] || die "$1 may hold only KEY=op://... references; offending line number(s): $bad (values not shown)"
 }
-check_mounts(){ # every rw bind source exists and does not contain the config dir
-  local cfgreal key src
+check_mounts(){ # every rw bind source exists and does not contain the config dir, the config root or this clone
+  local cfgreal key src what path clone rootreal hit
   cfgreal="$(cd "$1" && pwd -P)"
+  clone="$(cd "$HERE/.." && pwd -P)"
+  rootreal="$(cd "$CFG_ROOT" && pwd -P)"
   for key in PROJECT_DIR SPADES_AI_DIR AGENT_MEMORY_DIR; do
     src="$(conf_get "$1/project.conf" "$key")"
     [ -n "$src" ] || die "$key is not set in $1/project.conf"
@@ -155,6 +163,11 @@ check_mounts(){ # every rw bind source exists and does not contain the config di
     case "$cfgreal/" in
       "$src"/*) die "$key ($src) contains the config dir $1: the agent could edit its own sandbox. Move one of them." ;;
     esac
+    for what in "the agent-containers clone|$clone" "the config root|$rootreal"; do
+      path="${what#*|}"; what="${what%%|*}"
+      if [ "$src" = / ]; then hit=1; else hit=0; case "$path/" in "$src"/*) hit=1 ;; esac; fi
+      [ "$hit" -eq 0 ] || die "$key ($src) contains $what ($path): the agent could rewrite what the host runs. Use a separate agent-only clone."
+    done
   done
 }
 write_passthrough(){ # container env NAMES from project.env; values never touch disk
@@ -196,6 +209,9 @@ cmd_config(){
   [ $# -ge 1 ] || usage
   local cfg; cfg="$(cfg_dir "$1")"; shift
   prepare "$cfg"
+  # Never print the owner's ambient value of a passthrough key: it is only meaningful under `op run`.
+  local k
+  while IFS= read -r k; do [ -z "$k" ] || unset "$k"; done < <(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$cfg/project.env")
   "${COMPOSE[@]}" config "$@"
 }
 cmd_shell(){

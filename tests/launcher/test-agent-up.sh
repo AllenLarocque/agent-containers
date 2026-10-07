@@ -138,6 +138,23 @@ cp "$T/penv.bak" "$CFG/project.env"
 cp "$CFG/project.conf" "$T/pconf.bak"; sed -i "s|^PROJECT_DIR=.*|PROJECT_DIR=$H|" "$CFG/project.conf"
 refuses "up refuses a workspace that contains the config dir" 'contains the config dir' au up "$NAME"
 cp "$T/pconf.bak" "$CFG/project.conf"
+cp "$CFG/project.env" "$T/penv.bak"; echo 'PROJECT_DIR=op://v/i/f' >> "$CFG/project.env"
+refuses "up refuses a reserved key name in project.env" 'reserved' au up "$NAME"
+cp "$T/penv.bak" "$CFG/project.env"
+cp "$CFG/project.conf" "$T/pconf.bak"; sed -i "s|^PROFILE=.*|PROFILE=research|" "$CFG/project.conf"
+refuses "up refuses PROFILE=research (only builder is built)" 'only builder is built' au up "$NAME"
+cp "$T/pconf.bak" "$CFG/project.conf"
+sed -i "s|^IMAGE=.*|IMAGE=foo|" "$CFG/project.conf"
+refuses "up refuses an unknown IMAGE" 'IMAGE=foo.*base, gis or bio' au up "$NAME"
+cp "$T/pconf.bak" "$CFG/project.conf"
+sed -i "s|^PROJECT_DIR=.*|PROJECT_DIR=$ROOT|" "$CFG/project.conf"
+refuses "up refuses a rw mount containing the launcher clone" 'contains the agent-containers clone.*agent could rewrite what the host runs' au up "$NAME"
+sed -i "s|^PROJECT_DIR=.*|PROJECT_DIR=$CFGROOT|" "$CFG/project.conf"
+refuses "up refuses a rw mount equal to the config root" 'contains the config (root|dir)' au up "$NAME"
+cp "$T/pconf.bak" "$CFG/project.conf"
+mv "$CFG/allowlist" "$T/allowlist.off"
+refuses "up refuses a missing allowlist" 'missing .*allowlist' au up "$NAME"
+mv "$T/allowlist.off" "$CFG/allowlist"
 check "a refused up never reached docker" test ! -e "$DLOG"
 
 # ---- up: pre-flight refusals (continued)
@@ -225,9 +242,9 @@ if docker compose version >/dev/null 2>&1; then
     jq -e '(.services.agent.cap_add | index("NET_ADMIN") and index("NET_RAW")) and (.services.agent.mem_limit != null)' <<<"$J"
   check "rendered: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1" \
     test "$(jq -r '.services.agent.environment.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC' <<<"$J")" = 1
+  ambient_hidden(){ local o; o="$(cd "$T" && aureal config "$NAME" --format json)" || return 1; ! grep -q dummy-render <<<"$o"; }
   AMBIENT=(GH_TOKEN=dummy-render)
-  check "rendered: a project.env key passes through from op run's environment" \
-    test "$(cd "$T" && aureal config "$NAME" --format json | jq -r .services.agent.environment.GH_TOKEN)" = dummy-render
+  check "rendered: config never prints the owner's ambient value of a passthrough key" ambient_hidden
   AMBIENT=()
   # Acceptance (spec §11): planted files in the project folder change nothing.
   mkdir -p "$P/.devcontainer"
@@ -255,7 +272,7 @@ services:
     mem_limit: 4g
     command: bash -c "sudo /usr/local/bin/init-firewall.sh && touch /tmp/fw-ready && exec sleep infinity"
 OVR
-  dc(){ env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u COMPOSE_FILE HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" \
+  dc(){ env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u COMPOSE_FILE HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" GH_TOKEN=dummy-in-container \
           docker compose --env-file "$CFG/project.conf" -f "$CFG/compose.yaml" -f "$CFG/.generated/env-passthrough.yaml" \
           -f "$T/override.yaml" --project-directory "$CFG" -p "$NAME" "$@"; }
   trap 'dc down -v >/dev/null 2>&1 || true; rm -rf "$T"' EXIT
@@ -280,6 +297,8 @@ OVR
     for d in /workspace /opt/memory /opt/reference/spades.ai; do
       check "agent can write $d" docker exec -u agent "$CID" sh -c "echo x > $d/.agent-up-test && rm $d/.agent-up-test"
     done
+    # dc runs with a dummy GH_TOKEN in its environment (what `op run` supplies in real use).
+    check "a project.env secret reaches the container env" test "$(docker exec "$CID" printenv GH_TOKEN)" = dummy-in-container
     check "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 in the container" \
       test "$(docker exec "$CID" printenv CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)" = 1
     for host in sentry.io statsig.com; do
