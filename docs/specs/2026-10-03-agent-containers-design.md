@@ -1,6 +1,19 @@
 # agent-containers — design spec
 
-**Status:** draft for review · **Date:** 2026-10-03 · **Owner:** Allen Larocque
+**Status:** draft for review · **Date:** 2026-10-03 · **Amended:** 2026-10-06 (draft, for review) ·
+**Owner:** Allen Larocque
+
+> **2026-10-06 amendment, in brief.** The opus re-review of PR #3 showed that a launcher living
+> *inside* the agent's writable folder can't be made safe. This amendment:
+> - adds an explicit threat model with two agent profiles (§2.1);
+> - moves everything that defines the sandbox out of the project folder into the owner's config
+>   directory, run by an external launcher, `agent-up` (§4);
+> - sets the build order **containers → T3 Code orchestrator → memory**, with the seams Phase 1
+>   must leave for the later phases (§13).
+>
+> Docker Sandboxes (`sbx`) was evaluated and put **on hold**: proprietary, mandatory login,
+> telemetry on by default. See `docs/spikes/2026-10-05-docker-sandboxes-spike.md` on branch
+> `spike/docker-sandboxes`.
 **Needed by:** the week of 2026-10-05 (new GIS / predictive-modelling / fire-modelling SpaDES
 project; transition to team work).
 
@@ -24,22 +37,67 @@ firewall allowlist and agent identity).
 | The Python env for reticulate: Require doesn't manage it, and reticulate's default silently binds a bare Python | Python envs are baked or pinned explicitly; modules state the interpreter (§3.4) |
 | `renv` and `Require` both take over `.libPaths()`/`.Rprofile` | **no renv**; SpaDES projects use `setupProject`/`Require` only (§3.1) |
 
-## 2. Scope
+## 2. Scope (amended 2026-10-06)
 
-**Phase 1 (this spec, needed next week):** images, project template, firewall, secrets,
-agent GitHub identity, CI, skills/reference layer (hooks shipped *disabled*).
+Built in this order. Each phase must work before the next starts:
 
-**Seams left for later (designed in, not built):**
-- **Memory / knowledge base:** a git repo for now; a mount point is reserved (§4).
+| Phase | Delivers | Status |
+|---|---|---|
+| **1 — Containers** | images, external launcher + per-project config, firewall, secrets, agent GitHub identity, CI, skills/reference layer (hooks shipped *disabled*); the **builder** profile | images/firewall/CI done on `feat/phase1`; launcher being reworked (§4) |
+| **1b — Research profile** | the second profile (§2.1), built on the same images | designed here; built after the builder profile works |
+| **2 — Orchestrator** | T3 Code driving agents that run *inside* the containers (§13.1) | seams reserved in Phase 1 |
+| **3 — Memory** | per-project + shared memory, handoffs between projects (§13.2) | seams reserved in Phase 1 |
+
+**Other seams left for later (designed in, not built):**
 - **Hooks:** to be reviewed and taught before any are enabled (§8).
-- **Remote execution:** an `sshd` toggle (off by default), so a container can later be an SSH
-  target for an orchestrator.
 - **Cloud:** the same images run on the enterprise cloud machine (>100 GB RAM).
 - **Memory gates reading the cgroup limit:** handled with the memory-gate and benchmarking work in
   the pipeline repos, not here (§4).
+- **Stronger isolation:** gVisor (`runsc`) as the container runtime, and/or microVMs
+  (microsandbox, Apache-2.0, once out of beta), mainly for the research profile.
+- **Token never visible to the agent:** Claude Code's sandbox credential `mask` inside the
+  container, so a scoped token is *used* but never *readable* (threat 3).
 
-**Non-goals:** orchestrators (Paperclip etc.: parked), voice/mobile, Obsidian integration, the
-NAS services.
+**Non-goals:** voice/mobile, Obsidian integration, the NAS services, proprietary sandbox runtimes
+(`sbx`: on hold, see above).
+
+### 2.1 Threat model and agent profiles (added 2026-10-06)
+
+| # | Threat | Priority |
+|---|---|---|
+| 1 | **Accidents:** the agent deletes or overwrites things, burns compute, or "fixes" its own sandbox to get unblocked | **all agents** |
+| 3 | **Credential theft:** tokens or secrets leave the box | **all agents** |
+| 2 | **Prompt injection** from untrusted inputs (web pages, downloaded data, packages, READMEs) steering the agent | research agents |
+| 4 | **Cross-project contamination:** one project's compromise spreading to others | research agents |
+
+**Design rule:** *nothing the agent can write is ever executed or interpreted by the host.* This
+covers threat 1 as well as attacks. Agents work around blockers (see the setup-workarounds
+history), and an agent widening its own allowlist to get unblocked is threat 1 turning into
+threat 3.
+
+**Two profiles:**
+
+| | **Builder** (project work: R, pipelines, PRs) | **Research** (open internet; Phase 1b) |
+|---|---|---|
+| Egress | firewall allowlist (base + project) | open on 80/443 |
+| Secrets | tier A (scoped, revocable; §5) | **none**: no GitHub token, no data keys |
+| Project folder | read-write at `/workspace` | **not mounted** |
+| spades.ai | read-write | not mounted |
+| Shared memory (§13.2) | read-write | not mounted |
+| Input / output | the project itself | a **task brief** (ro) in; a **quarantine outbox** (rw) out, read by the user or a builder as *untrusted* |
+| Shared caches (Require, uv) | shared, read-write | own, not shared |
+
+The research profile follows the "lethal trifecta" rule: an agent that reads untrusted content
+and can send data anywhere must not also hold private data or credentials.
+
+**Accepted for builders:**
+- content from allowlisted hosts (GitHub issues, READMEs, package docs) is untrusted and still
+  read;
+- read-write shared mounts (spades.ai, memory, Require cache) mean a compromised builder could
+  affect other projects;
+- tier-A values are readable inside the container until credential masking lands.
+
+Revisit if builders start consuming untrusted content heavily.
 
 ## 3. Images
 
@@ -89,46 +147,83 @@ Either way, modules **state the interpreter explicitly before the first Python c
 interpreter configured, reticulate silently auto-provisions a bare Python, and that binding
 cannot be undone in-process.
 
-## 4. Project template (`project-template/`)
+## 4. Project setup and the launcher (amended 2026-10-06: replaces the in-folder template)
 
-Copied into each project. Four files plus a helper:
+**Principle (§2.1):** the project folder holds only project content. Everything that *defines the
+sandbox* lives in the owner's config directory, which the container never mounts. The one
+exception is the allowlist file, mounted read-only. The host never executes or interprets a file
+from the project folder.
 
-- **`compose.yaml`:**
-  - `image:` by **digest**;
-  - `user: "1000:1000"`;
-  - the project bind-mounted at `/workspace`;
-  - `cap_add: [NET_ADMIN, NET_RAW]` (firewall);
-  - an explicit **`mem_limit`**;
-  - `command: sleep infinity`;
-  - volumes:
-    - `claude-config` → `~/.claude`, **fixed name** `claude-<project>`, so logins, settings and
-      agent notes survive rebuilds;
-    - `require-cache` → Require's package cache, **one shared external volume** across all
-      SpaDES projects;
-    - `uv-cache` (optional, shared);
-    - `~/.config/agent-containers/<project>.allowlist` (host, owner-maintained, outside the
-      agent-writable workspace) → `/etc/firewall/allowlist.d/50-project.txt:ro` (amended 2026-10-04);
-    - **reserved:** a `memory` mount point (empty until the memory repo exists).
-  - Ports, if ever needed, publish on **`127.0.0.1` only**. The compose project name gives one
-    group in lazydocker/Dockge.
-- **`devcontainer.json`:** points at `compose.yaml` (`dockerComposeFile`, `service`,
-  `workspaceFolder`), so VS Code's "Reopen in Container" still works.
-- **`project.env`:** **`op://` references only**; committable. Example:
-  `GH_TOKEN=op://agent-<project>/github/token`.
-- **`allowlist.txt`:** a seed only (amended 2026-10-04): copied once to
-  `~/.config/agent-containers/<project>.allowlist` on the host, which the firewall reads; edits in the
-  repo have no effect. Domains beyond the base list; SSH to own servers needs an entry too. The base list is CRAN/P3M, PredictiveEcology
-  r-universe, Bioconductor, GitHub (+ GHCR), Anthropic, and the npm registry for the CLI.
-- **`up`** (helper): `op run --env-file project.env -- docker compose up -d --force-recreate`.
+```
+~/GitHub/agent-containers/              # the owner's clone: launcher + seeds (never mounted)
+  bin/agent-up
+  project-template/                     # seeds copied by `agent-up init`
+~/.config/agent-containers/<project>/   # owner-maintained, per project (never mounted)
+  compose.yaml                          # generated from the seed, then owner-edited
+  project.env                           # op:// references only
+  allowlist                             # project domains → /etc/firewall/allowlist.d/50-project.txt:ro
+  project.conf                          # PROJECT_DIR, PROFILE (builder|research), IMAGE (base|gis|bio)
+<project-dir>/                          # the agent's read-write workspace: code, data, outputs, CLAUDE.md
+```
+
+**Commands** (run on the host, from the owner's clone):
+
+| Command | Does |
+|---|---|
+| `agent-up init <project-dir> [--image gis] [--profile builder]` | creates `~/.config/agent-containers/<project>/` from the seeds; prints the remaining steps (vault, digest) |
+| `agent-up up <project>` | checks the image digest, then `op run --env-file <cfg>/project.env -- docker compose -f <cfg>/compose.yaml --project-directory <cfg> -p <project> up -d --force-recreate` |
+| `agent-up shell <project>` | `docker exec -it -u agent <project>-agent-1 zsh` |
+| `agent-up status \| stop \| down <project>` | compose wrappers |
+
+**`compose.yaml`** (the seed):
+- `image:` by **digest**;
+- `user: "1000:1000"`, `init: true`;
+- `cap_add: [NET_ADMIN, NET_RAW]` (firewall);
+- an explicit **`mem_limit`**;
+- the firewall and `agent-init` run at start;
+- volumes (builder profile):
+  - `${PROJECT_DIR}` → `/workspace` (rw);
+  - `claude-<project>` → `~/.claude` (**fixed name**: logins, settings, per-project memory survive
+    rebuilds);
+  - `rlib-<project>` → the setupProject standAlone library (fixed name);
+  - `require-cache-shared` → Require's cache (shared, external);
+  - `uv-cache` (optional, shared);
+  - the allowlist → `/etc/firewall/allowlist.d/50-project.txt:ro`;
+  - spades.ai → `/opt/reference/spades.ai` (rw);
+  - **reserved:** `memory` (§13.2), `t3-<project>` (§13.1);
+- ports, if ever needed, published on **`127.0.0.1` only**, with a matching firewall INPUT rule
+  (INPUT is default-DROP).
+
+**Secrets:** `op run` resolves them in the launcher's process only. No plaintext env file is
+written to disk. This drops `resolve-secrets` and the mode-600 env file.
+
+**Editor:** VS Code **"Dev Containers: Attach to Running Container…"**. There is no
+`devcontainer.json` in the project folder, so a planted one can't redefine the container.
+
+**Working practice:**
+- **Recommended:** do git and R inside the container (attached VS Code or `agent-up shell`).
+- Host git in the project folder is *allowed*, but it honours agent-writable `.git/config` and
+  hooks. That's accepted for builders under §2.1; don't do it on research output.
+- Secret scanning (gitleaks) runs in **CI** as a required check, not as a host-side pre-commit
+  hook.
+
+**Removed from the 2026-10-04 template:**
+- the read-only overlays;
+- launcher checksums and `--adopt`;
+- `.env` rewriting and refusal;
+- `check-digest` and `resolve-secrets` in the folder (`agent-up` absorbs them);
+- the project `.devcontainer/`;
+- the host pre-commit hook.
 
 **Lifecycle**
 
 | Action | Steps |
 |---|---|
-| New project | copy the template; create vault `agent-<project>` + its service account + scoped GitHub token; `./up` |
-| Upgrade the image | bump the digest in `compose.yaml` (from `digests.md`); `./up` |
-| Change the allowlist | edit `~/.config/agent-containers/<project>.allowlist` on the host; `./up` |
-| Change a secret | edit it in 1Password; `./up` (env is fixed at container creation) |
+| New project | create vault `agent-<project>` + service account + scoped GitHub token; `agent-up init <dir>`; set the digest; `agent-up up <project>` |
+| Upgrade the image | bump the digest in `<cfg>/compose.yaml` (from `digests.md`); `agent-up up <project>` |
+| Change the allowlist | edit `<cfg>/allowlist`; `agent-up up <project>` |
+| Change a secret | edit it in 1Password; `agent-up up <project>` (env is fixed at creation) |
+| Attach | VS Code *Attach to Running Container*, or `agent-up shell <project>` |
 
 ⚠️ **Memory limits vs. memory gates:** with `mem_limit` set, `/proc/meminfo` inside the container
 still reports the **host's** memory. Pipeline memory gates must read `/sys/fs/cgroup/memory.max`.
@@ -163,7 +258,8 @@ revocable** secrets go there.
 
 **Guards:**
 - `.gitignore` patterns for resolved env files (`.env.resolved`, `*.secret`);
-- a pre-commit secret scanner (gitleaks) in each repo;
+- a secret scanner (gitleaks) as a **required CI check** in each repo (amended 2026-10-06: not a
+  host-side pre-commit hook, per §2.1);
 - the egress firewall limits where a leaked tier-A secret could go.
 
 ## 6. Agent identity and the merge gate
@@ -234,17 +330,35 @@ also when agent-side enforcement of the merge gate (e.g. blocking `gh pr merge`)
 
 - [ ] `spades-base`, `spades-gis` and `spades-bio` build in CI from pinned inputs and pass their smoke tests.
 - [ ] Images are public on GHCR; `digests.md` lists them.
-- [ ] A new project created from the template, given the user's `./up`, starts with:
+- [ ] A new project set up with `agent-up init` + `agent-up up` (amended 2026-10-06) starts with:
   - [ ] the firewall applied (base + project allowlist);
   - [ ] tier-A secrets resolved from its own vault;
   - [ ] Claude config on the fixed-name volume;
   - [ ] the shared Require cache.
-- [ ] Recreating the container keeps Claude config, notes and the Require cache.
+- [ ] Recreating the container keeps Claude config, notes, the project R library and the Require cache.
+- [ ] Nothing in the project folder is executed or read as configuration by the host launcher
+  (verified: a planted `compose.yaml`, `.devcontainer/`, `.env` or `up` in the project folder
+  changes nothing).
+- [ ] VS Code attaches to the running container; R and the terminal work there.
 - [ ] The agent's GitHub identity can open a PR but **cannot** merge to `main` (verified by trying).
 - [ ] `main` of this repo is protected (PR + CI required).
 - [ ] `setupProject()` runs in a fresh `spades-gis` container for a minimal SpaDES project, with plain `Rscript`.
 
 ## 12. Open questions
+
+**Added 2026-10-06:**
+- **B:** drop `sentry.io` and `statsig.com` from the base allowlist and set
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`? (Recommended: yes.)
+- **C:** keep `release-assets.githubusercontent.com` in base? (Recommended: yes.)
+- **Interim shared memory:** mount an empty `~/agent-memory` git repo read-write for builders now,
+  so cross-project handoffs work before Phase 3 designs its structure? (Recommended: yes.)
+- **Research profile and the Claude login:** a research container still holds a Claude
+  credential while having open egress. Use a separate API key with a spend cap, or accept the
+  subscription token there?
+- **T3 connection method** (Phase 2): SSH into the container, or `t3 serve` + pairing on a
+  127.0.0.1 port? (§13.1)
+
+**Earlier:**
 
 - **Agent identity:** machine user or GitHub App? A machine user is simpler; an App is cleaner
   for org use. Revisit with the team.
@@ -252,3 +366,53 @@ also when agent-side enforcement of the merge gate (e.g. blocking `gh pr merge`)
   when they're known.
 - **Whether the PredictiveEcology/AI plugins are already used by the team in Posit Assistant**
   in a way that requires matching versions.
+
+## 13. Seams for Phase 2 (orchestrator) and Phase 3 (memory) (added 2026-10-06)
+
+Phase 1 doesn't build these. It must not block them, and it reserves the pieces listed.
+
+### 13.1 T3 Code (Phase 2)
+
+**Vetting (licence, account, telemetry checked first):**
+- MIT, open source (`pingdotgg/t3code`).
+- **Pre-1.0:** "very early, expect bugs", so pin an exact version.
+- No account needed for local pairing. T3 Connect (a cloud relay) is optional and **not used**.
+- Product telemetry (PostHog) is **on by default**: set `T3CODE_TELEMETRY_ENABLED=false`. It
+  isn't on any allowlist, so it's blocked anyway.
+
+**Fit:** T3 keeps execution where the workspace is. Its server ("environment") owns the agent
+processes, git and files, and clients only display and steer over authenticated RPC. So:
+- **one container = one T3 environment.** `t3` runs *inside* each builder container, behind the
+  firewall, using that container's Claude login;
+- **the T3 desktop app on Windows is only a client**, showing every project in one sidebar;
+- **⛔ never use T3's local environment or its WSL-distro integration.** Both run agents directly
+  on the host, with the user's credentials, outside the sandbox. Disable `localEnvironmentEnabled`.
+- T3 never routes work between environments, which preserves per-project isolation. Its
+  orchestrator MCP (sub-agents, threads) works within one environment only.
+- Git worktrees for parallel threads are created inside the container's checkout.
+
+**Reserved in Phase 1:**
+- a volume name `t3-<project>` for `~/.t3` (thread history, event log, worktrees);
+- one commented `127.0.0.1` port line in the compose seed, plus the firewall INPUT rule pattern
+  (already documented in `init-firewall.sh`);
+- the earlier `sshd` toggle, if Phase 2 chooses SSH.
+
+**Phase 2 checks:**
+- `node-pty` builds in our image (needs `g++`, `make`, `python3`);
+- T3's default permission mode is **Full access**. That's acceptable inside a builder container,
+  but decide it explicitly;
+- hooks policy (§8) still applies to the Claude that T3 starts.
+
+### 13.2 Memory (Phase 3)
+
+| Layer | Where | Who writes |
+|---|---|---|
+| Per-project working memory | Claude's own memory in the `claude-<project>` volume | that project's agent (exists today) |
+| Shared memory and handoffs | a git repo on the host, mounted at `/opt/memory` | builders: rw; research: not mounted |
+| Curated conventions | spades.ai (§8) | builders: rw; changes reviewed as PRs |
+
+**Reserved in Phase 1:** the `/opt/memory` mount point (optionally live now; see §12).
+
+**Phase 3 designs:** structure, what goes where, curation, how handoffs are written and found, and
+whether shared memory needs provenance (which project wrote what). T3 thread history isn't
+memory: it is per environment and won't be relied on.
