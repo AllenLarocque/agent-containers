@@ -3,11 +3,10 @@
 # project's): every other name is REFUSED. Project additions live on the OWNER's host in
 # ~/.config/agent-containers/<project>.allowlist, mounted read-only as 50-project.txt. Domain rationale is carried over from
 # spades-dev-environment/.devcontainer/init-firewall.sh (2026-09).
-# --- Claude Code / npm
+# --- Claude Code / npm. sentry.io and statsig.com (error reports, telemetry) are deliberately NOT
+# here: containers set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 (spec §12, decision B).
 api.anthropic.com
 registry.npmjs.org
-sentry.io
-statsig.com
 # --- VS Code server + extensions
 marketplace.visualstudio.com
 vscode.blob.core.windows.net
