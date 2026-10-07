@@ -22,7 +22,12 @@ check "exiftool"                       exiftool -ver
 check "gh"                             gh --version
 check "uv 0.12.19"                     bash -c 'uv --version | grep -qE "^uv 0\.12\.19( |$)"'
 check "node 22"                        bash -c 'node --version | grep -q "^v22\."'
-check "claude 2.1.289"                 bash -c 'claude --version | grep -qE "^2\.1\.289( |$)"'
+# Claude Code is proprietary and the images are public: ONLY the integrity-locked spec is baked in.
+check "Claude Code NOT in the image"   bash -c '[ -z "$(find / -xdev \( -path /proc -o -path /sys \) -prune -o -path "*@anthropic-ai/claude-code*" -print -quit 2>/dev/null)" ]'
+check "claude wrapper says not installed" bash -c 'out=$(claude --version 2>&1); [ $? -eq 127 ] && grep -q "not installed yet" <<<"$out"'
+check "Claude Code lockfile has integrity" bash -c 'jq -e ".packages[\"node_modules/@anthropic-ai/claude-code\"].integrity | startswith(\"sha512-\")" /usr/local/lib/agent/claude-code/package-lock.json'
+check "CLAUDE_CODE_ID matches the lockfile" bash -c '[ "$(cat /usr/local/lib/agent/claude-code/CLAUDE_CODE_ID)" = "$(sha256sum /usr/local/lib/agent/claude-code/package-lock.json | cut -c1-16)" ]'
+check "/opt/claude-code owned by agent" bash -c '[ "$(stat -c %U /opt/claude-code)" = agent ]'
 check "firewall script present"        test -x /usr/local/bin/init-firewall.sh
 check "ip6tables present"             command -v ip6tables
 check "allowlist dir present"          test -d /etc/firewall/allowlist.d
@@ -62,6 +67,7 @@ check "no ssh client in base (git uses HTTPS via gh)" bash -c '! command -v ssh'
 check "PE/AI on disk at pinned commit" bash -c 'git -C /opt/reference/pe-ai rev-parse HEAD | grep -q "^e7ae689751316dfe742f31b32d0d659accd0cc41$"'
 check "agent-init present"             test -x /usr/local/bin/agent-init.sh
 check "agent-init succeeds"            bash -c 'CLAUDE_CONFIG_DIR=/tmp/cc /usr/local/bin/agent-init.sh'
+check "agent-init installed the pinned claude" bash -c 'want=$(jq -r ".dependencies[\"@anthropic-ai/claude-code\"]" /usr/local/lib/agent/claude-code/package.json); claude --version | grep -qE "^${want//./\\.}( |$)"'
 check "PE/AI plugins installed"        bash -c 'jq -e ".plugins | keys | map(select(test(\"@predictiveecology-ai$\"))) | length == 3" /tmp/cc/plugins/installed_plugins.json'
 check "superpowers installed"          bash -c 'jq -e ".plugins | has(\"superpowers@superpowers-marketplace\")" /tmp/cc/plugins/installed_plugins.json'
 check "NO hooks in settings"           bash -c 'jq -e "has(\"hooks\") | not" /tmp/cc/settings.json'

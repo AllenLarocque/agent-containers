@@ -6,6 +6,9 @@ log(){ printf '[agent-init] %s\n' "$*"; }
 export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 mkdir -p "$CLAUDE_CONFIG_DIR"
 
+# 0. Claude Code itself (not in the image; see install-claude-code.sh). Everything below needs it.
+/usr/local/bin/install-claude-code || log "WARN Claude Code NOT installed: plugins, settings and claude itself unavailable"
+
 # 1. Plugins. PE/AI from the PINNED local checkout (same commit as /opt/reference/pe-ai, so
 #    plugin and reading copy cannot disagree); personal plugins from GitHub.
 add_mkt(){ claude plugin marketplace add "$1" >/dev/null 2>&1 && log "marketplace: $1" || log "WARN marketplace add failed: $1"; }

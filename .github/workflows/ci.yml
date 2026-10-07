@@ -4,16 +4,82 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+# A newer push to the same PR cancels the run in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
+  # ONE build per run: the publish script itself (build, push to a local registry:2, smoke-test every
+  # image BY DIGEST, promote latest, render digests.md) with layers cached in the GitHub Actions cache.
+  # The remaining tests then use those exact images, pulled back as spades-*:ci.
   build-test:
     runs-on: ubuntu-24.04
+    services:
+      registry:
+        image: registry:2
+        ports: ["5000:5000"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # build-publish.sh dates layers by the last commit touching each image dir
+      - name: Free runner disk (preinstalled SDKs we never use, ~30 GB)
+        run: |
+          # Without this the runner filled up pulling spades-bio back for its smoke test (2026-10-07, PR #5).
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+      # buildx runs in a docker-container builder with network=host so it reaches localhost:5000.
       - uses: docker/setup-buildx-action@v3
-      - name: Build base
-        run: docker buildx build --load -t spades-base:ci images/base
-      - name: Smoke base
-        run: docker run --rm -v "$PWD/tests:/tests:ro" spades-base:ci bash /tests/smoke/base.sh
+        with:
+          driver-opts: network=host
+      # Exposes the Actions cache credentials to `docker buildx` run from a script (type=gha cache).
+      - uses: crazy-max/ghaction-github-runtime@v3
+      - name: Build (cached) + push to local registry, smoke by digest, render digests.md
+        env:
+          BUILD_CACHE: gha
+        run: |
+          # On failure, surface the log tail + disk usage as an annotation: job logs live on a blob host
+          # that agent containers cannot reach, while the annotations API is readable.
+          set -o pipefail
+          start=$(date +%s)
+          scripts/build-publish.sh localhost:5000/allenlarocque "2000.01.01-dryrun" /tmp/digests.md 2>&1 | tee /tmp/publish.log || {
+            rc=$?
+            msg=$( { tail -n 60 /tmp/publish.log; echo '--- df -h'; df -h /; } | sed 's/%/%25/g; s/\r//g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=build-publish failed (rc=$rc)::$msg"
+            exit "$rc"
+          }
+          echo "::notice title=build-publish seconds::$(( $(date +%s) - start ))"
+      - name: Verify digests.md
+        run: |
+          cat /tmp/digests.md
+          grep -Pq '^\| spades-base \| 2000\.01\.01-dryrun \| \x60sha256:[0-9a-f]{64}\x60 \|$' /tmp/digests.md
+          grep -Pq '^\| spades-bio \| 2000\.01\.01-dryrun \| \x60sha256:[0-9a-f]{64}\x60 \|$' /tmp/digests.md
+          grep -Pq '^\| spades-gis \| 2000\.01\.01-dryrun \| \x60sha256:[0-9a-f]{64}\x60 \|$' /tmp/digests.md
+          [ "$(grep -c '^| spades-' /tmp/digests.md)" = 3 ]
+          # header must match the committed skeleton
+          diff <(head -7 digests.md) <(head -7 /tmp/digests.md)
+      - name: Use the pushed images as spades-*:ci for the remaining tests
+        run: |
+          for img in base gis bio; do
+            docker pull -q "localhost:5000/allenlarocque/spades-$img:latest"
+            docker tag "localhost:5000/allenlarocque/spades-$img:latest" "spades-$img:ci"
+          done
+      - name: Image size report (annotation)
+        if: always()
+        run: |
+          r=$( {
+            echo "== images"; docker image ls --format '{{.Repository}}:{{.Tag}}  {{.Size}}' | grep -E '^spades-(base|gis|bio):ci'
+            for img in base bio; do
+              echo "== spades-$img largest layers"
+              docker history --no-trunc --format '{{.Size}}\t{{.CreatedBy}}' "spades-$img:ci" | grep -v '^0B' \
+                | sort -h -r | head -n 8 | cut -c1-160
+            done
+            echo "== spades-base: big directories"
+            docker run --rm -u root spades-base:ci du -sh /usr/local/lib/R /usr/lib/x86_64-linux-gnu /usr/share /usr/local/share /opt /usr/lib/R 2>/dev/null
+            echo "== spades-bio: conda"
+            docker run --rm -u root spades-bio:ci du -sh /opt/conda /opt/conda/envs/* /opt/conda/pkgs 2>/dev/null
+            echo "== disk"; df -h /
+          } 2>&1 | sed 's/%/%25/g; s/\r//g' | awk '{printf "%s%%0A", $0}')
+          echo "::notice title=image sizes::$r"
       - name: Fresh named volumes are writable by agent (R library + Require cache)
         run: |
           # setupProject's project library lives under ~/.local/share/R; a fresh named volume must inherit agent ownership.
@@ -115,17 +181,6 @@ jobs:
           docker exec -u root fwlong bash /tests/firewall/test-long-allowlist.sh || rc=1
           docker rm -f fwlong
           exit $rc
-      # Child images use plain `docker build`: the buildx container driver cannot see locally loaded images.
-      - name: Build gis
-        run: docker build --build-arg BASE_IMAGE=spades-base:ci -t spades-gis:ci images/gis
-      - name: Smoke gis
-        run: docker run --rm -v "$PWD/tests:/tests:ro" spades-gis:ci bash /tests/smoke/gis.sh
-      - name: Build bio
-        run: docker build --build-arg BASE_IMAGE=spades-base:ci -t spades-bio:ci images/bio
-      - name: Smoke bio
-        run: |
-          docker run --rm -v "$PWD/tests:/tests:ro" spades-bio:ci bash /tests/smoke/bio.sh
-          docker image ls spades-bio:ci
       - name: Bio allowlist example passes firewall validation
         run: |
           # A malformed example would break every real bio project that copies it.
@@ -183,28 +238,3 @@ jobs:
       - name: gitleaks (full history, redacted)
         run: docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 git /repo --redact --verbose
 
-  # Dry-run of the publish workflow (build, smoke-by-digest, latest promotion): same script, but against a local registry:2 instead of GHCR.
-  # buildx runs in a docker-container builder with network=host so it can reach localhost:5000
-  # (as it reaches ghcr.io in the real workflow); gis is built FROM base by registry digest.
-  publish-dryrun:
-    runs-on: ubuntu-24.04
-    services:
-      registry:
-        image: registry:2
-        ports: ["5000:5000"]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-        with:
-          driver-opts: network=host
-      - name: Build + push to local registry, render digests.md
-        run: scripts/build-publish.sh localhost:5000/allenlarocque "2000.01.01-dryrun" /tmp/digests.md
-      - name: Verify digests.md
-        run: |
-          cat /tmp/digests.md
-          grep -Pq '^\| spades-base \| 2000\.01\.01-dryrun \| \x60sha256:[0-9a-f]{64}\x60 \|$' /tmp/digests.md
-          grep -Pq '^\| spades-bio \| 2000\.01\.01-dryrun \| \x60sha256:[0-9a-f]{64}\x60 \|$' /tmp/digests.md
-          grep -Pq '^\| spades-gis \| 2000\.01\.01-dryrun \| \x60sha256:[0-9a-f]{64}\x60 \|$' /tmp/digests.md
-          [ "$(grep -c '^| spades-' /tmp/digests.md)" = 3 ]
-          # header must match the committed skeleton
-          diff <(head -7 digests.md) <(head -7 /tmp/digests.md)
