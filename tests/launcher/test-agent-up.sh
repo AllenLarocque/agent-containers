@@ -23,7 +23,6 @@ T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 H="$T/home"; CFGROOT="$H/.config/agent-containers"
 mkdir -p "$H/GitHub/spades.ai" "$T/bin" "$T/dstub"
 OPLOG="$T/op.log"; DLOG="$T/docker.log"
-# shellcheck disable=SC2034  # used by the up/render sections (later tasks)
 H64=$(printf 'a%.0s' $(seq 64))
 TOK=""        # fake service-account token; empty = unset for agent-up
 AMBIENT=()    # extra (hostile) environment for a call
@@ -112,6 +111,100 @@ check "  ...config is odd-name-" test -d "$CFGROOT/odd-name-"
 XD="$T/xdir"; mkdir -p "$XD"
 check "init --name .x" au init "$XD" --name .x
 check "  ...config is x" test -d "$CFGROOT/x"
+
+# ---- up: pre-flight refusals (the stub docker must never be reached)
+TOK=tok
+refuses "up refuses an unknown project" 'no config' au up nosuch
+refuses "up refuses the placeholder digest" 'not pinned to a real digest' au up "$NAME"
+sed -i "s/REPLACE_WITH_DIGEST_FROM_digests.md/$H64/" "$CFG/compose.yaml"
+TOK=""
+refuses "up refuses without OP_SERVICE_ACCOUNT_TOKEN" 'OP_SERVICE_ACCOUNT_TOKEN' au up "$NAME"
+TOK=tok
+mv "$H/GitHub/spades.ai" "$H/GitHub/spades.ai.off"
+refuses "up refuses a missing spades.ai dir" 'SPADES_AI_DIR directory not found' au up "$NAME"
+mv "$H/GitHub/spades.ai.off" "$H/GitHub/spades.ai"
+mv "$H/agent-memory" "$H/agent-memory.off"
+refuses "up refuses a missing agent memory dir" 'AGENT_MEMORY_DIR directory not found' au up "$NAME"
+mv "$H/agent-memory.off" "$H/agent-memory"
+cp "$CFG/project.env" "$T/penv.bak"; echo 'API_KEY=supersecret-plaintext' >> "$CFG/project.env"
+refuses "up refuses a plaintext value in project.env" 'only KEY=op://.*line number' au up "$NAME"
+msg=$(au up "$NAME" 2>&1 || true)
+check "  ...without echoing the value" bash -c '! grep -q supersecret <<<"$1"' _ "$msg"
+cp "$T/penv.bak" "$CFG/project.env"
+cp "$CFG/project.conf" "$T/pconf.bak"; sed -i "s|^PROJECT_DIR=.*|PROJECT_DIR=$H|" "$CFG/project.conf"
+refuses "up refuses a workspace that contains the config dir" 'contains the config dir' au up "$NAME"
+cp "$T/pconf.bak" "$CFG/project.conf"
+check "a refused up never reached docker" test ! -e "$DLOG"
+
+# ---- up: success, with hostile ambient compose/interpolation variables
+AMBIENT=(COMPOSE_FILE=evil.yaml COMPOSE_PROFILES=evil PROJECT_DIR=/evil SPADES_AI_DIR=/evil)
+rc=0; out=$(au up "$NAME" 2>&1) || rc=$?
+AMBIENT=()
+check "up succeeds (stub op + stub docker)" test "$rc" -eq 0
+C="compose --env-file $CFG/project.conf -f $CFG/compose.yaml -f $CFG/.generated/env-passthrough.yaml --project-directory $CFG -p $NAME"
+check "  ...op run resolves project.env, then runs docker compose" \
+  grep -qxF "OP: run --env-file $CFG/project.env -- docker $C up -d --force-recreate" "$OPLOG"
+check "  ...docker compose gets ONLY the config dir's files" grep -qxF "ARGS: $C up -d --force-recreate" "$DLOG"
+check "  ...ambient COMPOSE_*/PROJECT_DIR/SPADES_AI_DIR unset; the resolved secret reaches compose" \
+  bash -c '[ "$(grep "^ENV:" "$1" | tail -n 1)" = "ENV: COMPOSE_FILE=<unset> COMPOSE_PROFILES=<unset> PROJECT_DIR=<unset> SPADES_AI_DIR=<unset> GH_TOKEN=fake-secret-value-123" ]' _ "$DLOG"
+check "  ...the shared Require cache volume is ensured" grep -qxF "ARGS: volume inspect require-cache-shared" "$DLOG"
+check "  ...no secret value on stdout/stderr" bash -c '! grep -q fake-secret-value-123 <<<"$1"' _ "$out"
+PT="$CFG/.generated/env-passthrough.yaml"
+check "passthrough lists the key NAME" grep -qx "      - GH_TOKEN" "$PT"
+check "  ...and holds no value or reference" bash -c '! grep -Eq "fake-secret|op://|=" "$1"' _ "$PT"
+
+# ---- lifecycle commands
+: > "$DLOG"
+check "shell" au shell "$NAME"
+check "  ...docker exec as agent in /workspace" grep -qxF "ARGS: exec -it -u agent -w /workspace $NAME-agent-1 zsh" "$DLOG"
+check "status" au status "$NAME"
+check "  ...compose ps" grep -qxF "ARGS: $C ps" "$DLOG"
+check "stop" au stop "$NAME"
+check "  ...compose stop" grep -qxF "ARGS: $C stop" "$DLOG"
+check "down" au down "$NAME"
+check "  ...compose down WITHOUT -v (named volumes kept)" grep -qxF "ARGS: $C down" "$DLOG"
+
+# ---- rendering with the REAL docker compose (CI; skipped where docker is absent)
+if docker compose version >/dev/null 2>&1; then
+  render(){ ( cd "$1" && aureal config "$NAME" --format json ); }   # rendered FROM the given cwd
+  J="$(render "$T")"
+  m(){ jq -c --arg t "$1" '.services.agent.volumes[] | select(.target==$t)' <<<"$J"; }
+  rw_from(){ [ "$(jq -r .source <<<"$1")" = "$2" ] && [ "$(jq -r '.read_only // false' <<<"$1")" = false ]; }
+  PD="$(cd "$P" && pwd -P)"
+  check "rendered: project name" test "$(jq -r .name <<<"$J")" = "$NAME"
+  check "rendered: image pinned by digest" bash -c 'jq -r .services.agent.image <<<"$1" | grep -Eq "@sha256:[0-9a-f]{64}$"' _ "$J"
+  check "rendered: /workspace = PROJECT_DIR, read-write" rw_from "$(m /workspace)" "$PD"
+  check "rendered: /opt/reference/spades.ai read-write" rw_from "$(m /opt/reference/spades.ai)" "$H/GitHub/spades.ai"
+  check "rendered: /opt/memory read-write" rw_from "$(m /opt/memory)" "$H/agent-memory"
+  check "rendered: allowlist from the config dir, read-only" \
+    bash -c '[ "$(jq -r .source <<<"$1")" = "$2" ] && [ "$(jq -r .read_only <<<"$1")" = true ]' _ "$(m /etc/firewall/allowlist.d/50-project.txt)" "$CFG/allowlist"
+  check "rendered: nothing else under /etc/firewall" \
+    test "$(jq '[.services.agent.volumes[] | select(.target|startswith("/etc/firewall"))] | length' <<<"$J")" = 1
+  check "rendered: no rw bind contains the config dir" \
+    bash -c 'jq -r ".services.agent.volumes[] | select(.type==\"bind\" and ((.read_only // false)|not)) | .source" <<<"$1" | while IFS= read -r s; do case "$2/" in "${s%/}/"*) echo "rw $s contains $2"; exit 1;; esac; done' _ "$J" "$CFG"
+  check "rendered: claude-$NAME, rlib-$NAME, external require-cache-shared" \
+    bash -c '[ "$(jq -r ".volumes[\"claude-config\"].name" <<<"$1")" = "claude-$2" ] && [ "$(jq -r ".volumes.rlib.name" <<<"$1")" = "rlib-$2" ] && [ "$(jq -r ".volumes[\"require-cache\"].name" <<<"$1")" = require-cache-shared ] && [ "$(jq -r ".volumes[\"require-cache\"].external" <<<"$1")" = true ]' _ "$J" "$NAME"
+  check "rendered: no env_file (secrets only via op run)" test -z "$(jq -r '.services.agent.env_file // empty' <<<"$J")"
+  check "rendered: NET_ADMIN + NET_RAW, explicit mem_limit" \
+    jq -e '(.services.agent.cap_add | index("NET_ADMIN") and index("NET_RAW")) and (.services.agent.mem_limit != null)' <<<"$J"
+  check "rendered: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1" \
+    test "$(jq -r '.services.agent.environment.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC' <<<"$J")" = 1
+  AMBIENT=(GH_TOKEN=dummy-render)
+  check "rendered: a project.env key passes through from op run's environment" \
+    test "$(cd "$T" && aureal config "$NAME" --format json | jq -r .services.agent.environment.GH_TOKEN)" = dummy-render
+  AMBIENT=()
+  # Acceptance (spec §11): planted files in the project folder change nothing.
+  mkdir -p "$P/.devcontainer"
+  printf 'services:\n  agent:\n    image: evil\n' | tee "$P/compose.yaml" "$P/docker-compose.yml" "$P/compose.override.yaml" >/dev/null
+  printf 'PROJECT_DIR=/\nCOMPOSE_FILE=compose.yaml\nPROJECT=evil\n' > "$P/.env"
+  cp "$P/.env" "$P/project.conf"; printf 'evil.example.com\n' > "$P/allowlist"
+  printf '#!/bin/sh\necho evil\n' > "$P/up"; printf '{}\n' > "$P/.devcontainer/devcontainer.json"
+  check "planted project files change NOTHING (rendered from inside the project)" \
+    bash -c 'diff <(jq -S . <<<"$1") <(jq -S . <<<"$2")' _ "$J" "$(render "$P")"
+  rm -rf "$P/.devcontainer" "$P/compose.yaml" "$P/docker-compose.yml" "$P/compose.override.yaml" "$P/.env" "$P/project.conf" "$P/allowlist" "$P/up"
+else
+  echo "SKIP: render checks (docker compose not available here; CI runs them)"
+fi
 
 # ---- END OF SECTIONS (later tasks insert above this line)
 [ "$fail" -eq 0 ] && echo "LAUNCHER: ALL PASSED" || { echo "LAUNCHER: FAILURES"; exit 1; }
