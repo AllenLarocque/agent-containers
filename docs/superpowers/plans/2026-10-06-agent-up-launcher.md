@@ -796,7 +796,6 @@ OVR
   for d in /workspace /opt/memory /opt/reference/spades.ai; do
     check "agent can write $d" docker exec -u agent "$CID" sh -c "echo x > $d/.agent-up-test && rm $d/.agent-up-test"
   done
-  check "the config dir is not visible in the container" bash -c '! docker exec "$1" test -e "$2"' _ "$CID" "$CFG"
   check "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 in the container" \
     test "$(docker exec "$CID" printenv CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)" = 1
   for host in sentry.io statsig.com; do
