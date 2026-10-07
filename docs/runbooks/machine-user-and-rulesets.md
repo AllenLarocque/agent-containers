@@ -76,7 +76,7 @@ Repo → Settings → Rules → Rulesets → New ruleset → **New branch rulese
    - **Restrict deletions**
    - **Block force pushes**
    - **Require a pull request before merging**, with: Required approvals = **1**; **Dismiss stale pull request approvals when new commits are pushed**; **Require review from Code Owners**; **Require approval of the most recent reviewable push**
-   - **Require status checks to pass** → Add checks → `build-test`
+   - **Require status checks to pass** → Add checks → `build-test`, `gitleaks` (added to every project repo by `agent-up init`; selectable after its first run)
 5. Create.
 
 *Why `build-test` only:* it builds the images and runs the smoke, firewall and template tests, so it is the real quality gate. `publish-dryrun` is a heavier rehearsal of the publish pipeline and would make unrelated merges wait; add it later if publish breakage becomes recurring.

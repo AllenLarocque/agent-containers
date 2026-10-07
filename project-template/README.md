@@ -65,3 +65,27 @@ written to disk.
 Host git in the project folder is allowed, but host git honours the folder's `.git/config` and
 hooks, which the agent can write. If you do use host git there, run
 `git -c core.hooksPath=/dev/null -c core.fsmonitor=false ...`.
+
+## Known residual risks
+
+The firewall confines the agent to allowlisted names on ports 22, 80 and 443, and to DNS for
+allowlisted names only. It does not remove these risks:
+
+- **Upload-capable allowlisted domains.** Anything that accepts uploads, with credentials the agent
+  could be handed, is an exfiltration path: github.com with a foreign token, S3, Google Drive or
+  googleapis, Zenodo, PyPI. A bucket-style entry such as `s3-us-west-2.amazonaws.com` covers every
+  bucket under it. List the narrowest names you can.
+- **Shared CDN IPs.** An allowed IP stays allowed, and CDN edge IPs serve many other sites. A
+  connection to an allowed IP with a different Host/SNI can reach another site on the same CDN.
+- **DNS tunnelling through allowlisted domains** whose zones are delegated to users (dynamic-DNS
+  providers, some hosting platforms). Review project allowlists with that in mind.
+- **The pre-firewall window at container start.** The container has open networking until
+  `init-firewall.sh` applies its DROP policies. Nothing of the agent's runs yet, and
+  `conntrack -F` kills any flow opened before.
+- **Tier-A secrets are readable inside the container**, and visible to anyone on the host who can
+  run `docker inspect`. Keep them scoped and short-lived (spec §5).
+- **First real `agent-up up` on WSL2 / Docker Desktop:** check the firewall log
+  (`docker logs <project>-agent-1`).
+  - The firewall needs the kernel's `xt_owner` match and conntrack netlink (`conntrack -F`). If
+    either is missing it fails CLOSED and the container does not finish starting.
+  - Also check VS Code extension downloads: `*.gallerycdn.vsassets.io` may need to be allowlisted.

@@ -37,8 +37,7 @@ permissions).
    [machine-user-and-rulesets.md](machine-user-and-rulesets.md) steps 2 to 4.
    - In the project repo: replace `@OWNER` in `.github/CODEOWNERS`, then commit it together with
      `.github/workflows/gitleaks.yml` and `.gitignore`.
-   - Make **`build-test`** (once CI exists) and **`gitleaks`** required checks in the ruleset.
-     They only become selectable after they have run once.
+   - Push the project's `.github/` changes first and let CI run once: GitHub only offers a check for the ruleset after it has run. Then add `gitleaks` (and `build-test`, once the project has CI) as required checks, and re-run the gate verification (step 8) so the checks are covered.
 5. **Project domains:** add the extra domains the project needs to
    `~/.config/agent-containers/<project>/allowlist`.
    - One domain per line; a domain also matches its subdomains.
