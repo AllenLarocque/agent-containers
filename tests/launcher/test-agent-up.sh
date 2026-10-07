@@ -10,14 +10,17 @@ REAL_HOME="$HOME"
 fail=0
 check(){ # $1 label, rest = command that must succeed
   local d="$1" o; shift
-  if o=$("$@" 2>&1); then echo "OK:   $d"; else echo "FAIL: $d"; printf '%s\n' "$o" | sed 's/^/        /'; fail=1; fi
+  if o=$("$@" 2>&1); then echo "OK:   $d"; else echo "FAIL: $d"; printf '%s\n' "$o" | sed 's/^/        /'; annotate "$d"; fail=1; fi
 }
 refuses(){ # $1 label, $2 ERE the message must match, rest = command that must FAIL
   local d="$1" re="$2" rc=0 msg; shift 2
   msg=$("$@" 2>&1) || rc=$?
   if [ "$rc" -ne 0 ] && grep -Eq -- "$re" <<<"$msg"; then echo "OK:   $d"
-  else echo "FAIL: $d (rc=$rc, want non-zero and /$re/)"; printf '%s\n' "$msg" | sed 's/^/        /'; fail=1; fi
+  else echo "FAIL: $d (rc=$rc, want non-zero and /$re/)"; printf '%s\n' "$msg" | sed 's/^/        /'; annotate "$d"; fail=1; fi
 }
+# In GitHub Actions, also surface each failure as an annotation (readable via the checks API even
+# where the raw log is not).
+annotate(){ [ -z "${GITHUB_ACTIONS:-}" ] || echo "::error title=launcher test::FAIL: $1"; }
 
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 H="$T/home"; CFGROOT="$H/.config/agent-containers"
