@@ -164,7 +164,7 @@ from the project folder.
   compose.yaml                          # generated from the seed, then owner-edited
   project.env                           # op:// references only
   allowlist                             # project domains → /etc/firewall/allowlist.d/50-project.txt:ro
-  project.conf                          # PROJECT_DIR, PROFILE (builder|research), IMAGE (base|gis|bio)
+  project.conf                          # PROJECT_DIR, PROFILE (builder|research; only builder is built, agent-up refuses research until Phase 1b), IMAGE (base|gis|bio)
 <project-dir>/                          # the agent's read-write workspace: code, data, outputs, CLAUDE.md
 ```
 
