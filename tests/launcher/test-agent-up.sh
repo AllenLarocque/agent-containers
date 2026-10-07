@@ -87,5 +87,29 @@ check "  ...existing CODEOWNERS kept" grep -qx '\* @me' "$P2/.github/CODEOWNERS"
 check "  ...compose uses spades-bio" grep -q "spades-bio@sha256:" "$CFGROOT/bio2/compose.yaml"
 check "  ...bio domains appended to the allowlist" grep -qx "mycoportal.org" "$CFGROOT/bio2/allowlist"
 
+# ---- init: symlinks, permissions, atomicity, names
+SP1="$T/symproj1"; mkdir -p "$SP1/.github"; ln -s "$T/evil-target" "$SP1/.github/CODEOWNERS"
+check "init succeeds with a dangling CODEOWNERS symlink" au init "$SP1" --name symproj1
+check "  ...nothing written through the dangling symlink" test ! -e "$T/evil-target"
+check "  ...the symlink is still a symlink" test -L "$SP1/.github/CODEOWNERS"
+SP2="$T/symproj2"; mkdir -p "$SP2" "$T/evil-dir"; ln -s "$T/evil-dir" "$SP2/.github"
+out2="$(au init "$SP2" --name symproj2 2>&1)" || { echo "FAIL: init with symlinked .github"; fail=1; }
+check "  ...nothing written into the symlinked directory" test -z "$(ls -A "$T/evil-dir")"
+check "  ...output says skipped" grep -q "skipped" <<<"$out2"
+check "seed .gitignore copied with normal mode (644)" test "$(stat -c %a "$P/.gitignore")" = 644
+noleft(){ ! ls -A "$CFGROOT" | grep -q '^\.init\.'; }
+refuses "refusal: missing dir (again)" 'project directory not found' au init "$T/nope"
+refuses "refusal: research (again)" 'Phase 1b' au init "$P" --profile research --name zz
+refuses "refusal: unknown image (again)" 'base, gis or bio' au init "$P" --image foo --name zz
+check "no .init.* leftovers after refusals and successes" noleft
+check "no config dir for refused inits" test ! -e "$CFGROOT/zz"
+check "config dirs are exactly the expected ones" test "$(ls -A "$CFGROOT" | sort | tr '\n' ' ')" = "bio2 demo-proj symproj1 symproj2 "
+OD="$T/_Odd Name!"; mkdir -p "$OD"
+check "init of '_Odd Name!' derives a letter-first name" au init "$OD"
+check "  ...config is odd-name-" test -d "$CFGROOT/odd-name-"
+XD="$T/xdir"; mkdir -p "$XD"
+check "init --name .x" au init "$XD" --name .x
+check "  ...config is x" test -d "$CFGROOT/x"
+
 # ---- END OF SECTIONS (later tasks insert above this line)
 [ "$fail" -eq 0 ] && echo "LAUNCHER: ALL PASSED" || { echo "LAUNCHER: FAILURES"; exit 1; }

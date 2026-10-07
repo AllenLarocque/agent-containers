@@ -21,7 +21,7 @@ usage:
 USAGE
   exit 2
 }
-normalise(){ printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9_-]/-/g'; }
+normalise(){ printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9_-]/-/g; s/^[^a-z0-9]*//'; }
 conf_get(){ sed -n "s/^$2=//p" "$1" | tail -n 1; }   # $1 project.conf, $2 KEY
 
 cmd_init(){
@@ -49,15 +49,18 @@ cmd_init(){
   local cfg="$CFG_ROOT/$name"
   { [ ! -e "$cfg" ] && [ ! -L "$cfg" ]; } || die "config already exists: $cfg (edit it there; init never overwrites)"
 
+  umask 077   # config files are private from the first byte
   mkdir -p "$CFG_ROOT"; chmod 700 "$CFG_ROOT"
-  mkdir -m 700 "$cfg"
-  sed "s|/spades-gis@sha256:|/spades-$image@sha256:|" "$SEEDS/config/compose.yaml" > "$cfg/compose.yaml"
-  sed "s|PROJECTNAME|$name|g" "$SEEDS/config/project.env" > "$cfg/project.env"
-  cp "$SEEDS/config/allowlist" "$cfg/allowlist"
+  # Build in a temp dir and move into place last, so a failure never leaves a half-built config.
+  local tmp; tmp="$(mktemp -d "$CFG_ROOT/.init.XXXXXX")"
+  trap 'rm -rf "$tmp"' EXIT
+  sed "s|/spades-gis@sha256:|/spades-$image@sha256:|" "$SEEDS/config/compose.yaml" > "$tmp/compose.yaml"
+  sed "s|PROJECTNAME|$name|g" "$SEEDS/config/project.env" > "$tmp/project.env"
+  cp "$SEEDS/config/allowlist" "$tmp/allowlist"
   if [ "$image" = bio ]; then
-    { echo; cat "$SEEDS/config/allowlist.bio-example"; } >> "$cfg/allowlist"
+    { echo; cat "$SEEDS/config/allowlist.bio-example"; } >> "$tmp/allowlist"
   fi
-  cat > "$cfg/project.conf" <<CONFEOF
+  cat > "$tmp/project.conf" <<CONFEOF
 # Owner-maintained settings for agent-up; also compose interpolation variables (--env-file).
 # KEY=VALUE, no quotes.
 PROJECT=$name
@@ -67,7 +70,10 @@ IMAGE=$image
 SPADES_AI_DIR=$HOME/GitHub/spades.ai
 AGENT_MEMORY_DIR=$HOME/agent-memory
 CONFEOF
-  chmod 600 "$cfg/compose.yaml" "$cfg/project.env" "$cfg/allowlist" "$cfg/project.conf"
+  chmod 600 "$tmp/compose.yaml" "$tmp/project.env" "$tmp/allowlist" "$tmp/project.conf"
+  chmod 700 "$tmp"
+  mv -T "$tmp" "$cfg"
+  trap - EXIT
 
   local mem="$HOME/agent-memory"
   if [ ! -d "$mem" ]; then
@@ -75,10 +81,21 @@ CONFEOF
     echo "agent-up: created the shared agent memory repo $mem (spec §13.2)"
   fi
 
-  local f rel
+  umask 022   # seed files copied into the project keep normal permissions
+  local f rel part cur linked
   while IFS= read -r -d '' f; do
     rel="${f#"$SEEDS/repo/"}"
-    if [ -e "$dir/$rel" ]; then
+    # Never write through a symlink: the project dir is agent-writable.
+    linked=0; cur="$dir"
+    for part in $(dirname "$rel" | tr '/' ' '); do
+      [ "$part" = . ] && continue
+      cur="$cur/$part"
+      if [ -L "$cur" ]; then linked=1; break; fi
+      [ -e "$cur" ] || break
+    done
+    if [ "$linked" = 1 ]; then
+      echo "agent-up: skipped $rel: a symlink in its path (not followed)"
+    elif [ -e "$dir/$rel" ] || [ -L "$dir/$rel" ]; then
       echo "agent-up: kept the project's existing $rel"
     else
       mkdir -p "$dir/$(dirname "$rel")"; cp "$f" "$dir/$rel"
