@@ -190,7 +190,8 @@ from the project folder.
   - `uv-cache` (optional, shared);
   - the allowlist → `/etc/firewall/allowlist.d/50-project.txt:ro`;
   - spades.ai → `/opt/reference/spades.ai` (rw);
-  - **reserved:** `memory` (§13.2), `t3-<project>` (§13.1);
+  - `~/agent-memory` → `/opt/memory` (rw, builders; §13.2);
+  - **reserved:** `t3-<project>` (§13.1);
 - ports, if ever needed, published on **`127.0.0.1` only**, with a matching firewall INPUT rule
   (INPUT is default-DROP).
 
@@ -346,17 +347,24 @@ also when agent-side enforcement of the merge gate (e.g. blocking `gh pr merge`)
 
 ## 12. Open questions
 
-**Added 2026-10-06:**
-- **B:** drop `sentry.io` and `statsig.com` from the base allowlist and set
-  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`? (Recommended: yes.)
-- **C:** keep `release-assets.githubusercontent.com` in base? (Recommended: yes.)
-- **Interim shared memory:** mount an empty `~/agent-memory` git repo read-write for builders now,
-  so cross-project handoffs work before Phase 3 designs its structure? (Recommended: yes.)
-- **Research profile and the Claude login:** a research container still holds a Claude
-  credential while having open egress. Use a separate API key with a spend cap, or accept the
-  subscription token there?
-- **T3 connection method** (Phase 2): SSH into the container, or `t3 serve` + pairing on a
-  127.0.0.1 port? (§13.1)
+**Decided 2026-10-06 (user):**
+- **B — yes.** Drop `sentry.io` and `statsig.com` from the base allowlist. Set
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` in the containers.
+  - Lost there: Remote Control and cross-machine session messaging (T3 replaces these), artifacts,
+    `/feedback` and `/bug`, release notes, `/skill-doctor`, `claude import`, and Anthropic's crash
+    reports.
+  - Auto-updates are off too, which is wanted because the version is pinned.
+  - Per project, the variable can be unset if one of these is needed.
+- **C — yes.** Keep `release-assets.githubusercontent.com` in base (GitHub release downloads).
+- **Interim shared memory — yes.** Mount a `~/agent-memory` git repo on the host, read-write for
+  builders, at `/opt/memory`. Phase 3 designs its structure.
+- **Research profile Claude credential — the subscription login.**
+  - Accepted risk: open egress plus that token is threat 3 in its riskiest profile.
+  - Mitigations, for the research runbook: log out or revoke the session from claude.ai if
+    compromise is suspected; watch usage.
+- **T3 connection (Phase 2) — recommended: `t3 serve` + pairing.** A pinned T3 baked into the
+  image, started with the container, on a `127.0.0.1` port. No sshd. To be confirmed on first use
+  in Phase 2.
 
 **Earlier:**
 
@@ -411,7 +419,8 @@ processes, git and files, and clients only display and steer over authenticated 
 | Shared memory and handoffs | a git repo on the host, mounted at `/opt/memory` | builders: rw; research: not mounted |
 | Curated conventions | spades.ai (§8) | builders: rw; changes reviewed as PRs |
 
-**Reserved in Phase 1:** the `/opt/memory` mount point (optionally live now; see §12).
+**In Phase 1 (decided 2026-10-06):** `/opt/memory` is mounted live, read-write for builders,
+from a `~/agent-memory` git repo on the host (empty at first).
 
 **Phase 3 designs:** structure, what goes where, curation, how handoffs are written and found, and
 whether shared memory needs provenance (which project wrote what). T3 thread history isn't
