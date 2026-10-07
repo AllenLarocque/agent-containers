@@ -3,8 +3,8 @@
 
 // Pre-configures the claude-hud statusline and display options, and
 // disables the extra --dangerously-skip-permissions confirmation prompt,
-// baked into the image at /home/node/.claude so a fresh named volume
-// (mounted there by devcontainer.json) is seeded with this content on first
+// written into $CLAUDE_CONFIG_DIR (the claude-<project> named volume, see the
+// compose seed in project-template/config) and seeded with this content on first
 // container start.
 //
 // Usage: node configure-claude-settings.js <node-runtime-path>

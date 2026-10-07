@@ -1,7 +1,7 @@
 # Base egress allowlist for every agent container. One domain per line; a base domain
 # also matches its subdomains (dnsmasq semantics). dnsmasq resolves ONLY these names (and the
 # project's): every other name is REFUSED. Project additions live on the OWNER's host in
-# ~/.config/agent-containers/<project>.allowlist, mounted read-only as 50-project.txt. Domain rationale is carried over from
+# ~/.config/agent-containers/<project>/allowlist, mounted read-only as 50-project.txt. Domain rationale is carried over from
 # spades-dev-environment/.devcontainer/init-firewall.sh (2026-09).
 # --- Claude Code / npm. sentry.io and statsig.com (error reports, telemetry) are deliberately NOT
 # here: containers set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 (spec §12, decision B).

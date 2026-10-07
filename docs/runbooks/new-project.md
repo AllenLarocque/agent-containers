@@ -1,43 +1,71 @@
 # Runbook: set up a new SpaDES project
 
-**Human procedure.** The agent must never perform these steps (they involve host secrets and repo permissions).
+**Human procedure.** The agent must never perform these steps (they involve host secrets and repo
+permissions).
 
-Prerequisites on the host: Docker, 1Password CLI (`op`), `pre-commit`, and a clone of this repo (`agent-containers`). `<project>` is the project folder name. It becomes the compose project name (lowercased to `[a-z0-9_-]`) and the container name `<project>-agent-1`.
+**Prerequisites on the host:**
+- Docker;
+- the 1Password CLI (`op`);
+- a clone of this repo at `~/GitHub/agent-containers`. The commands below assume
+  `~/GitHub/agent-containers/bin` is on your `PATH`; otherwise type the full path.
+
+`<project>` is the project folder name, lowercased to `[a-z0-9_-]`. The container is
+`<project>-agent-1`.
 
 ## Steps
 
-1. **Copy the template** into the project root (note the trailing `/.`, which also copies the hidden `.devcontainer/` and `.pre-commit-config.yaml`):
+1. **Create the project's config** (outside the project folder):
 
    ```bash
-   cp -r agent-containers/project-template/. <project>/
+   agent-up init ~/GitHub/<project>                # GIS / fire projects (spades-gis)
+   agent-up init ~/GitHub/<project> --image bio    # amplicon projects (spades-bio; adds the bio domains)
    ```
 
-   This gives you `.github/CODEOWNERS` (replace the `@OWNER` placeholder with your GitHub username, then commit it; see the machine-user runbook step 2), `compose.yaml`, `project.env`, `allowlist.txt` (a seed only, see step 6), `up`, `resolve-secrets`, `check-digest`, `.devcontainer/devcontainer.json`, `.pre-commit-config.yaml`, `.gitignore` and `README.md`.
-2. **Set the image digest.** In `compose.yaml`, replace `REPLACE_WITH_DIGEST_FROM_digests.md` with a digest copied from `agent-containers/digests.md` (the `spades-gis` row, unless you have a reason to use another image). Check it: `./check-digest` prints `check-digest: OK`. `./up` refuses to run until this passes. *Why: pinning by digest means the container never changes underneath you.*
-3. **Set the project name.** In `project.env`, replace `PROJECTNAME` with the project name so the line reads `GH_TOKEN=op://agent-<project>/github-agent/token`. Do not put real secrets in this file: it holds `op://` references only and is committed.
-4. **Run the vault runbook:** [1password-project-vault.md](1password-project-vault.md) (vault, service account, host token).
-5. **Machine user, "set up" half (before `./up`):** [machine-user-and-rulesets.md](machine-user-and-rulesets.md) steps 2 to 4 (collaborator, CODEOWNERS, Actions-approval setting OFF on project repos, token stored in the vault from step 4, ruleset). The `build-test` check only becomes selectable in the ruleset after CI has run once on the repo, so if the project repo has no CI yet, create the ruleset without it and add the check after the first CI run.
-6. **Create the project allowlist on the host, outside the repo:**
+   - This creates `~/.config/agent-containers/<project>/` (`compose.yaml`, `project.env`,
+     `allowlist`, `project.conf`).
+   - It also creates `~/agent-memory` the first time.
+   - It adds `.github/CODEOWNERS`, `.github/workflows/gitleaks.yml` and `.gitignore` to the
+     project wherever they're missing.
+
+2. **Set the image digest.** In `~/.config/agent-containers/<project>/compose.yaml`, replace
+   `REPLACE_WITH_DIGEST_FROM_digests.md` with the digest from `agent-containers/digests.md` (the
+   matching `spades-gis` or `spades-bio` row). `agent-up up` refuses to run until it's a real
+   digest.
+3. **Run the vault runbook:** [1password-project-vault.md](1password-project-vault.md) (vault,
+   service account, host token). `project.env` already names the vault `agent-<project>`.
+4. **Machine user, "set up" half (before `agent-up up`):**
+   [machine-user-and-rulesets.md](machine-user-and-rulesets.md) steps 2 to 4.
+   - In the project repo: replace `@OWNER` in `.github/CODEOWNERS`, then commit it together with
+     `.github/workflows/gitleaks.yml` and `.gitignore`.
+   - Make **`build-test`** (once CI exists) and **`gitleaks`** required checks in the ruleset.
+     They only become selectable after they have run once.
+5. **Project domains:** add the extra domains the project needs to
+   `~/.config/agent-containers/<project>/allowlist`.
+   - One domain per line; a domain also matches its subdomains.
+   - Anything not listed is blocked and doesn't even resolve.
+   - Only ports 22, 80 and 443 are open, and only to listed hosts. **SSH to your own servers
+     (cloud VM, NAS) needs their domain here too.**
+6. **Clone `spades.ai`** to `~/GitHub/spades.ai`, or point `SPADES_AI_DIR` in
+   `~/.config/agent-containers/<project>/project.conf` at your clone. `agent-up up` stops if it's
+   missing.
+7. **Check what will run**, then start it:
 
    ```bash
-   cp <project>/allowlist.txt ~/.config/agent-containers/<project>.allowlist
+   agent-up config <project>     # the fully rendered sandbox: mounts, volumes, environment
+   agent-up up <project>
    ```
 
-   Then edit that copy with the extra domains the project needs beyond the base list (one per line; a domain also matches its subdomains; `#` comments allowed). Anything not listed is blocked by the container firewall and does not even resolve. Only ports 22, 80 and 443 are open, and only to listed hosts: **SSH to your own servers (cloud VM, NAS) needs their domain here too.** Edit and `./up` again whenever you add one. *Why outside the repo: the project folder is the agent's read-write workspace, so an allowlist there could be widened by the agent itself. `./up` (and VS Code) mount this host file read-only and stop if it is missing; editing the repo's `allowlist.txt` has no effect.*
-7. **Clone `spades.ai`** to `~/GitHub/spades.ai` on the host, or set `SPADES_AI_DIR` to where it is. `./up` stops if the directory does not exist.
-8. **Enable the secret scanner** once per clone: `pre-commit install` (gitleaks). It writes `.git/hooks/pre-commit`, which the launcher checksum covers, so do this before step 9.
-9. **Review, adopt and start it:** review `compose.yaml`, `up`, `resolve-secrets`, `check-digest`, `project.env`, `.pre-commit-config.yaml`, `.devcontainer/` and any `.git/hooks/*` (for example `diff -r agent-containers/project-template <project>`), then run `./up --adopt`. Adoption records their hashes in `~/.config/agent-containers/<project>.launcher.sha256` (outside the agent-writable folder); from then on `./up` and VS Code refuse to start if any of them changed. *Why: these files run on your host with your 1Password token, and the folder is the agent's read-write workspace.* `./up --adopt` then checks the digest, resolves secrets into `~/.config/agent-containers/<project>.env` (mode 600), writes the gitignored `.env` (`PROJECT`, `COMPOSE_PROJECT_NAME`), and (re)creates the container. Never run plain `docker compose up`.
-10. **Machine user, "verify the gate" (after `./up`):** run [machine-user-and-rulesets.md](machine-user-and-rulesets.md) step 6 from inside the container (attach as in step 11). Do not start real work until it passes.
-11. **Attach and work.** Either `docker exec -it -u agent <project>-agent-1 zsh`, or VS Code → "Reopen in Container" (VS Code needs the token in its environment: see the template `README.md`, "VS Code and `OP_SERVICE_ACCOUNT_TOKEN`"; launching it with `code .` from a shell that has the token works). Inside the container run `claude`, then set the project up as usual, for example:
+   `agent-up up` needs `OP_SERVICE_ACCOUNT_TOKEN` for **this** project in your shell (see the
+   vault runbook).
+8. **Machine user, "verify the gate" (after `agent-up up`):** run
+   [machine-user-and-rulesets.md](machine-user-and-rulesets.md) step 6 inside the container
+   (`agent-up shell <project>`). Don't start real work until it passes.
+9. **Attach and work:**
+   - VS Code: **Dev Containers: Attach to Running Container…** → `<project>-agent-1`, then open
+     `/workspace`.
+   - Or use `agent-up shell <project>`.
 
-    ```bash
-    Rscript -e 'SpaDES.project::setupProject(...)'
-    ```
+   Inside the container, run `claude`. Set up R with `setupProject` as usual.
 
-12. **Add the required check.** When the project repo's first CI run has completed, **you** (the owner) edit the ruleset (Settings → Rules → Rulesets → `protect-main`) and add `build-test` (or the project's CI job) under Require status checks. It is not selectable before CI has run once. Then re-run the gate verification once (step 10) so the check is covered.
-
-Update later with `./up` (edited `~/.config/agent-containers/<project>.allowlist`, changed secret). **After any intended edit to a launcher file (a new digest in `compose.yaml` included), review the diff and run `./up --adopt`**; a plain `./up` refuses changed launcher files. When you run git on the host in a project folder, use `git -c core.hooksPath=/dev/null -c core.fsmonitor=false ...`, and do not open the folder locally in VS Code with workspace trust. The template `README.md` has the details ("Host-side safety") and the **known residual risks**. The full command table is in the template `README.md`.
-
-## Open caveats: check on your first real project
-
-1. **Container name under VS Code.** Confirm "Reopen in Container" names the container `<project>-agent-1` (`docker ps`). If it is named `<folder>_devcontainer-agent-1` instead, the Dev Containers tooling ignored `COMPOSE_PROJECT_NAME`; use `./up` and then "Attach to Running Container" rather than "Reopen in Container", and stop and decide how to proceed.
+Later changes: edit the files in `~/.config/agent-containers/<project>/`, then `agent-up up <project>`.
+Nothing in the project folder configures the container.

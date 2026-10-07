@@ -33,7 +33,7 @@ Step 1 is done once. Steps 2 and 4 are done per repo. Step 3 is done once per pr
    * @AllenLarocque
    ```
 
-   (For a new project repo, `project-template/.github/CODEOWNERS` ships with an `@OWNER` placeholder: replace it with your username rather than copying this line blindly.)
+   (For a new project repo, `.github/CODEOWNERS` (added to the project by `agent-up init`) ships with an `@OWNER` placeholder: replace it with your username rather than copying this line blindly.)
 
    *Why: with "Require review from Code Owners" (step 4), only an approval from you counts. Without it, any account that is allowed to approve could satisfy the "1 approval" rule.* (`agent-containers` already has this file.)
 3. Repo → Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve pull requests":
@@ -63,7 +63,7 @@ A classic PAT with `repo` can act on **every repo the machine user can access**.
 
 Copy the token once and store it in 1Password: vault `agent-<project>`, item `github-agent`, field `token` (the `op://agent-<project>/github-agent/token` reference in `project.env`). Create the vault first: [1password-project-vault.md](1password-project-vault.md). Do not paste the token anywhere else.
 
-**Rotation (every 90 days, or on suspected leak):** revoke the old token on GitHub (signed in as `allen-agent`), create a new one, update the vault item, then run `./up`. Short lifetimes matter because the resolved tier-A values (for example `GH_TOKEN`) are visible to anyone on the host who can run `docker inspect` on the container. (The 1Password service-account token is not: it stays on the host.)
+**Rotation (every 90 days, or on suspected leak):** revoke the old token on GitHub (signed in as `allen-agent`), create a new one, update the vault item, then run `agent-up up <project>`. Short lifetimes matter because the resolved tier-A values (for example `GH_TOKEN`) are visible to anyone on the host who can run `docker inspect` on the container. (The 1Password service-account token is not: it stays on the host.)
 
 ## 4. Create the ruleset (as you, per repo)
 
@@ -88,11 +88,11 @@ Editing rulesets needs Admin; the agent (Write) cannot.
 
 ## 5. Order of operations for a new project
 
-Steps 1 to 4 (the "set up" half) happen **before** `./up`. Step 6 (verify the gate) happens **after** `./up`, because it needs the container and the token. See [new-project.md](new-project.md).
+Steps 1 to 4 (the "set up" half) happen **before** `agent-up up <project>`. Step 6 (verify the gate) happens **after** `agent-up up <project>`, because it needs the container and the token. See [new-project.md](new-project.md).
 
-## 6. Verify the gate (required, after `./up`)
+## 6. Verify the gate (required, after `agent-up up <project>`)
 
-Run as the machine user **inside the project container** (`docker exec -it -u agent <project>-agent-1 zsh`; `GH_TOKEN` is the `allen-agent` token). Use a throwaway branch.
+Run as the machine user **inside the project container** (`agent-up shell <project>`; `GH_TOKEN` is the `allen-agent` token). Use a throwaway branch.
 
 ```bash
 git switch -c verify-ruleset
