@@ -200,7 +200,10 @@ cmd_up(){
   check_mounts "$cfg"
   [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] || die "OP_SERVICE_ACCOUNT_TOKEN is not set for this project (docs/runbooks/1password-project-vault.md)"
   prepare "$cfg"
-  docker volume inspect require-cache-shared >/dev/null 2>&1 || docker volume create require-cache-shared >/dev/null
+  local v
+  for v in require-cache-shared claude-code-shared; do
+    docker volume inspect "$v" >/dev/null 2>&1 || docker volume create "$v" >/dev/null
+  done
   op run --env-file "$cfg/project.env" -- "${COMPOSE[@]}" up -d --force-recreate
   echo "agent-up: '$name' running. Attach: agent-up shell $name, or VS Code: Dev Containers: Attach to Running Container... -> ${name}-agent-1"
 }
@@ -226,6 +229,15 @@ cmd_compose(){ # $1 compose subcommand, $2 project
   prepare "$cfg"
   "${COMPOSE[@]}" "$sub"
 }
+cmd_status(){
+  cmd_compose ps "$@"
+  local c ver; c="$(basename "$(cfg_dir "$1")")-agent-1"
+  if ver="$(docker exec -u agent "$c" claude --version 2>/dev/null)" && [ -n "$ver" ]; then
+    echo "Claude Code: $ver"
+  else
+    echo "Claude Code: MISSING or container not running (install log: docker logs $c | grep install-claude-code)"
+  fi
+}
 
 # Only the owner's config defines the sandbox: ambient compose settings and interpolation variables
 # must not override it (a shell variable beats --env-file in compose).
@@ -239,7 +251,7 @@ case "$cmd" in
   up)     cmd_up "$@" ;;
   config) cmd_config "$@" ;;
   shell)  cmd_shell "$@" ;;
-  status) cmd_compose ps "$@" ;;
+  status) cmd_status "$@" ;;
   stop)   cmd_compose stop "$@" ;;
   down)   cmd_compose down "$@" ;;
   *) usage ;;

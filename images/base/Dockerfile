@@ -2,10 +2,9 @@
 FROM rocker/r-ver:4.5.3@sha256:c3f39b365d1077fe24f8e9ab2742e352b6d3950897f51af1624a5bb5550c21c0
 
 LABEL org.opencontainers.image.source="https://github.com/AllenLarocque/agent-containers" \
-      org.opencontainers.image.description="spades-base: SpaDES agent container base (R, geospatial libs, Claude Code, egress firewall)"
+      org.opencontainers.image.description="spades-base: SpaDES agent container base (R, geospatial libs, egress firewall; Claude Code installs at container start)"
 
 ARG TZ=America/Los_Angeles
-ARG CLAUDE_CODE_VERSION=2.1.289
 ARG UV_VERSION=0.12.19
 # sha256 of uv-x86_64-unknown-linux-gnu.tar.gz, from the release asset ...tar.gz.sha256 (a mismatch fails the build).
 ARG UV_SHA256=23bf5552d220e0842b65c862097b2ebaeba0064b74eda5e565e77fd25969d8c8
@@ -51,9 +50,9 @@ RUN curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/
 
 # Non-root user, fixed UID/GID 1000 (matches the WSL user for bind-mount ownership).
 RUN groupadd --gid 1000 agent && useradd --uid 1000 --gid 1000 --create-home --shell /bin/zsh agent \
-    && mkdir -p /workspace /etc/firewall/allowlist.d /usr/local/share/npm-global \
+    && mkdir -p /workspace /etc/firewall/allowlist.d /usr/local/share/npm-global /opt/claude-code \
     && mkdir -p /home/agent/.local/share/R /home/agent/.cache/R/Require \
-    && chown -R agent:agent /workspace /usr/local/share/npm-global /home/agent/.local /home/agent/.cache
+    && chown -R agent:agent /workspace /usr/local/share/npm-global /opt/claude-code /home/agent/.local /home/agent/.cache
 
 # Firewall: init script + base allowlist (*.txt in allowlist.d; the project file is mounted read-only
 # from the owner's host). sudo ONLY for the firewall script. dnsmasq runs as its own unprivileged
@@ -74,10 +73,22 @@ COPY agent-init.sh /usr/local/bin/agent-init.sh
 COPY configure-claude-settings.js /usr/local/lib/agent/configure-claude-settings.js
 RUN chmod 0755 /usr/local/bin/agent-init.sh
 
+# Claude Code is NOT in the image (it is proprietary; the images are public). The image carries only
+# the pinned, integrity-locked spec; install-claude-code.sh installs it at container start into the
+# shared claude-code-shared volume at /opt/claude-code, in a directory named by the lockfile's hash.
+# To bump: see images/base/claude-code/package.json.
+COPY claude-code/package.json claude-code/package-lock.json /usr/local/lib/agent/claude-code/
+COPY install-claude-code.sh /usr/local/bin/install-claude-code
+COPY claude-wrapper.sh /usr/local/bin/claude
+RUN sha256sum /usr/local/lib/agent/claude-code/package-lock.json | cut -c1-16 \
+      > /usr/local/lib/agent/claude-code/CLAUDE_CODE_ID \
+    && chmod 0755 /usr/local/bin/install-claude-code /usr/local/bin/claude
+
 USER agent
 ENV CLAUDE_CONFIG_DIR=/home/agent/.claude
+# The pinned version is the only version: upgrades go through the lockfile and a rebuild.
+ENV DISABLE_AUTOUPDATER=1
 ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
 ENV PATH=/usr/local/share/npm-global/bin:$PATH SHELL=/bin/zsh EDITOR=nano
-RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 WORKDIR /workspace
 CMD ["sleep", "infinity"]

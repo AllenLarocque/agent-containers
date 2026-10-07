@@ -113,8 +113,12 @@ They contain no secrets by design.
 - **OS tooling** (carried over from the current image): git, gh, zsh, fzf, jq, less, procps,
   curl/wget, vim/nano, unzip, man-db, dnsutils, iproute2, iptables, ipset, dnsmasq, aggregate.
   **New:** `tmux`, `libimage-exiftool-perl` (exiftool).
-- **Node 22** (NodeSource) + **Claude Code pinned to an exact version** (build arg; never
-  `latest`). There's room for other agent CLIs later.
+- **Node 22** (NodeSource) + **Claude Code pinned to an exact version** (never `latest`).
+  *Amended 2026-10-07:* Claude Code is proprietary and the images are public, so the image carries
+  only an integrity-locked spec (`images/base/claude-code/package-lock.json`, sha512 per tarball).
+  `install-claude-code` runs it through `npm ci` at container start into the shared volume
+  `claude-code-shared` (`/opt/claude-code/<lockfile sha256>`), atomically, and refuses a silent
+  fallback to the musl build. `DISABLE_AUTOUPDATER=1`. There's room for other agent CLIs later.
 - **The firewall script** (Anthropic reference-devcontainer pattern), extended to read
   `/etc/firewall/allowlist.d/*.txt` (§4).
 - **R bootstrap only:** `Require` and `SpaDES.project` in the site library, enough to
@@ -285,7 +289,8 @@ revocable** secrets go there.
 |---|---|---|
 | Base OS/R image | `rocker/r-ver@sha256:` in `images/base/Dockerfile` | PR |
 | Our images | by digest in each project's `compose.yaml` | copy from `digests.md` |
-| Claude Code, uv, NodeSource major | exact versions as build args | PR |
+| Claude Code | `images/base/claude-code/package-lock.json` (version + sha512); installed at container start | edit `package.json`, `npm install --package-lock-only`, PR |
+| uv, NodeSource major | exact versions as build args | PR |
 | PredictiveEcology/AI plugins + reference | one commit SHA (build arg) | PR (CI rebuilds and smoke-tests) |
 | R packages | per project: `setupProject`/`Require`; `Require::pkgSnapshot()` recorded for anything frozen or cited | per project |
 | spades.ai (personal conventions) | **not pinned:** mounted live from the host (§8) | n/a |
