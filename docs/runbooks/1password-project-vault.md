@@ -23,7 +23,7 @@ The GitHub token goes in as item `github-agent`, field `token` (see [machine-use
 
 Do **not** `export OP_SERVICE_ACCOUNT_TOKEN=...` in a global shell profile: that leaves the token in plaintext on disk and exposes it to every process you start, for every project. Prefer one of:
 
-- **Per-project `direnv`:** a `.envrc` kept **outside the repo** (for example `~/.config/agent-containers/envrc/<project>.envrc`, sourced from a directory-level `.envrc` that is not committed) that sets `OP_SERVICE_ACCOUNT_TOKEN` only when you are in that project. Keep that file mode 600.
+- **Per-project `direnv`:** a `.envrc` kept **outside the repo** (for example `~/.config/agent-tokens/<project>.envrc`, sourced from a directory-level `.envrc` that is not committed) that sets `OP_SERVICE_ACCOUNT_TOKEN` only when you are in that project. Keep that file mode 600. The `.envrc` must **never** live in an agent-writable folder (the project folder, spades.ai, `~/agent-memory`): direnv runs it in your shell, which holds `OP_SERVICE_ACCOUNT_TOKEN`. Reading the token at use time (`op read`, next bullet) is safer still.
 - **Read at use time:** fetch the token from the macOS Keychain, the Windows credential store, or `op` itself (using your own biometric-unlocked session) into the **current shell only**, then run `agent-up up <project>`, for example `export OP_SERVICE_ACCOUNT_TOKEN="$(op read 'op://Private/agent-<project> service account/credential')"` (the Private-vault item saved in step 2).
 
 `agent-up up` reads `OP_SERVICE_ACCOUNT_TOKEN` from the host environment and stops with an error if it is missing.

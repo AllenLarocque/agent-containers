@@ -9,9 +9,12 @@ This folder is **not copied into your project by hand.** `bin/agent-up init` use
 
 **Why outside the project:** the project folder is the agent's read-write workspace. Anything
 there could be changed by the agent, so the host never executes or reads configuration from it
-(spec §2.1, §4).
+(spec §2.1, §4). For the same reason the project folder must be an agent-only clone, never your
+agent-containers clone or a folder containing `~/.config/agent-containers`: `agent-up up` refuses those.
 
 ## Commands (run on the host, from your agent-containers clone)
+
+Host: Linux or WSL2 (GNU coreutils).
 
 | Command | Does |
 |---|---|
@@ -58,19 +61,26 @@ written to disk.
   `/sys/fs/cgroup/memory.max`, not `/proc/meminfo`.
 - **Reserved for Phase 2 (T3 Code):** the commented `t3` volume and `127.0.0.1:3773` port.
 
-## Working in the project folder from the host
+## Working in the agent's folders from the host
+
+The agent can write three folders: the project folder, spades.ai and `~/agent-memory`.
 
 **Recommended:** run git and R inside the container (attached VS Code or `agent-up shell`).
 
-Host git in the project folder is allowed, but host git honours the folder's `.git/config` and
-hooks, which the agent can write. If you do use host git there, run
-`git -c core.hooksPath=/dev/null -c core.fsmonitor=false ...`.
+On the host, treat all three as untrusted:
+
+- Host git honours the folder's `.git/config` and hooks, which the agent can write. If you do use
+  host git there, run `git -c core.hooksPath=/dev/null -c core.fsmonitor=false ...`.
+- Never put a direnv `.envrc` in any of them (direnv runs it in your shell).
+- Beware git-aware shell prompts: they run git in the current directory.
+- A host-side Claude Code session that imports spades.ai is reading agent-writable text.
 
 ## Known residual risks
 
 The firewall confines the agent to allowlisted names on ports 22, 80 and 443, and to DNS for
 allowlisted names only. It does not remove these risks:
 
+- Read-write shared mounts (spades.ai, ~/agent-memory, the Require cache) are writable by every builder project: a compromised builder could affect the others (accepted for builders, spec §2.1).
 - **Upload-capable allowlisted domains.** Anything that accepts uploads, with credentials the agent
   could be handed, is an exfiltration path: github.com with a foreign token, S3, Google Drive or
   googleapis, Zenodo, PyPI. A bucket-style entry such as `s3-us-west-2.amazonaws.com` covers every

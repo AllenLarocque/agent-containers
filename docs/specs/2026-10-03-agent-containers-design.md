@@ -43,7 +43,7 @@ Built in this order. Each phase must work before the next starts:
 
 | Phase | Delivers | Status |
 |---|---|---|
-| **1 — Containers** | images, external launcher + per-project config, firewall, secrets, agent GitHub identity, CI, skills/reference layer (hooks shipped *disabled*); the **builder** profile | images/firewall/CI done on `feat/phase1`; launcher being reworked (§4) |
+| **1 — Containers** | images, external launcher + per-project config, firewall, secrets, agent GitHub identity, CI, skills/reference layer (hooks shipped *disabled*); the **builder** profile | images/firewall/CI done on `feat/phase1`; launcher built (agent-up); first real use pending |
 | **1b — Research profile** | the second profile (§2.1), built on the same images | designed here; built after the builder profile works |
 | **2 — Orchestrator** | T3 Code driving agents that run *inside* the containers (§13.1) | seams reserved in Phase 1 |
 | **3 — Memory** | per-project + shared memory, handoffs between projects (§13.2) | seams reserved in Phase 1 |
@@ -95,6 +95,8 @@ and can send data anywhere must not also hold private data or credentials.
   read;
 - read-write shared mounts (spades.ai, memory, Require cache) mean a compromised builder could
   affect other projects;
+- host tools (git, direnv, shell prompts, a host-side Claude session) must not be run against the
+  agent's read-write folders without the precautions in `project-template/README.md`;
 - tier-A values are readable inside the container until credential masking lands.
 
 Revisit if builders start consuming untrusted content heavily.
@@ -171,7 +173,8 @@ from the project folder.
 | Command | Does |
 |---|---|
 | `agent-up init <project-dir> [--image gis] [--profile builder]` | creates `~/.config/agent-containers/<project>/` from the seeds; prints the remaining steps (vault, digest) |
-| `agent-up up <project>` | checks the image digest, then `op run --env-file <cfg>/project.env -- docker compose -f <cfg>/compose.yaml --project-directory <cfg> -p <project> up -d --force-recreate` |
+| `agent-up up <project>` | checks the image digest, mounts and `project.env`, then `op run --env-file <cfg>/project.env -- docker compose --env-file <cfg>/project.conf -f <cfg>/compose.yaml -f <cfg>/.generated/env-passthrough.yaml --project-directory <cfg> -p <project> up -d --force-recreate` (the generated overlay lists the `project.env` key names only, never values) |
+| `agent-up config <project>` | prints the rendered compose config; no secrets needed |
 | `agent-up shell <project>` | `docker exec -it -u agent <project>-agent-1 zsh` |
 | `agent-up status \| stop \| down <project>` | compose wrappers |
 
@@ -307,6 +310,7 @@ also when agent-side enforcement of the merge gate (e.g. blocking `gh pr merge`)
 - **On PR:**
   - build `base`, then `gis` and `bio` FROM the freshly built base;
   - run smoke tests;
+  - a separate `gitleaks` job scans the full history for secrets;
   - a red result blocks the merge.
 - **Smoke tests:**
   - base: R starts; `Require` and `SpaDES.project` load; `terra` reads a bundled tiny GeoTIFF;

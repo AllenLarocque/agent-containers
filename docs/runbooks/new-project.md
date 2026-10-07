@@ -4,6 +4,7 @@
 permissions).
 
 **Prerequisites on the host:**
+- Linux or WSL2 (GNU coreutils);
 - Docker;
 - the 1Password CLI (`op`);
 - a clone of this repo at `~/GitHub/agent-containers`. The commands below assume
@@ -21,6 +22,8 @@ permissions).
    agent-up init ~/GitHub/<project> --image bio    # amplicon projects (spades-bio; adds the bio domains)
    ```
 
+   - The project folder must be an agent-only clone, never your agent-containers clone or a
+     folder containing `~/.config/agent-containers`: `agent-up up` refuses those.
    - This creates `~/.config/agent-containers/<project>/` (`compose.yaml`, `project.env`,
      `allowlist`, `project.conf`).
    - It also creates `~/agent-memory` the first time.
