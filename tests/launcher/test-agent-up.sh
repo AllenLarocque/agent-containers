@@ -136,6 +136,19 @@ refuses "up refuses a workspace that contains the config dir" 'contains the conf
 cp "$T/pconf.bak" "$CFG/project.conf"
 check "a refused up never reached docker" test ! -e "$DLOG"
 
+# ---- up: pre-flight refusals (continued)
+cp "$CFG/project.conf" "$T/pconf.bak2"
+sed -i "s|^PROJECT_DIR=.*|PROJECT_DIR=/|" "$CFG/project.conf"
+refuses "up refuses PROJECT_DIR=/ (contains the config dir)" 'contains the config dir' au up "$NAME"
+cp "$T/pconf.bak2" "$CFG/project.conf"
+check "  ...a refused up never reached docker" test ! -e "$DLOG"
+
+cp "$CFG/project.conf" "$T/pconf.bak3"
+sed -i "s/^PROJECT=.*/PROJECT=mismatch/" "$CFG/project.conf"
+refuses "up refuses PROJECT mismatch with config dir name" 'must equal the config dir name' au up "$NAME"
+cp "$T/pconf.bak3" "$CFG/project.conf"
+check "  ...a refused up never reached docker" test ! -e "$DLOG"
+
 # ---- up: success, with hostile ambient compose/interpolation variables
 AMBIENT=(COMPOSE_FILE=evil.yaml COMPOSE_PROFILES=evil PROJECT_DIR=/evil SPADES_AI_DIR=/evil)
 rc=0; out=$(au up "$NAME" 2>&1) || rc=$?

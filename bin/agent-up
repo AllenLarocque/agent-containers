@@ -123,10 +123,13 @@ cfg_dir(){ # $1 project -> its config dir (must exist)
   printf '%s' "$CFG_ROOT/$p"
 }
 check_files(){
-  local f
+  local f cfgname proj
   for f in compose.yaml project.env allowlist project.conf; do
     [ -f "$1/$f" ] || die "missing $1/$f (re-create it from agent-containers/project-template/config)"
   done
+  cfgname="$(basename "$1")"
+  proj="$(conf_get "$1/project.conf" PROJECT)"
+  [ "$proj" = "$cfgname" ] || die "PROJECT in $1/project.conf ($proj) must equal the config dir name ($cfgname)"
 }
 check_digest(){
   grep -Eq '^[[:space:]]*image:[[:space:]]*[^[:space:]]+@sha256:[0-9a-f]{64}[[:space:]]*$' "$1" \
@@ -138,14 +141,22 @@ check_project_env(){ # op:// references only; never echo a line (it could hold a
   [ -z "$bad" ] || die "$1 may hold only KEY=op://... references; offending line number(s): $bad (values not shown)"
 }
 check_mounts(){ # every rw bind source exists and does not contain the config dir
-  local cfgreal key src
+  local cfgreal key src srcclean cfgclean
   cfgreal="$(cd "$1" && pwd -P)"
   for key in PROJECT_DIR SPADES_AI_DIR AGENT_MEMORY_DIR; do
     src="$(conf_get "$1/project.conf" "$key")"
     [ -n "$src" ] || die "$key is not set in $1/project.conf"
     [ -d "$src" ] || die "$key directory not found: $src (create it, or fix $key in $1/project.conf)"
     src="$(cd "$src" && pwd -P)"
-    case "$cfgreal/" in "$src"/*) die "$key ($src) contains the config dir $1: the agent could edit its own sandbox. Move one of them." ;; esac
+    # Check if cfgreal is under src by verifying src is a prefix (including when src is /)
+    srcclean="${src%/}"; cfgclean="${cfgreal%/}/"
+    if [ -z "$srcclean" ]; then
+      # src is / after stripping trailing slash, so everything is under it
+      die "$key ($src) contains the config dir $1: the agent could edit its own sandbox. Move one of them."
+    elif [ "${cfgclean#$srcclean/}" != "$cfgclean" ]; then
+      # cfgclean starts with srcclean/, so cfgreal is under src
+      die "$key ($src) contains the config dir $1: the agent could edit its own sandbox. Move one of them."
+    fi
   done
 }
 write_passthrough(){ # container env NAMES from project.env; values never touch disk
