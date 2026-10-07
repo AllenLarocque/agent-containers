@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Installs the pinned Claude Code into the shared volume at container start (called by agent-init.sh;
-# also safe to run by hand). Claude Code is proprietary, so the PUBLIC images carry only the lockfile
+# Installs the pinned Claude Code at container start (called by agent-init.sh; also safe to run by
+# hand). Claude Code is proprietary, so the PUBLIC images carry only the lockfile
 # (/usr/local/lib/agent/claude-code), never the package itself.
 #
 # - Integrity: `npm ci` refuses any tarball whose sha512 differs from package-lock.json.
-# - Keyed on CONTENT: the install dir is named by the lockfile's sha256 (CLAUDE_CODE_ID, written at
-#   image build), so images pinning different versions share the volume without clashing.
-# - Atomic: install into a private temp dir, then rename into place. Two containers starting at
-#   once both install, one rename wins, the loser discards its copy.
+# - The INSTALL lives in the container's own layer (/opt/claude-code), so every `agent-up up`
+#   (a recreate) starts from a fresh, verified copy: nothing an agent edits there persists or reaches
+#   another project. Only npm's download CACHE is shared (volume npm-cache-shared), and npm checks
+#   every cached tarball against the lockfile's sha512 before using it, so a poisoned entry is refused.
+# - Keyed on CONTENT: the install dir is named by the lockfile's sha256 (CLAUDE_CODE_ID, image build).
+# - Atomic: install into a private temp dir, then rename into place (a concurrent hand run is safe).
 # Exit 0 = the pinned claude runs; non-zero = it does not (agent-init logs it, never fails the start).
 set -euo pipefail
 log(){ printf '[install-claude-code] %s\n' "$*"; }
@@ -31,7 +33,7 @@ TMP=$(mktemp -d "$ROOT/.tmp.$ID.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 cp "$SPEC/package.json" "$SPEC/package-lock.json" "$TMP/"
 log "installing claude $WANT (npm ci, integrity-checked) ..."
-npm ci --prefix "$TMP" --no-audit --no-fund --loglevel=warn
+npm ci --prefix "$TMP" --no-audit --no-fund --no-update-notifier --loglevel=warn
 # The native binary is an OPTIONAL dependency: when its tarball fails the integrity check, npm skips it
 # (nothing unverified is installed) and the wrapper silently falls back to the musl build. Refuse that.
 case "$(uname -m)" in x86_64) arch=x64 ;; aarch64) arch=arm64 ;; *) arch="$(uname -m)" ;; esac
@@ -42,7 +44,7 @@ works "$TMP" || { log "ERROR installed claude does not report version $WANT"; ex
 if mv -T "$TMP" "$DEST" 2>/dev/null; then
   trap - EXIT; log "installed: claude $WANT ($DEST)"
 elif works "$DEST"; then
-  log "another container installed it first: claude $WANT ($DEST)"
+  log "a concurrent run installed it first: claude $WANT ($DEST)"
 else
   log "ERROR could not move the install into place: $DEST"; exit 1
 fi

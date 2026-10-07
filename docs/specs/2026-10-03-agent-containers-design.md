@@ -116,9 +116,10 @@ They contain no secrets by design.
 - **Node 22** (NodeSource) + **Claude Code pinned to an exact version** (never `latest`).
   *Amended 2026-10-07:* Claude Code is proprietary and the images are public, so the image carries
   only an integrity-locked spec (`images/base/claude-code/package-lock.json`, sha512 per tarball).
-  `install-claude-code` runs it through `npm ci` at container start into the shared volume
-  `claude-code-shared` (`/opt/claude-code/<lockfile sha256>`), atomically, and refuses a silent
-  fallback to the musl build. `DISABLE_AUTOUPDATER=1`. There's room for other agent CLIs later.
+  `install-claude-code` runs it through `npm ci` at container start into the container's own layer
+  (`/opt/claude-code/<lockfile sha256>`), so every recreate gets a fresh verified copy and nothing an
+  agent edits there persists or crosses projects. Only npm's cache is shared (`npm-cache-shared`;
+  npm re-verifies each cached tarball's sha512). It refuses a silent fallback to the musl build. `DISABLE_AUTOUPDATER=1`. There's room for other agent CLIs later.
 - **The firewall script** (Anthropic reference-devcontainer pattern), extended to read
   `/etc/firewall/allowlist.d/*.txt` (§4).
 - **R bootstrap only:** `Require` and `SpaDES.project` in the site library, enough to

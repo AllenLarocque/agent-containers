@@ -51,8 +51,8 @@ RUN curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/
 # Non-root user, fixed UID/GID 1000 (matches the WSL user for bind-mount ownership).
 RUN groupadd --gid 1000 agent && useradd --uid 1000 --gid 1000 --create-home --shell /bin/zsh agent \
     && mkdir -p /workspace /etc/firewall/allowlist.d /usr/local/share/npm-global /opt/claude-code \
-    && mkdir -p /home/agent/.local/share/R /home/agent/.cache/R/Require \
-    && chown -R agent:agent /workspace /usr/local/share/npm-global /opt/claude-code /home/agent/.local /home/agent/.cache
+    && mkdir -p /home/agent/.local/share/R /home/agent/.cache/R/Require /home/agent/.npm \
+    && chown -R agent:agent /workspace /usr/local/share/npm-global /opt/claude-code /home/agent/.local /home/agent/.cache /home/agent/.npm
 
 # Firewall: init script + base allowlist (*.txt in allowlist.d; the project file is mounted read-only
 # from the owner's host). sudo ONLY for the firewall script. dnsmasq runs as its own unprivileged
@@ -75,7 +75,7 @@ RUN chmod 0755 /usr/local/bin/agent-init.sh
 
 # Claude Code is NOT in the image (it is proprietary; the images are public). The image carries only
 # the pinned, integrity-locked spec; install-claude-code.sh installs it at container start into the
-# shared claude-code-shared volume at /opt/claude-code, in a directory named by the lockfile's hash.
+# container's own layer (/opt/claude-code/<lockfile hash>), from the shared, verified npm cache.
 # To bump: see images/base/claude-code/package.json.
 COPY claude-code/package.json claude-code/package-lock.json /usr/local/lib/agent/claude-code/
 COPY install-claude-code.sh /usr/local/bin/install-claude-code

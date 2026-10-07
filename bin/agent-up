@@ -201,7 +201,7 @@ cmd_up(){
   [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] || die "OP_SERVICE_ACCOUNT_TOKEN is not set for this project (docs/runbooks/1password-project-vault.md)"
   prepare "$cfg"
   local v
-  for v in require-cache-shared claude-code-shared; do
+  for v in require-cache-shared npm-cache-shared; do
     docker volume inspect "$v" >/dev/null 2>&1 || docker volume create "$v" >/dev/null
   done
   op run --env-file "$cfg/project.env" -- "${COMPOSE[@]}" up -d --force-recreate

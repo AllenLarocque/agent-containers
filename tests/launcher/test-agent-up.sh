@@ -200,7 +200,7 @@ check "  ...docker compose gets ONLY the config dir's files" grep -qxF "ARGS: $C
 check "  ...ambient COMPOSE_*/PROJECT_DIR/SPADES_AI_DIR unset; the resolved secret reaches compose" \
   bash -c '[ "$(grep "^ENV:" "$1" | tail -n 1)" = "ENV: COMPOSE_FILE=<unset> COMPOSE_PROFILES=<unset> PROJECT_DIR=<unset> SPADES_AI_DIR=<unset> GH_TOKEN=fake-secret-value-123" ]' _ "$DLOG"
 check "  ...the shared Require cache volume is ensured" grep -qxF "ARGS: volume inspect require-cache-shared" "$DLOG"
-check "  ...the shared Claude Code volume is ensured" grep -qxF "ARGS: volume inspect claude-code-shared" "$DLOG"
+check "  ...the shared npm cache volume is ensured" grep -qxF "ARGS: volume inspect npm-cache-shared" "$DLOG"
 check "  ...no secret value on stdout/stderr" bash -c '! grep -q fake-secret-value-123 <<<"$1"' _ "$out"
 PT="$CFG/.generated/env-passthrough.yaml"
 check "passthrough lists the key NAME" grep -qx "      - GH_TOKEN" "$PT"
@@ -295,7 +295,7 @@ OVR
           docker compose --env-file "$CFG/project.conf" -f "$CFG/compose.yaml" -f "$CFG/.generated/env-passthrough.yaml" \
           -f "$T/override.yaml" --project-directory "$CFG" -p "$NAME" "$@"; }
   trap 'dc down -v >/dev/null 2>&1 || true; rm -rf "$T"' EXIT
-  for v in require-cache-shared claude-code-shared; do
+  for v in require-cache-shared npm-cache-shared; do
     docker volume inspect "$v" >/dev/null 2>&1 || docker volume create "$v" >/dev/null
   done
   # CI runner UID != 1000. In real use these are the agent's own (UID 1000) directories.
@@ -334,8 +334,10 @@ OVR
       docker exec -u agent "$CID" install-claude-code
     check "  ...claude reports the pinned version" \
       bash -c 'want=$(docker exec "$1" jq -r ".dependencies[\"@anthropic-ai/claude-code\"]" /usr/local/lib/agent/claude-code/package.json); docker exec -u agent "$1" claude --version | grep -qE "^${want//./\\.}( |$)"' _ "$CID"
-    check "  ...it lives in the shared claude-code-shared volume, under the lockfile's hash" \
-      bash -c 'id=$(docker exec "$1" cat /usr/local/lib/agent/claude-code/CLAUDE_CODE_ID); docker run --rm -v claude-code-shared:/v "$2" test -x "/v/$id/node_modules/.bin/claude"' _ "$CID" "$TEMPLATE_IMAGE"
+    check "  ...installed in the container's own layer, under the lockfile's hash" \
+      bash -c 'id=$(docker exec "$1" cat /usr/local/lib/agent/claude-code/CLAUDE_CODE_ID); docker exec "$1" test -x "/opt/claude-code/$id/node_modules/.bin/claude"' _ "$CID"
+    check "  ...the download landed in the shared npm cache volume" \
+      bash -c '[ -n "$(docker run --rm -v npm-cache-shared:/v "$2" find /v/_cacache -type f -print -quit)" ]' _ "$CID" "$TEMPLATE_IMAGE"
     check "  ...a second run reuses it (no reinstall)" \
       bash -c 'docker exec -u agent "$1" install-claude-code | grep -q "present: claude"' _ "$CID"
     check "  ...no temp dirs left behind" \

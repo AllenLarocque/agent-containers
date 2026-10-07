@@ -47,7 +47,7 @@ container is `<project>-agent-1`.
 | `/etc/firewall/allowlist.d/50-project.txt` | `~/.config/agent-containers/<project>/allowlist` | **ro** |
 | `~/.claude`, the project R library | volumes `claude-<project>`, `rlib-<project>` | persist across `up` |
 | Require's cache | volume `require-cache-shared` | shared by all projects |
-| Claude Code (installed at first start, pinned + integrity-checked) | volume `claude-code-shared` | shared by all projects |
+| npm's download cache (Claude Code installs from it at each start, pinned + integrity-checked) | volume `npm-cache-shared` | shared by all projects |
 
 Secrets: each `KEY=op://...` line in `project.env` becomes an environment variable in the
 container. `op run` resolves the values on the host when you run `agent-up up`; they are never
