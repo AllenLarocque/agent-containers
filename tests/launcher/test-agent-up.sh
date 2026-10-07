@@ -257,28 +257,36 @@ OVR
   trap 'dc down -v >/dev/null 2>&1 || true; rm -rf "$T"' EXIT
   docker volume inspect require-cache-shared >/dev/null 2>&1 || docker volume create require-cache-shared >/dev/null
   # CI runner UID != 1000. In real use these are the agent's own (UID 1000) directories.
+  touch "$P/.from-host"   # sentinel: proves /workspace is the host project dir, not the image's empty dir
   chmod -R a+rwX "$P" "$H/GitHub/spades.ai" "$H/agent-memory"
   check "sandbox starts" dc up -d
-  CID="$(dc ps -q agent)"
-  for _ in $(seq 1 90); do docker exec "$CID" test -e /tmp/fw-ready 2>/dev/null && break; sleep 2; done
-  check "firewall initialised" docker exec "$CID" test -e /tmp/fw-ready
-  check "in-container allowlist == the config dir's allowlist" \
-    bash -c 'diff <(docker exec "$1" cat /etc/firewall/allowlist.d/50-project.txt) "$2"' _ "$CID" "$CFG/allowlist"
-  check "agent cannot write the in-container allowlist" \
-    bash -c '! docker exec -u agent "$1" sh -c "echo example.com >> /etc/firewall/allowlist.d/50-project.txt" 2>/dev/null' _ "$CID"
-  for d in /workspace /opt/memory /opt/reference/spades.ai; do
-    check "agent can write $d" docker exec -u agent "$CID" sh -c "echo x > $d/.agent-up-test && rm $d/.agent-up-test"
-  done
-  check "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 in the container" \
-    test "$(docker exec "$CID" printenv CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)" = 1
-  for host in sentry.io statsig.com; do
-    check "$host does not resolve (decision B)" \
-      bash -c '[ -z "$(docker exec -u agent "$1" dig @127.0.0.1 "$2" A +short +time=2 +tries=1 | grep -E "^[0-9.]+$")" ]' _ "$CID" "$host"
-  done
-  check "release-assets.githubusercontent.com still resolves (decision C)" \
-    bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 release-assets.githubusercontent.com A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID"
-  check "project-allowlisted www.python.org resolves" \
-    bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 www.python.org A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID"
+  CID="$(dc ps -q agent || true)"
+  if [ -z "$CID" ]; then
+    check "sandbox container id" false
+  else
+    for _ in $(seq 1 90); do docker exec "$CID" test -e /tmp/fw-ready 2>/dev/null && break; sleep 2; done
+    check "firewall initialised" docker exec "$CID" test -e /tmp/fw-ready
+    # The file is mode 600 owned by the CI runner (not UID 1000), so only root can read it.
+    check "in-container allowlist == the config dir's allowlist" \
+      bash -c 'diff <(docker exec -u root "$1" cat /etc/firewall/allowlist.d/50-project.txt) "$2"' _ "$CID" "$CFG/allowlist"
+    # Root, so permissions cannot explain a failure: only the read-only mount can.
+    check "the in-container allowlist is a read-only mount (even root cannot write it)" \
+      bash -c 'out="$(docker exec -u root "$1" sh -c "echo example.com >> /etc/firewall/allowlist.d/50-project.txt" 2>&1)"; rc=$?; [ "$rc" -ne 0 ] && printf "%s" "$out" | grep -q "Read-only file system"' _ "$CID"
+    check "/workspace is the host project dir (sees the host sentinel)" docker exec "$CID" test -e /workspace/.from-host
+    for d in /workspace /opt/memory /opt/reference/spades.ai; do
+      check "agent can write $d" docker exec -u agent "$CID" sh -c "echo x > $d/.agent-up-test && rm $d/.agent-up-test"
+    done
+    check "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 in the container" \
+      test "$(docker exec "$CID" printenv CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)" = 1
+    for host in sentry.io statsig.com; do
+      check "$host is refused by the firewall DNS (decision B)" \
+        bash -c 'docker exec -u agent "$1" dig @127.0.0.1 "$2" A +time=2 +tries=1 +noall +comments | grep -q "status: REFUSED"' _ "$CID" "$host"
+    done
+    check "release-assets.githubusercontent.com still resolves (decision C)" \
+      bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 release-assets.githubusercontent.com A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID"
+    check "project-allowlisted www.python.org resolves" \
+      bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 www.python.org A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID"
+  fi
   dc down -v >/dev/null 2>&1 || true
 else
   echo "SKIP: behavioural sandbox checks (set TEMPLATE_IMAGE to a built image; CI does)"
