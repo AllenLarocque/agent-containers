@@ -130,14 +130,14 @@ jobs:
         run: |
           # A malformed example would break every real bio project that copies it.
           docker run -d --name fwbio --cap-add NET_ADMIN --cap-add NET_RAW \
-            -v "$PWD/project-template/allowlist.bio-example.txt:/etc/firewall/allowlist.d/50-project.txt:ro" \
+            -v "$PWD/project-template/config/allowlist.bio-example:/etc/firewall/allowlist.d/50-project.txt:ro" \
             spades-base:ci sleep infinity
           docker exec fwbio sudo /usr/local/bin/init-firewall.sh | tee /tmp/fwbio.log
           grep -q 'Allowlist: .* 50-project.txt' /tmp/fwbio.log
           docker rm -f fwbio
-      - name: Template test (static + behavioural against the built base image)
+      - name: Launcher test (agent-up; render + behavioural against the built base image)
         if: always()
-        run: TEMPLATE_IMAGE=spades-base:ci bash tests/template/test-template.sh
+        run: TEMPLATE_IMAGE=spades-base:ci bash tests/launcher/test-agent-up.sh
       - name: Acceptance (setupProject behind firewall, plain Rscript)
         run: |
           # CI-ONLY: agent (UID 1000) must be able to write .Rprofile and the project library in the
@@ -164,8 +164,7 @@ jobs:
         if: always()
         run: |
           shellcheck --version
-          shellcheck -S warning images/base/*.sh tests/*/*.sh scripts/*.sh \
-            project-template/up project-template/resolve-secrets project-template/check-digest
+          shellcheck -S warning images/base/*.sh tests/*/*.sh scripts/*.sh bin/agent-up
       - name: actionlint
         if: always()
         run: |

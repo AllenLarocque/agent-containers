@@ -1,6 +1,0 @@
-# SEED ONLY: the firewall does NOT read this file. Edits here have no effect (this folder is the
-# agent-writable workspace). The live project allowlist is OWNER-maintained on the host:
-#   cp allowlist.txt ~/.config/agent-containers/<project>.allowlist   # once; then edit THAT file and ./up
-# Domains THIS project needs beyond the base allowlist (agent-containers images/base/allowlist.d/00-base.txt).
-# One per line; a base domain also matches its subdomains. Names not listed do not even resolve.
-# SSH to your own servers (cloud VM, NAS) needs their domain here too: port 22 is open only to allowlisted hosts.

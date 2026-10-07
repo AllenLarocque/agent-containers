@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# agent-up: the HOST-side launcher for agent containers (spec §4, amended 2026-10-06).
+# It lives in the owner's agent-containers clone; symlink it onto your PATH if you like.
+# It reads ONLY the owner's config dir, ~/.config/agent-containers/<project>/, plus its own seeds.
+# It NEVER executes or reads configuration from the project folder (the agent's rw workspace).
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+SEEDS="$HERE/../project-template"
+CFG_ROOT="${AGENT_CONTAINERS_CONFIG:-$HOME/.config/agent-containers}"
+
+die(){ printf 'agent-up: %s\n' "$*" >&2; exit 1; }
+usage(){
+  cat >&2 <<'USAGE'
+usage:
+  agent-up init <project-dir> [--name NAME] [--image base|gis|bio] [--profile builder]
+  agent-up up <project>                  resolve secrets with `op run`, (re)create the container
+  agent-up config <project> [ARGS...]    print the rendered compose config (no secrets needed)
+  agent-up shell <project>               zsh in the container as `agent`
+  agent-up status|stop|down <project>
+USAGE
+  exit 2
+}
+normalise(){ printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9_-]/-/g'; }
+conf_get(){ sed -n "s/^$2=//p" "$1" | tail -n 1; }   # $1 project.conf, $2 KEY
+
+cmd_init(){
+  local dir="" name="" image="gis" profile="builder"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --name)    [ $# -ge 2 ] || usage; name="$2"; shift 2 ;;
+      --image)   [ $# -ge 2 ] || usage; image="$2"; shift 2 ;;
+      --profile) [ $# -ge 2 ] || usage; profile="$2"; shift 2 ;;
+      -*) usage ;;
+      *) [ -z "$dir" ] || usage; dir="$1"; shift ;;
+    esac
+  done
+  [ -n "$dir" ] || usage
+  [ -d "$dir" ] || die "project directory not found: $dir"
+  dir="$(cd "$dir" && pwd -P)"
+  case "$image" in base|gis|bio) ;; *) die "--image must be base, gis or bio (got: $image)" ;; esac
+  case "$profile" in
+    builder) ;;
+    research) die "--profile research is not built yet (spec §2: Phase 1b)" ;;
+    *) die "--profile must be builder (got: $profile)" ;;
+  esac
+  name="$(normalise "${name:-$(basename "$dir")}")"
+  [ -n "$name" ] || die "could not derive a project name from '$dir'; pass --name"
+  local cfg="$CFG_ROOT/$name"
+  { [ ! -e "$cfg" ] && [ ! -L "$cfg" ]; } || die "config already exists: $cfg (edit it there; init never overwrites)"
+
+  mkdir -p "$CFG_ROOT"; chmod 700 "$CFG_ROOT"
+  mkdir -m 700 "$cfg"
+  sed "s|/spades-gis@sha256:|/spades-$image@sha256:|" "$SEEDS/config/compose.yaml" > "$cfg/compose.yaml"
+  sed "s|PROJECTNAME|$name|g" "$SEEDS/config/project.env" > "$cfg/project.env"
+  cp "$SEEDS/config/allowlist" "$cfg/allowlist"
+  if [ "$image" = bio ]; then
+    { echo; cat "$SEEDS/config/allowlist.bio-example"; } >> "$cfg/allowlist"
+  fi
+  cat > "$cfg/project.conf" <<CONFEOF
+# Owner-maintained settings for agent-up; also compose interpolation variables (--env-file).
+# KEY=VALUE, no quotes.
+PROJECT=$name
+PROJECT_DIR=$dir
+PROFILE=$profile
+IMAGE=$image
+SPADES_AI_DIR=$HOME/GitHub/spades.ai
+AGENT_MEMORY_DIR=$HOME/agent-memory
+CONFEOF
+  chmod 600 "$cfg/compose.yaml" "$cfg/project.env" "$cfg/allowlist" "$cfg/project.conf"
+
+  local mem="$HOME/agent-memory"
+  if [ ! -d "$mem" ]; then
+    mkdir -p "$mem" && git -C "$mem" init -q
+    echo "agent-up: created the shared agent memory repo $mem (spec §13.2)"
+  fi
+
+  local f rel
+  while IFS= read -r -d '' f; do
+    rel="${f#"$SEEDS/repo/"}"
+    if [ -e "$dir/$rel" ]; then
+      echo "agent-up: kept the project's existing $rel"
+    else
+      mkdir -p "$dir/$(dirname "$rel")"; cp "$f" "$dir/$rel"
+      echo "agent-up: added $rel to the project (review and commit it)"
+    fi
+  done < <(find "$SEEDS/repo" -type f -print0 | sort -z)
+
+  cat <<FINALEOF
+agent-up: created $cfg
+Next (docs/runbooks/new-project.md):
+  1. set the image digest in $cfg/compose.yaml (from agent-containers/digests.md)
+  2. vault agent-$name + service account + scoped GitHub token (docs/runbooks/1password-project-vault.md)
+  3. add the project's domains to $cfg/allowlist
+  4. replace @OWNER in $dir/.github/CODEOWNERS
+  5. agent-up up $name
+FINALEOF
+}
+
+[ $# -ge 1 ] || usage
+cmd="$1"; shift
+case "$cmd" in
+  init) cmd_init "$@" ;;
+  *) usage ;;
+esac

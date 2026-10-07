@@ -1,4 +1,4 @@
-# Example allowlist for an amplicon (spades-bio) project: copy to ~/.config/agent-containers/<project>.allowlist on the host.
+# Amplicon (spades-bio) domains. `agent-up init --image bio` appends this file to the project allowlist.
 # Domains only, one per line; a base domain also matches its subdomains.
 # Hosts and comments carried over from the SpaDES dev-environment init-firewall.sh.
 
