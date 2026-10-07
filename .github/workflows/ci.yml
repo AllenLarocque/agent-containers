@@ -198,7 +198,16 @@ jobs:
         with:
           driver-opts: network=host
       - name: Build + push to local registry, render digests.md
-        run: scripts/build-publish.sh localhost:5000/allenlarocque "2000.01.01-dryrun" /tmp/digests.md
+        run: |
+          # On failure, surface the log tail + disk usage as an annotation: job logs live on a blob host
+          # that agent containers cannot reach, while the annotations API is readable.
+          set -o pipefail
+          scripts/build-publish.sh localhost:5000/allenlarocque "2000.01.01-dryrun" /tmp/digests.md 2>&1 | tee /tmp/publish.log || {
+            rc=$?
+            msg=$( { tail -n 60 /tmp/publish.log; echo '--- df -h'; df -h / /var/lib/docker 2>/dev/null; } | sed 's/%/%25/g; s/\r//g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=build-publish failed (rc=$rc)::$msg"
+            exit "$rc"
+          }
       - name: Verify digests.md
         run: |
           cat /tmp/digests.md
