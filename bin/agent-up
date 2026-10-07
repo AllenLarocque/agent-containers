@@ -148,9 +148,9 @@ check_mounts(){ # every rw bind source exists and does not contain the config di
     [ -n "$src" ] || die "$key is not set in $1/project.conf"
     [ -d "$src" ] || die "$key directory not found: $src (create it, or fix $key in $1/project.conf)"
     src="$(cd "$src" && pwd -P)"
-    # Check if cfgreal is under src: the pattern expands (e.g., src=/ becomes "/*"), then matches as a glob
+    # cfgreal under src? Quoted prefix, so path characters never act as glob (src=/ gives "/*").
     case "$cfgreal/" in
-      ${src%/}/*) die "$key ($src) contains the config dir $1: the agent could edit its own sandbox. Move one of them." ;;
+      "${src%/}"/*) die "$key ($src) contains the config dir $1: the agent could edit its own sandbox. Move one of them." ;;
     esac
   done
 }
