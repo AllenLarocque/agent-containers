@@ -49,6 +49,7 @@ cmd_init(){
   local cfg="$CFG_ROOT/$name"
   { [ ! -e "$cfg" ] && [ ! -L "$cfg" ]; } || die "config already exists: $cfg (edit it there; init never overwrites)"
 
+  local old_umask; old_umask=$(umask)
   umask 077   # config files are private from the first byte
   mkdir -p "$CFG_ROOT"; chmod 700 "$CFG_ROOT"
   # Build in a temp dir and move into place last, so a failure never leaves a half-built config.
@@ -73,6 +74,7 @@ CONFEOF
   chmod 600 "$tmp/compose.yaml" "$tmp/project.env" "$tmp/allowlist" "$tmp/project.conf"
   chmod 700 "$tmp"
   mv -T "$tmp" "$cfg"
+  umask "$old_umask"
   trap - EXIT
 
   local mem="$HOME/agent-memory"
@@ -81,13 +83,13 @@ CONFEOF
     echo "agent-up: created the shared agent memory repo $mem (spec §13.2)"
   fi
 
-  umask 022   # seed files copied into the project keep normal permissions
-  local f rel part cur linked
+  local f rel parts cur linked
   while IFS= read -r -d '' f; do
     rel="${f#"$SEEDS/repo/"}"
     # Never write through a symlink: the project dir is agent-writable.
     linked=0; cur="$dir"
-    for part in $(dirname "$rel" | tr '/' ' '); do
+    IFS=/ read -r -a parts <<<"$(dirname "$rel")"
+    for part in "${parts[@]}"; do
       [ "$part" = . ] && continue
       cur="$cur/$part"
       if [ -L "$cur" ]; then linked=1; break; fi

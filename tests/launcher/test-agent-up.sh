@@ -23,6 +23,7 @@ T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 H="$T/home"; CFGROOT="$H/.config/agent-containers"
 mkdir -p "$H/GitHub/spades.ai" "$T/bin" "$T/dstub"
 OPLOG="$T/op.log"; DLOG="$T/docker.log"
+# shellcheck disable=SC2034  # used by the up/render sections (later tasks)
 H64=$(printf 'a%.0s' $(seq 64))
 TOK=""        # fake service-account token; empty = unset for agent-up
 AMBIENT=()    # extra (hostile) environment for a call
@@ -60,7 +61,8 @@ refuses "no arguments prints usage" 'usage:' au
 refuses "init refuses a missing project dir" 'project directory not found' au init "$T/nope"
 refuses "init refuses --profile research (Phase 1b)" 'Phase 1b' au init "$P" --profile research
 refuses "init refuses an unknown image" 'base, gis or bio' au init "$P" --image foo
-check "init succeeds" au init "$P"
+check "init succeeds" env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/dstub:$T/bin:$PATH" bash -c "umask 022; exec '$AU' init '$P'"
+check "agent-memory dir created with mode 755 (not restricted by umask)" test "$(stat -c %a "$H/agent-memory")" = 755
 check "config dir named by the normalised project name" test -d "$CFG"
 check "config root mode 700" test "$(stat -c %a "$CFGROOT")" = 700
 check "config dir mode 700" test "$(stat -c %a "$CFG")" = 700
@@ -97,7 +99,7 @@ out2="$(au init "$SP2" --name symproj2 2>&1)" || { echo "FAIL: init with symlink
 check "  ...nothing written into the symlinked directory" test -z "$(ls -A "$T/evil-dir")"
 check "  ...output says skipped" grep -q "skipped" <<<"$out2"
 check "seed .gitignore copied with normal mode (644)" test "$(stat -c %a "$P/.gitignore")" = 644
-noleft(){ ! ls -A "$CFGROOT" | grep -q '^\.init\.'; }
+noleft(){ local f; for f in "$CFGROOT"/.init.*; do [ -e "$f" ] && return 1; done; return 0; }
 refuses "refusal: missing dir (again)" 'project directory not found' au init "$T/nope"
 refuses "refusal: research (again)" 'Phase 1b' au init "$P" --profile research --name zz
 refuses "refusal: unknown image (again)" 'base, gis or bio' au init "$P" --image foo --name zz
