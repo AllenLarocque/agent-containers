@@ -1,0 +1,48 @@
+name: publish
+on:
+  push:
+    branches: [main]
+    paths: ["images/**", "scripts/build-publish.sh", "scripts/render-digests.sh", ".github/workflows/publish.yml"]
+  schedule:
+    - cron: "17 9 * * 1"        # Mondays: rebuild for OS security patches -> digest PR
+  workflow_dispatch:
+permissions:
+  contents: write
+  packages: write
+  pull-requests: write
+  actions: write          # to dispatch ci.yml on the digests PR branch
+concurrency:
+  group: publish
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: tag
+        run: echo "tag=$(date -u +%Y.%m.%d)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - name: Build, push, smoke-by-digest, promote latest, render digests.md
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: scripts/build-publish.sh ghcr.io/allenlarocque "$TAG" digests.md
+      - uses: peter-evans/create-pull-request@v7
+        id: cpr
+        with:
+          branch: chore/digests-${{ steps.tag.outputs.tag }}
+          title: "chore: image digests ${{ steps.tag.outputs.tag }}"
+          commit-message: "chore: image digests ${{ steps.tag.outputs.tag }}"
+          add-paths: digests.md
+          body: "Published by the `publish` workflow. Merge, then bump projects when convenient."
+      # PRs created with GITHUB_TOKEN do not trigger pull_request workflows, but main requires build-test.
+      # Dispatch ci.yml on the PR branch: its build-test check reports on the branch head SHA (= PR head).
+      - name: Run CI on the digests PR branch
+        if: steps.cpr.outputs.pull-request-number
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run ci.yml --ref "${{ steps.cpr.outputs.pull-request-branch }}"

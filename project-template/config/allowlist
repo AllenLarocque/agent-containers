@@ -1,0 +1,6 @@
+# Project allowlist: domains THIS project needs beyond the base list
+# (agent-containers images/base/allowlist.d/00-base.txt). Owner-maintained in
+# ~/.config/agent-containers/<project>/, outside the project folder; mounted read-only into the
+# container. Edit it, then run `agent-up up <project>`.
+# One domain per line; a domain also matches its subdomains; `#` comments allowed. Names not
+# listed do not even resolve. SSH to your own servers (cloud VM, NAS) needs their domain here too.

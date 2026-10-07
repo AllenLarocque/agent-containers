@@ -1,0 +1,58 @@
+# Amplicon (spades-bio) domains. `agent-up init --image bio` appends this file to the project allowlist.
+# Domains only, one per line; a base domain also matches its subdomains.
+# Hosts and comments carried over from the SpaDES dev-environment init-firewall.sh.
+
+# FunGuild database hosts (assign fungal guilds in R via FUNGuildR):
+# mycoportal.org is FunGuild's current maintained home; stbates.org is the
+# legacy endpoint FUNGuildR's get_funguild_db() defaults to.
+mycoportal.org
+stbates.org
+drive.google.com
+drive.usercontent.google.com
+www.googleapis.com
+oauth2.googleapis.com
+accounts.google.com
+
+# Amplicon reference databases for the R-native DADA2/DECIPHER taxonomy pipeline
+# (prepInputs downloads these; IdTaxa trains on them).
+#   ITS  -> UNITE general release. The UNITE release is fetched by its DOI
+#   (e.g. 10.15156/BIO/2938070), which resolves through a redirect chain:
+#   doi.org -> a plutof landing/handle -> the file host (s3.hpc.ut.ee /
+#   files.plutof.ut.ee). The WHOLE chain must be allowlisted or prepInputs
+#   can't follow it. plutof.ut.ee (base) covers the doi./files. subdomains.
+doi.org
+unite.ut.ee
+plutof.ut.ee
+s3.hpc.ut.ee
+#   DECIPHER data + pre-trained classifiers (16S SILVA/GTDB IdTaxa training sets)
+www2.decipher.codes
+#   16S -> SILVA
+arb-silva.de
+#   COI  -> COInr (Meglecz 2023, Zenodo record 6555985); also a general FAIR data host
+zenodo.org
+
+# Python package headroom (future runtime pip installs; cutadapt itself is apt-installed
+# at image build time).
+pypi.org
+files.pythonhosted.org
+
+# conda channels for the PICRUSt2 env (bioconda/conda-forge). The envs are built at image
+# build time (full network), so these are mainly for any runtime conda ops / env rebuilds.
+conda.anaconda.org
+repo.anaconda.com
+anaconda.org
+
+# QIIME 2. The oracle OTU table this project validates against was produced by
+# `qiime feature-classifier classify-sklearn` against a PREBUILT UNITE artifact, so we need
+# QIIME 2 hosts to
+#   (a) inspect that artifact's provenance (which UNITE variant + fit parameters it
+#       was trained from) so a scikit-learn re-implementation is a like-for-like
+#       comparison rather than a confounded one, and
+#   (b) keep the documented fallback open: install real QIIME 2 via conda and call it directly.
+# Base qiime2.org covers data./packages./library./docs./forum./view. subdomains.
+# data.qiime2.org is a redirector -- the artifacts themselves are served from the
+# qiime2-data S3 bucket, so the S3 host must be allowlisted too or the chain breaks
+# (same failure mode as the doi.org -> plutof -> s3.hpc.ut.ee chain above).
+qiime2.org
+s3-us-west-2.amazonaws.com
+qiime2-data.s3.us-west-2.amazonaws.com

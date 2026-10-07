@@ -1,0 +1,56 @@
+# agent-containers: per-project compose file (spec §4, amended 2026-10-06).
+# It lives in ~/.config/agent-containers/<project>/, OUTSIDE the project folder, and is started only
+# by `agent-up up <project>`. Owner-edited. Interpolation variables come from project.conf (agent-up
+# passes it as --env-file). Secret NAMES come from project.env via the generated
+# .generated/env-passthrough.yaml; secret VALUES exist only in the environment of `op run`.
+name: ${PROJECT:?set PROJECT in project.conf}
+services:
+  agent:
+    image: ghcr.io/allenlarocque/spades-gis@sha256:REPLACE_WITH_DIGEST_FROM_digests.md
+    user: "1000:1000"
+    working_dir: /workspace
+    init: true
+    cap_add: [NET_ADMIN, NET_RAW]          # firewall
+    mem_limit: 100g                        # state it explicitly; memory gates must read the cgroup limit
+    environment:
+      CLAUDE_CONFIG_DIR: /home/agent/.claude
+      # Spec §12 decision B. ANY value disables (even "0"): delete the line to re-enable.
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    volumes:
+      - type: bind                         # the project: the agent's read-write workspace
+        source: ${PROJECT_DIR:?set PROJECT_DIR in project.conf}
+        target: /workspace
+        bind: {create_host_path: false}
+      - claude-config:/home/agent/.claude
+      - require-cache:/home/agent/.cache/R/Require
+      - rlib:/home/agent/.local/share/R     # setupProject standAlone library: persists across `agent-up up`
+      - type: bind                         # project allowlist: owner-maintained in THIS config dir
+        source: ./allowlist
+        target: /etc/firewall/allowlist.d/50-project.txt
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind                         # personal conventions, live (rw for builders)
+        source: ${SPADES_AI_DIR:?set SPADES_AI_DIR in project.conf}
+        target: /opt/reference/spades.ai
+        bind: {create_host_path: false}
+      - type: bind                         # shared agent memory (spec §13.2; rw for builders)
+        source: ${AGENT_MEMORY_DIR:?set AGENT_MEMORY_DIR in project.conf}
+        target: /opt/memory
+        bind: {create_host_path: false}
+      # - uv-cache:/home/agent/.cache/uv  # OPTIONAL: shared uv cache for reticulate::py_require() (spec §3.4)
+      # - t3:/home/agent/.t3              # RESERVED Phase 2: T3 Code state (spec §13.1)
+    command: >
+      bash -c "sudo /usr/local/bin/init-firewall.sh && /usr/local/bin/agent-init.sh && exec sleep infinity"
+    # RESERVED Phase 2 (T3 Code, spec §13.1). Localhost ONLY, and the firewall needs a matching INPUT
+    # rule (INPUT is default-DROP; see the note in images/base/init-firewall.sh):
+    # ports: ["127.0.0.1:3773:3773"]
+volumes:
+  claude-config:
+    name: claude-${PROJECT}                # FIXED name: survives rebuilds
+  rlib:
+    name: rlib-${PROJECT}                  # FIXED name, per project
+  require-cache:
+    name: require-cache-shared             # shared across all SpaDES projects
+    external: true
+  # t3:
+  #   name: t3-${PROJECT}                  # RESERVED Phase 2
