@@ -160,8 +160,6 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - name: shellcheck (warning and above)
         if: always()
         run: |
@@ -175,8 +173,14 @@ jobs:
           tar xzf /tmp/actionlint.tgz -C /tmp actionlint
           /tmp/actionlint -color
           /tmp/actionlint -color project-template/repo/.github/workflows/gitleaks.yml
+
+  gitleaks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: gitleaks (full history, redacted)
-        if: always()
         run: docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 git /repo --redact --verbose
 
   # Dry-run of the publish workflow (build, smoke-by-digest, latest promotion): same script, but against a local registry:2 instead of GHCR.

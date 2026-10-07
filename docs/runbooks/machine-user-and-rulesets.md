@@ -76,10 +76,10 @@ Repo → Settings → Rules → Rulesets → New ruleset → **New branch rulese
    - **Restrict deletions**
    - **Block force pushes**
    - **Require a pull request before merging**, with: Required approvals = **1**; **Dismiss stale pull request approvals when new commits are pushed**; **Require review from Code Owners**; **Require approval of the most recent reviewable push**
-   - **Require status checks to pass** → Add checks → `build-test`, `gitleaks` (added to every project repo by `agent-up init`; selectable after its first run)
+   - **Require status checks to pass** → Add checks → `build-test` and `gitleaks` (both are jobs in this repo's `ci.yml`; selectable after CI has run once). Project repos get their own `gitleaks` workflow from `agent-up init`.
 5. Create.
 
-*Why `build-test` only:* it builds the images and runs the smoke, firewall and template tests, so it is the real quality gate. `publish-dryrun` is a heavier rehearsal of the publish pipeline and would make unrelated merges wait; add it later if publish breakage becomes recurring.
+*Why `build-test` and `gitleaks`:* `build-test` builds the images and runs the smoke, firewall and launcher tests, so it is the real quality gate; `gitleaks` is the full-history secret scan. `lint` (shellcheck, actionlint) is advisory here. `publish-dryrun` is a heavier rehearsal of the publish pipeline and would make unrelated merges wait; add it later if publish breakage becomes recurring.
 **The `build-test` check only appears in the picker after CI has run once on the repo.** If it is missing, open any PR first (CI runs), then come back and add it. On non-`agent-containers` repos, require whatever CI job you have, or skip that rule if there is none.
 
 **Note:** your "pull requests only" bypass also skips the required status check, so do not merge a red PR just because you can.
