@@ -343,6 +343,8 @@ OVR
     check "  ...no temp dirs left behind" \
       bash -c '[ -z "$(docker exec "$1" find /opt/claude-code -maxdepth 1 -name ".tmp.*")" ]' _ "$CID"
     check "auto-updater disabled in the image" test "$(docker exec "$CID" printenv DISABLE_AUTOUPDATER)" = 1
+    check "platform.claude.com resolves (Claude subscription login)" \
+      bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 platform.claude.com A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID"
     check "project-allowlisted www.python.org resolves" \
       bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 www.python.org A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID"
   fi

@@ -6,6 +6,9 @@
 # --- Claude Code / npm. sentry.io and statsig.com (error reports, telemetry) are deliberately NOT
 # here: containers set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 (spec §12, decision B).
 api.anthropic.com
+# Claude subscription login (OAuth token exchange). Without it `claude` cannot log in: EAI_AGAIN
+# (first real use, 2026-10-07).
+platform.claude.com
 registry.npmjs.org
 # --- VS Code server + extensions
 marketplace.visualstudio.com
