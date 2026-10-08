@@ -2,7 +2,7 @@
 'use strict';
 
 // Pre-configures the claude-hud statusline and display options, and
-// disables the extra --dangerously-skip-permissions confirmation prompt,
+// disables the extra --dangerously-skip-permissions confirmation prompt, makes bypassPermissions the default mode,
 // written into $CLAUDE_CONFIG_DIR (the claude-<project> named volume, see the
 // compose seed in project-template/config) and seeded with this content on first
 // container start.
@@ -51,6 +51,9 @@ json.statusLine = {
   command: `bash -c '${statuslineScript}'`,
 };
 json.skipDangerousModePermissionPrompt = true;
+// Owner decision 2026-10-07: builder containers default to bypassPermissions (= --dangerously-skip-
+// permissions). The container is the safety boundary (firewall, scoped token, merge gate), not prompts.
+json.permissions = Object.assign({}, json.permissions, { defaultMode: 'bypassPermissions' });
 
 // Hooks ship DISABLED until the user's hooks review (spec §8). Fail loudly if anything set them.
 if (Object.prototype.hasOwnProperty.call(json, 'hooks')) {
@@ -59,7 +62,7 @@ if (Object.prototype.hasOwnProperty.call(json, 'hooks')) {
 }
 
 fs.writeFileSync(settingsPath, JSON.stringify(json, null, 2) + '\n');
-console.log(`Wrote statusLine + skipDangerousModePermissionPrompt to ${settingsPath}`);
+console.log(`Wrote statusLine + skipDangerousModePermissionPrompt + defaultMode=bypassPermissions to ${settingsPath}`);
 
 // Unlike settings.json above, this file is left alone if it already exists:
 // it's the same file /claude-hud:configure writes to, so once a volume has

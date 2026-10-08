@@ -74,6 +74,7 @@ check "agent-init installed the pinned claude" bash -c 'want=$(jq -r ".dependenc
 check "PE/AI plugins installed"        bash -c 'jq -e ".plugins | keys | map(select(test(\"@predictiveecology-ai$\"))) | length == 3" /tmp/cc/plugins/installed_plugins.json'
 check "superpowers installed"          bash -c 'jq -e ".plugins | has(\"superpowers@superpowers-marketplace\")" /tmp/cc/plugins/installed_plugins.json'
 check "NO hooks in settings"           bash -c 'jq -e "has(\"hooks\") | not" /tmp/cc/settings.json'
+check "default permission mode = bypassPermissions" bash -c 'jq -e ".permissions.defaultMode == \"bypassPermissions\"" /tmp/cc/settings.json'
 check "zsh: .zshrc present, # comments work" zsh -ic 'echo ok # a comment' 
 # agent-init sets the git identity from the agent's GitHub account (stub gh: no token needed here).
 check "agent-init sets git identity from gh" bash -c '
