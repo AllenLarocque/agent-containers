@@ -380,6 +380,8 @@ OVR
     check "  ...NOT reachable from a sibling container on the same network (firewall: gateway only)" \
       bash -c 'net=$(docker inspect -f "{{range \$k,\$v := .NetworkSettings.Networks}}{{\$k}}{{end}}" "$1"); ip=$(docker inspect -f "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}" "$1"); [ -n "$net" ] && [ -n "$ip" ] || exit 1; rc=0; docker run --rm --network "$net" "$2" curl -sS -o /dev/null --max-time 5 "http://$ip:3773/" || rc=$?; echo "curl rc=$rc (28 = timed out: dropped by the firewall)"; [ "$rc" -eq 28 ]' _ "$CID" "$TEMPLATE_IMAGE"
     check "  ...a pairing token can be minted (exact field, untruncated)" bash -c 'docker exec -u agent "$1" agent-t3 pair ci | grep -Eqx "token=[A-Za-z0-9._~%-]+"' _ "$CID"
+    check "platform.claude.com resolves (Claude subscription login)" \
+      bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 platform.claude.com A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID"
     check "project-allowlisted www.python.org resolves" \
       bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 www.python.org A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID"
   fi

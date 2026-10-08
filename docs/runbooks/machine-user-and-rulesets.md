@@ -20,13 +20,13 @@ Step 1 is done once. Steps 2 and 4 are done per repo. Step 3 is done once per pr
 1. Sign out of GitHub (or use a private window) and sign up at <https://github.com/signup> with a username such as `allen-agent`.
 2. Use a **separate email address** (a plus-address or alias that reaches you is fine).
 3. Enable 2FA: Settings → Password and authentication → Two-factor authentication.
-4. Save the recovery codes in your **Private** 1Password vault (tier C: only you, never a service account).
+4. Save the recovery codes in your **Personal** 1Password vault (tier C: only you, never a service account).
 
 *Why a separate account:* permissions are per account. If the agent used yours it would inherit your Admin rights and could remove the ruleset.
 
 ## 2. Repo settings and files (as you, per repo)
 
-1. Repo → Settings → Collaborators → Add people → `allen-agent` → role **Write** (not Maintain, not Admin). Then sign in as `allen-agent` and **accept the invitation**. *Why Write: enough to push branches and open PRs; Maintain and Admin can change rules.*
+1. Repo → Settings → Collaborators → Add people → the machine user. **Repos owned by a personal account have no role picker:** collaborators get one fixed level, equivalent to Write (push branches, open PRs; cannot change settings or rulesets). Organisation repos do have roles: choose **Write** (not Maintain, not Admin). Then sign in as the machine user and **accept the invitation** (`https://github.com/<owner>/<repo>/invitations`). *What stops it merging is the ruleset (step 4), not the role.*
 2. Add `.github/CODEOWNERS` containing exactly one line, via a PR:
 
    ```
