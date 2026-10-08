@@ -28,6 +28,17 @@ node /usr/local/lib/agent/configure-claude-settings.js "$(command -v node)" || l
 # 3. GitHub: gh reads GH_TOKEN (tier A, scoped agent token) directly; make git use gh.
 if [ -n "${GH_TOKEN:-}" ]; then
   gh auth setup-git >/dev/null 2>&1 && log "git uses gh credentials (agent identity)" || log "WARN gh setup-git failed"
+  # Commit as the agent account (its GitHub no-reply address), unless an identity is already set.
+  if [ -z "$(git config --global user.email 2>/dev/null)" ]; then
+    if who=$(gh api user --jq '"\(.login) \(.id)"' 2>/dev/null) && [ -n "$who" ]; then
+      login=${who% *}; uid=${who#* }
+      git config --global user.name "$login" \
+        && git config --global user.email "${uid}+${login}@users.noreply.github.com" \
+        && log "git identity: $login <${uid}+${login}@users.noreply.github.com>"
+    else
+      log "WARN could not read the agent's GitHub identity; set git user.name/user.email by hand"
+    fi
+  fi
 else
   log "NOTE: no GH_TOKEN — GitHub write access disabled in this container"
 fi

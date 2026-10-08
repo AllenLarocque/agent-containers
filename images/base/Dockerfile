@@ -49,10 +49,13 @@ RUN curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/
     && rm -rf /tmp/uv.tgz /tmp/uv-x86_64-unknown-linux-gnu
 
 # Non-root user, fixed UID/GID 1000 (matches the WSL user for bind-mount ownership).
+# EVERY named-volume mount point must exist here, agent-owned: a fresh volume copies the image dir's
+# ownership, and a missing dir becomes root-owned (2026-10-07: ~/.claude was missing; plugins and
+# settings could not be written). The CI 'fresh named volumes' step checks each one.
 RUN groupadd --gid 1000 agent && useradd --uid 1000 --gid 1000 --create-home --shell /bin/zsh agent \
     && mkdir -p /workspace /etc/firewall/allowlist.d /usr/local/share/npm-global /opt/claude-code \
-    && mkdir -p /home/agent/.local/share/R /home/agent/.cache/R/Require /home/agent/.npm \
-    && chown -R agent:agent /workspace /usr/local/share/npm-global /opt/claude-code /home/agent/.local /home/agent/.cache /home/agent/.npm
+    && mkdir -p /home/agent/.local/share/R /home/agent/.cache/R/Require /home/agent/.npm /home/agent/.claude \
+    && chown -R agent:agent /workspace /usr/local/share/npm-global /opt/claude-code /home/agent/.local /home/agent/.cache /home/agent/.npm /home/agent/.claude
 
 # Firewall: init script + base allowlist (*.txt in allowlist.d; the project file is mounted read-only
 # from the owner's host). sudo ONLY for the firewall script. dnsmasq runs as its own unprivileged
@@ -85,6 +88,8 @@ RUN sha256sum /usr/local/lib/agent/claude-code/package-lock.json | cut -c1-16 \
     && chmod 0755 /usr/local/bin/install-claude-code /usr/local/bin/claude
 
 USER agent
+# A .zshrc stops zsh's first-run wizard; interactivecomments lets pasted `cmd  # note` lines work.
+RUN printf '# agent-containers\nsetopt interactivecomments\n' > /home/agent/.zshrc
 ENV CLAUDE_CONFIG_DIR=/home/agent/.claude
 # The pinned version is the only version: upgrades go through the lockfile and a rebuild.
 ENV DISABLE_AUTOUPDATER=1

@@ -80,11 +80,18 @@ jobs:
             echo "== disk"; df -h /
           } 2>&1 | sed 's/%/%25/g; s/\r//g' | awk '{printf "%s%%0A", $0}')
           echo "::notice title=image sizes::$r"
-      - name: Fresh named volumes are writable by agent (R library + Require cache)
+      - name: Fresh named volumes are writable by agent (every volume in the compose template)
         run: |
-          # setupProject's project library lives under ~/.local/share/R; a fresh named volume must inherit agent ownership.
-          docker run --rm -v rlib-fresh:/home/agent/.local/share/R -v reqcache-fresh:/home/agent/.cache/R/Require \
-            -u 1000:1000 spades-base:ci bash -c 'touch /home/agent/.local/share/R/w && touch /home/agent/.cache/R/Require/w && echo "volumes writable"'
+          # A fresh named volume inherits the ownership of the image dir it mounts on. The list is read from
+          # the compose template itself, so a new volume cannot be added without being checked here.
+          mapfile -t targets < <(grep -oE '^ +- [a-z-]+:(/home/agent/[^ ]+)' project-template/config/compose.yaml | sed -E 's/.*:(\/home\/agent\/[^ ]+)/\1/')
+          [ "${#targets[@]}" -ge 4 ] || { echo "parsed only ${#targets[@]} volume targets: ${targets[*]}"; exit 1; }
+          args=(); i=0
+          for t in "${targets[@]}"; do args+=(-v "fresh-vol-$i:$t"); i=$((i+1)); done
+          printf '%s\n' "${targets[@]}"
+          docker run --rm "${args[@]}" -u 1000:1000 spades-base:ci bash -c 'for t in "$@"; do touch "$t/w" || exit 1; done; echo "all volumes writable"' _ "${targets[@]}"
+          # And what failed in real use: agent-init must write settings + plugins into the claude-config volume.
+          docker run --rm -v fresh-claude:/home/agent/.claude spades-base:ci bash -c '/usr/local/bin/agent-init.sh 2>&1 | tee /tmp/init.log; ! grep -q WARN /tmp/init.log && test -s /home/agent/.claude/settings.json'
       - name: Firewall IPv6 classifier unit test (no NET_ADMIN, sources the shipped script)
         if: always()
         run: docker run --rm -v "$PWD/tests:/tests:ro" spades-base:ci bash /tests/firewall/test-v6-classifier.sh
