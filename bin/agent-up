@@ -17,12 +17,19 @@ usage:
   agent-up up <project>                  resolve secrets with `op run`, (re)create the container
   agent-up config <project> [ARGS...]    print the rendered compose config (no secrets needed)
   agent-up shell <project>               zsh in the container as `agent`
+  agent-up pair <project>                print a one-time T3 Code pairing link (valid 10 min)
   agent-up status|stop|down <project>
 USAGE
   exit 2
 }
 normalise(){ printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9_-]/-/g; s/^[^a-z0-9]*//'; }
 conf_get(){ sed -n "s/^$2=//p" "$1" | tail -n 1; }   # $1 project.conf, $2 KEY
+next_t3_port(){ # lowest port >= 3773 not used by another project's config
+  local p=3773 used
+  used="$(cat "$CFG_ROOT"/*/project.conf 2>/dev/null | sed -n 's/^T3_PORT=//p' | sort -u)"
+  while grep -qx "$p" <<<"$used"; do p=$((p+1)); done
+  printf '%s' "$p"
+}
 
 cmd_init(){
   local dir="" name="" image="gis" profile="builder"
@@ -70,6 +77,8 @@ PROFILE=$profile
 IMAGE=$image
 SPADES_AI_DIR=$HOME/GitHub/spades.ai
 AGENT_MEMORY_DIR=$HOME/agent-memory
+# Host port for this project's T3 Code server (127.0.0.1 only); unique per project.
+T3_PORT=$(next_t3_port)
 CONFEOF
   chmod 600 "$tmp/compose.yaml" "$tmp/project.env" "$tmp/allowlist" "$tmp/project.conf"
   chmod 700 "$tmp"
@@ -134,14 +143,24 @@ check_files(){
   [ "$prof" = builder ] || die "PROFILE=$prof in $1/project.conf: only builder is built (research is spec §2 Phase 1b)"
   img="$(conf_get "$1/project.conf" IMAGE)"
   case "$img" in base|gis|bio) ;; *) die "IMAGE=$img in $1/project.conf: must be base, gis or bio" ;; esac
+  local port; port="$(conf_get "$1/project.conf" T3_PORT)"
+  [[ $port =~ ^[0-9]+$ ]] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] \
+    || die "T3_PORT='$port' in $1/project.conf: set a free port 1024-65535, unique per project (e.g. T3_PORT=$(next_t3_port))"
+  local other
+  for other in "$CFG_ROOT"/*/project.conf; do
+    [ -f "$other" ] && [ "$other" != "$1/project.conf" ] || continue
+    [ "$(conf_get "$other" T3_PORT)" != "$port" ] \
+      || die "T3_PORT=$port in $1/project.conf is also used by $(basename "$(dirname "$other")"): pick another (free: $(next_t3_port))"
+  done
 }
+t3_host(){ printf '%s.localhost' "$(printf '%s' "$1" | tr '_' '-')"; } # per-project browser origin (cookies are per host, not per port)
 check_digest(){
   grep -Eq '^[[:space:]]*image:[[:space:]]*[^[:space:]]+@sha256:[0-9a-f]{64}[[:space:]]*$' "$1" \
     || die "$1: the image is not pinned to a real digest (@sha256:<64 hex>). Copy one from agent-containers/digests.md."
 }
 check_project_env(){ # op:// references only; never echo a line (it could hold a pasted secret)
   local bad reserved
-  reserved="$(grep -nE '^[[:space:]]*(PROJECT|PROJECT_DIR|PROFILE|IMAGE|SPADES_AI_DIR|AGENT_MEMORY_DIR|PATH|HOME|COMPOSE|(COMPOSE|DOCKER|OP)_[A-Za-z0-9_]*)=' "$1" | sed 's/^\([0-9]*\):[[:space:]]*\([A-Za-z0-9_]*\)=.*/line \1: \2/' | paste -sd, - || true)"
+  reserved="$(grep -nE '^[[:space:]]*(PROJECT|PROJECT_DIR|PROFILE|IMAGE|SPADES_AI_DIR|AGENT_MEMORY_DIR|T3_PORT|PATH|HOME|COMPOSE|(COMPOSE|DOCKER|OP)_[A-Za-z0-9_]*)=' "$1" | sed 's/^\([0-9]*\):[[:space:]]*\([A-Za-z0-9_]*\)=.*/line \1: \2/' | paste -sd, - || true)"
   [ -z "$reserved" ] || die "$1 uses reserved key name(s) that would override compose or the launcher ($reserved); rename them"
   bad="$(grep -nEv '^[[:space:]]*(#|$)' "$1" | grep -Ev '^[0-9]+:[A-Za-z_][A-Za-z0-9_]*=op://[^[:space:]]+$' | cut -d: -f1 | paste -sd, - || true)"
   [ -z "$bad" ] || die "$1 may hold only KEY=op://... references; offending line number(s): $bad (values not shown)"
@@ -206,6 +225,7 @@ cmd_up(){
   done
   op run --env-file "$cfg/project.env" -- "${COMPOSE[@]}" up -d --force-recreate
   echo "agent-up: '$name' running. Attach: agent-up shell $name, or VS Code: Dev Containers: Attach to Running Container... -> ${name}-agent-1"
+  echo "agent-up: T3 Code at http://$(t3_host "$name"):$(conf_get "$cfg/project.conf" T3_PORT) (first time: agent-up pair $name)"
 }
 cmd_config(){
   [ $# -ge 1 ] || usage
@@ -221,6 +241,19 @@ cmd_shell(){
   [ $# -eq 1 ] || usage
   local cfg; cfg="$(cfg_dir "$1")"
   docker exec -it -u agent -w /workspace "$(basename "$cfg")-agent-1" zsh
+}
+cmd_pair(){
+  [ $# -eq 1 ] || usage
+  local cfg name port tok; cfg="$(cfg_dir "$1")"; name="$(basename "$cfg")"
+  check_files "$cfg"
+  port="$(conf_get "$cfg/project.conf" T3_PORT)"
+  tok="$(docker exec -u agent "$name-agent-1" agent-t3 pair "$(hostname)")" \
+    || die "could not mint a pairing token (is '$name' running? agent-up status $name)"
+  [[ $tok =~ ^token=[A-Za-z0-9._~%-]+$ ]] || die "unexpected pairing output from the container"
+  echo "T3 Code for '$name' (one-time link, valid 10 minutes):"
+  echo "  http://$(t3_host "$name"):$port/pair#$tok"
+  echo "Its own browser origin keeps this project's T3 session apart from other projects'."
+  echo "If your browser cannot open it, use: http://localhost:$port/pair#$tok"
 }
 cmd_compose(){ # $1 compose subcommand, $2 project
   local sub="$1"; shift
@@ -242,7 +275,7 @@ cmd_status(){
 # Only the owner's config defines the sandbox: ambient compose settings and interpolation variables
 # must not override it (a shell variable beats --env-file in compose).
 unset COMPOSE_FILE COMPOSE_PROFILES COMPOSE_PATH_SEPARATOR COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES \
-      PROJECT PROJECT_DIR PROFILE IMAGE SPADES_AI_DIR AGENT_MEMORY_DIR
+      PROJECT PROJECT_DIR PROFILE IMAGE SPADES_AI_DIR AGENT_MEMORY_DIR T3_PORT
 
 [ $# -ge 1 ] || usage
 cmd="$1"; shift
@@ -251,6 +284,7 @@ case "$cmd" in
   up)     cmd_up "$@" ;;
   config) cmd_config "$@" ;;
   shell)  cmd_shell "$@" ;;
+  pair)   cmd_pair "$@" ;;
   status) cmd_status "$@" ;;
   stop)   cmd_compose stop "$@" ;;
   down)   cmd_compose down "$@" ;;

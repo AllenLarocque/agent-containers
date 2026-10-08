@@ -44,6 +44,7 @@ cat > "$T/dstub/docker" <<'STUB'
 { echo "ARGS: $*"
   echo "ENV: COMPOSE_FILE=${COMPOSE_FILE-<unset>} COMPOSE_PROFILES=${COMPOSE_PROFILES-<unset>} PROJECT_DIR=${PROJECT_DIR-<unset>} SPADES_AI_DIR=${SPADES_AI_DIR-<unset>} GH_TOKEN=${GH_TOKEN-<unset>}"
 } >> "$DLOG"
+case "$*" in *"agent-t3 pair"*) echo "token=fakeTok_123" ;; esac
 exit 0
 STUB
 chmod +x "$T/bin/op" "$T/dstub/docker"
@@ -76,6 +77,7 @@ check "project.conf: PROJECT, PROFILE, IMAGE" \
   bash -c 'grep -qx "PROJECT=demo-proj" "$1" && grep -qx "PROFILE=builder" "$1" && grep -qx "IMAGE=gis" "$1"' _ "$CFG/project.conf"
 check "project.conf: SPADES_AI_DIR and AGENT_MEMORY_DIR defaults" \
   bash -c 'grep -qx "SPADES_AI_DIR=$2/GitHub/spades.ai" "$1" && grep -qx "AGENT_MEMORY_DIR=$2/agent-memory" "$1"' _ "$CFG/project.conf" "$H"
+check "project.conf: first project gets T3_PORT=3773" grep -qx "T3_PORT=3773" "$CFG/project.conf"
 check "project.env names this project's vault" grep -q "op://agent-$NAME/github-agent/token" "$CFG/project.env"
 check "compose uses spades-gis by default, digest placeholder kept" \
   grep -q "spades-gis@sha256:REPLACE_WITH_DIGEST_FROM_digests.md" "$CFG/compose.yaml"
@@ -91,6 +93,7 @@ check "init --image bio --name Bio2" au init "$P2" --image bio --name Bio2
 check "  ...existing CODEOWNERS kept" grep -qx '\* @me' "$P2/.github/CODEOWNERS"
 check "  ...compose uses spades-bio" grep -q "spades-bio@sha256:" "$CFGROOT/bio2/compose.yaml"
 check "  ...bio domains appended to the allowlist" grep -qx "mycoportal.org" "$CFGROOT/bio2/allowlist"
+check "  ...second project gets the next free T3_PORT (3774)" grep -qx "T3_PORT=3774" "$CFGROOT/bio2/project.conf"
 
 # ---- init: symlinks, permissions, atomicity, names
 SP1="$T/symproj1"; mkdir -p "$SP1/.github"; ln -s "$T/evil-target" "$SP1/.github/CODEOWNERS"
@@ -235,6 +238,21 @@ check "stop" au stop "$NAME"
 check "  ...compose stop" grep -qxF "ARGS: $C stop" "$DLOG"
 check "down" au down "$NAME"
 check "  ...compose down WITHOUT -v (named volumes kept)" grep -qxF "ARGS: $C down" "$DLOG"
+: > "$DLOG"
+pairout="$(au pair "$NAME" 2>&1)" || true
+check "pair prints a per-project origin link on this project's T3_PORT" grep -qxF "  http://demo-proj.localhost:3773/pair#token=fakeTok_123" <<<"$pairout"
+check "  ...and a plain localhost fallback" grep -qF "http://localhost:3773/pair#token=fakeTok_123" <<<"$pairout"
+check "  ...minted inside the container, as agent" grep -qE "^ARGS: exec -u agent $NAME-agent-1 agent-t3 pair " "$DLOG"
+cp "$CFG/project.conf" "$T/pconf-t3.bak"
+sed -i 's/^T3_PORT=.*/T3_PORT=80/' "$CFG/project.conf"
+refuses "a privileged/invalid T3_PORT is refused" 'T3_PORT=.80.' au status "$NAME"
+sed -i '/^T3_PORT=/d' "$CFG/project.conf"
+refuses "a missing T3_PORT is refused" "T3_PORT=''" au status "$NAME"
+cp "$T/pconf-t3.bak" "$CFG/project.conf"
+cp "$CFGROOT/bio2/project.conf" "$T/bio2conf.bak"; sed -i 's/^T3_PORT=.*/T3_PORT=3773/' "$CFGROOT/bio2/project.conf"
+refuses "a T3_PORT used by another project is refused" 'T3_PORT=3773 .* also used by bio2' au status "$NAME"
+cp "$T/bio2conf.bak" "$CFGROOT/bio2/project.conf"
+cp "$T/pconf-t3.bak" "$CFG/project.conf"
 
 # ---- rendering with the REAL docker compose (CI; skipped where docker is absent)
 if docker compose version >/dev/null 2>&1; then
@@ -256,6 +274,12 @@ if docker compose version >/dev/null 2>&1; then
     bash -c 'jq -r ".services.agent.volumes[] | select(.type==\"bind\" and ((.read_only // false)|not)) | .source" <<<"$1" | while IFS= read -r s; do case "$2/" in "${s%/}/"*) echo "rw $s contains $2"; exit 1;; esac; done' _ "$J" "$CFG"
   check "rendered: claude-$NAME, rlib-$NAME, external require-cache-shared" \
     bash -c '[ "$(jq -r ".volumes[\"claude-config\"].name" <<<"$1")" = "claude-$2" ] && [ "$(jq -r ".volumes.rlib.name" <<<"$1")" = "rlib-$2" ] && [ "$(jq -r ".volumes[\"require-cache\"].name" <<<"$1")" = require-cache-shared ] && [ "$(jq -r ".volumes[\"require-cache\"].external" <<<"$1")" = true ]' _ "$J" "$NAME"
+  check "rendered: T3 published on the host's 127.0.0.1 ONLY, project port -> 3773" \
+    jq -e '[.services.agent.ports[] | {host_ip, target, published: (.published|tostring), protocol}] == [{"host_ip":"127.0.0.1","target":3773,"published":"3773","protocol":"tcp"}]' <<<"$J"
+  check "rendered: t3-$NAME volume at /home/agent/.t3" \
+    bash -c '[ "$(jq -r ".volumes.t3.name" <<<"$1")" = "t3-$2" ] && jq -e ".services.agent.volumes[] | select(.target==\"/home/agent/.t3\")" <<<"$1" >/dev/null' _ "$J" "$NAME"
+  check "rendered: command is the image entrypoint (firewall first)" \
+    jq -e '.services.agent.command == ["/usr/local/bin/agent-entrypoint"]' <<<"$J"
   check "rendered: no env_file (secrets only via op run)" test -z "$(jq -r '.services.agent.env_file // empty' <<<"$J")"
   check "rendered: NET_ADMIN + NET_RAW, explicit mem_limit" \
     jq -e '(.services.agent.cap_add | index("NET_ADMIN") and index("NET_RAW")) and (.services.agent.mem_limit != null)' <<<"$J"
@@ -289,7 +313,6 @@ services:
   agent:
     image: $TEMPLATE_IMAGE
     mem_limit: 4g
-    command: bash -c "sudo /usr/local/bin/init-firewall.sh && touch /tmp/fw-ready && exec sleep infinity"
 OVR
   dc(){ env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u COMPOSE_FILE HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" GH_TOKEN=dummy-in-container \
           docker compose --env-file "$CFG/project.conf" -f "$CFG/compose.yaml" -f "$CFG/.generated/env-passthrough.yaml" \
@@ -306,8 +329,13 @@ OVR
   if [ -z "$CID" ]; then
     check "sandbox container id" false
   else
-    for _ in $(seq 1 90); do docker exec "$CID" test -e /tmp/fw-ready 2>/dev/null && break; sleep 2; done
-    check "firewall initialised" docker exec "$CID" test -e /tmp/fw-ready
+    # The REAL entrypoint runs: firewall -> agent-init (Claude Code + plugins) -> T3. T3 answering on the
+    # host's published port means all three finished.
+    T3P=$(sed -n 's/^T3_PORT=//p' "$CFG/project.conf")
+    for _ in $(seq 1 150); do curl -fsS -o /dev/null --max-time 3 "http://127.0.0.1:$T3P/" 2>/dev/null && break; sleep 2; done
+    check "firewall initialised by the entrypoint" bash -c 'docker logs "$1" 2>&1 | grep -q "Firewall verification passed - CRAN reachable"' _ "$CID"
+    check "  ...and BEFORE agent-init and T3 started (log order)" \
+      bash -c 'docker logs "$1" 2>&1 | grep -nE "Firewall verification passed - CRAN|\[agent-init\]|\[agent-t3\]" | head -n 1 | grep -q "Firewall verification"' _ "$CID"
     # The file is mode 600 owned by the CI runner (not UID 1000), so only root can read it.
     check "in-container allowlist == the config dir's allowlist" \
       bash -c 'diff <(docker exec -u root "$1" cat /etc/firewall/allowlist.d/50-project.txt) "$2"' _ "$CID" "$CFG/allowlist"
@@ -329,9 +357,9 @@ OVR
     check "release-assets.githubusercontent.com still resolves (decision C)" \
       bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 release-assets.githubusercontent.com A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID"
     # Claude Code is not in the image: it installs at start, BEHIND the firewall, into the shared volume.
-    check "claude is NOT usable before install-claude-code runs" bash -c '! docker exec -u agent "$1" claude --version' _ "$CID"
-    check "install-claude-code succeeds behind the firewall (npm ci, integrity-checked)" \
-      docker exec -u agent "$CID" install-claude-code
+    check "the entrypoint installed Claude Code behind the firewall (npm ci, integrity-checked)" \
+      bash -c 'docker logs "$1" 2>&1 | grep -q "\[install-claude-code\] installed: claude"' _ "$CID"
+    check "install-claude-code reruns cleanly" docker exec -u agent "$CID" install-claude-code
     check "  ...claude reports the pinned version" \
       bash -c 'want=$(docker exec "$1" jq -r ".dependencies[\"@anthropic-ai/claude-code\"]" /usr/local/lib/agent/claude-code/package.json); docker exec -u agent "$1" claude --version | grep -qE "^${want//./\\.}( |$)"' _ "$CID"
     check "  ...installed in the container's own layer, under the lockfile's hash" \
@@ -343,6 +371,15 @@ OVR
     check "  ...no temp dirs left behind" \
       bash -c '[ -z "$(docker exec "$1" find /opt/claude-code -maxdepth 1 -name ".tmp.*")" ]' _ "$CID"
     check "auto-updater disabled in the image" test "$(docker exec "$CID" printenv DISABLE_AUTOUPDATER)" = 1
+    # T3 Code: reachable from the host through the published loopback port, and ONLY from the gateway.
+    check "T3 server started by the entrypoint" bash -c 'docker logs "$1" 2>&1 | grep -q "\[agent-t3\] server up"' _ "$CID"
+    check "  ...reachable from the host at 127.0.0.1:<T3_PORT>" curl -fsS -o /dev/null --max-time 5 "http://127.0.0.1:$T3P/"
+    check "  ...also under the per-project origin <project>.localhost" \
+      curl -fsS -o /dev/null --max-time 5 -H "Host: $NAME.localhost:$T3P" "http://127.0.0.1:$T3P/"
+    check "  ...agent-t3 start is idempotent" bash -c 'docker exec -u agent "$1" agent-t3 start | grep -q "already running"' _ "$CID"
+    check "  ...NOT reachable from a sibling container on the same network (firewall: gateway only)" \
+      bash -c 'net=$(docker inspect -f "{{range \$k,\$v := .NetworkSettings.Networks}}{{\$k}}{{end}}" "$1"); ip=$(docker inspect -f "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}" "$1"); [ -n "$net" ] && [ -n "$ip" ] || exit 1; rc=0; docker run --rm --network "$net" "$2" curl -sS -o /dev/null --max-time 5 "http://$ip:3773/" || rc=$?; echo "curl rc=$rc (28 = timed out: dropped by the firewall)"; [ "$rc" -eq 28 ]' _ "$CID" "$TEMPLATE_IMAGE"
+    check "  ...a pairing token can be minted (exact field, untruncated)" bash -c 'docker exec -u agent "$1" agent-t3 pair ci | grep -Eqx "token=[A-Za-z0-9._~%-]+"' _ "$CID"
     check "platform.claude.com resolves (Claude subscription login)" \
       bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 platform.claude.com A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID"
     check "project-allowlisted www.python.org resolves" \

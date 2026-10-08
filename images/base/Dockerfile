@@ -9,6 +9,9 @@ ARG UV_VERSION=0.12.19
 # sha256 of uv-x86_64-unknown-linux-gnu.tar.gz, from the release asset ...tar.gz.sha256 (a mismatch fails the build).
 ARG UV_SHA256=23bf5552d220e0842b65c862097b2ebaeba0064b74eda5e565e77fd25969d8c8
 ARG PE_AI_COMMIT=e7ae689751316dfe742f31b32d0d659accd0cc41
+# T3 Code server (MIT; spec §13.1), pinned: sha256 of t3-<ver>-linux-x64.tar.gz from the release's SHA256SUMS.
+ARG T3_VERSION=0.0.45
+ARG T3_SHA256=10505ae74bc6a43cfab0fde0bf06a0e0d6862f74030591be994a640d48a0d6bd
 ENV TZ="$TZ" DEBIAN_FRONTEND=noninteractive
 
 # OS + agent tooling. tmux: detached long runs. exiftool: photo metadata (field data).
@@ -48,14 +51,20 @@ RUN curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/
     && tar xzf /tmp/uv.tgz -C /tmp && install -m 0755 /tmp/uv-x86_64-unknown-linux-gnu/uv /usr/local/bin/uv \
     && rm -rf /tmp/uv.tgz /tmp/uv-x86_64-unknown-linux-gnu
 
+# T3 Code, pinned and verified (a mismatch fails the build). Root-owned: the agent cannot swap it.
+RUN curl -fsSL "https://github.com/pingdotgg/t3code/releases/download/v${T3_VERSION}/t3-${T3_VERSION}-linux-x64.tar.gz" -o /tmp/t3.tgz \
+    && echo "${T3_SHA256}  /tmp/t3.tgz" | sha256sum -c - \
+    && mkdir -p /opt/t3 && tar xzf /tmp/t3.tgz -C /opt/t3 && rm /tmp/t3.tgz \
+    && ln -s "/opt/t3/t3-${T3_VERSION}-linux-x64/t3" /usr/local/bin/t3
+
 # Non-root user, fixed UID/GID 1000 (matches the WSL user for bind-mount ownership).
 # EVERY named-volume mount point must exist here, agent-owned: a fresh volume copies the image dir's
 # ownership, and a missing dir becomes root-owned (2026-10-07: ~/.claude was missing; plugins and
 # settings could not be written). The CI 'fresh named volumes' step checks each one.
 RUN groupadd --gid 1000 agent && useradd --uid 1000 --gid 1000 --create-home --shell /bin/zsh agent \
     && mkdir -p /workspace /etc/firewall/allowlist.d /usr/local/share/npm-global /opt/claude-code \
-    && mkdir -p /home/agent/.local/share/R /home/agent/.cache/R/Require /home/agent/.npm /home/agent/.claude \
-    && chown -R agent:agent /workspace /usr/local/share/npm-global /opt/claude-code /home/agent/.local /home/agent/.cache /home/agent/.npm /home/agent/.claude
+    && mkdir -p /home/agent/.local/share/R /home/agent/.cache/R/Require /home/agent/.npm /home/agent/.claude /home/agent/.t3 \
+    && chown -R agent:agent /workspace /usr/local/share/npm-global /opt/claude-code /home/agent/.local /home/agent/.cache /home/agent/.npm /home/agent/.claude /home/agent/.t3
 
 # Firewall: init script + base allowlist (*.txt in allowlist.d; the project file is mounted read-only
 # from the owner's host). sudo ONLY for the firewall script. dnsmasq runs as its own unprivileged
@@ -74,7 +83,9 @@ RUN git clone --quiet https://github.com/PredictiveEcology/AI.git /opt/reference
     && chown -R agent:agent /opt/reference
 COPY agent-init.sh /usr/local/bin/agent-init.sh
 COPY configure-claude-settings.js /usr/local/lib/agent/configure-claude-settings.js
-RUN chmod 0755 /usr/local/bin/agent-init.sh
+COPY agent-entrypoint.sh /usr/local/bin/agent-entrypoint
+COPY agent-t3.sh /usr/local/bin/agent-t3
+RUN chmod 0755 /usr/local/bin/agent-init.sh /usr/local/bin/agent-entrypoint /usr/local/bin/agent-t3
 
 # Claude Code is NOT in the image (it is proprietary; the images are public). The image carries only
 # the pinned, integrity-locked spec; install-claude-code.sh installs it at container start into the
@@ -93,7 +104,10 @@ RUN printf '# agent-containers\nsetopt interactivecomments\n' > /home/agent/.zsh
 ENV CLAUDE_CONFIG_DIR=/home/agent/.claude
 # The pinned version is the only version: upgrades go through the lockfile and a rebuild.
 ENV DISABLE_AUTOUPDATER=1
+# T3 Code product telemetry off (its PostHog host is not allowlisted either).
+ENV T3CODE_TELEMETRY_ENABLED=false
 ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
 ENV PATH=/usr/local/share/npm-global/bin:$PATH SHELL=/bin/zsh EDITOR=nano
 WORKDIR /workspace
-CMD ["sleep", "infinity"]
+EXPOSE 3773
+CMD ["/usr/local/bin/agent-entrypoint"]
