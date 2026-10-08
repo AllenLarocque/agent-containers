@@ -29,7 +29,7 @@ check "claude wrapper says not installed" bash -c 'out=$(claude --version 2>&1);
 check "codex wrapper says not installed"  bash -c 'out=$(codex --version 2>&1); [ $? -eq 127 ] && grep -q "not installed yet" <<<"$out"'
 check "Claude Code lockfile has integrity" bash -c 'jq -e ".packages[\"node_modules/@anthropic-ai/claude-code\"].integrity | startswith(\"sha512-\")" /usr/local/lib/agent/clis/claude-code/package-lock.json'
 # The integrity guard's NATIVE package must be in the lockfile WITH a hash (else npm ci could not verify it).
-check "Codex lockfile has integrity (wrapper + linux-x64 native)" bash -c 'jq -e "[.packages[\"node_modules/@openai/codex\", \"node_modules/@openai/codex-linux-x64\"][].integrity | startswith(\"sha512-\")] == [true, true]" /usr/local/lib/agent/clis/codex/package-lock.json'
+check "Codex lockfile has integrity (wrapper + linux-x64 native)" bash -c 'jq -e "[.packages[\"node_modules/@openai/codex\", \"node_modules/@openai/codex-linux-x64\"] | .integrity // \"\" | startswith(\"sha512-\")] == [true, true]" /usr/local/lib/agent/clis/codex/package-lock.json'
 for t in claude-code codex; do
   check "$t: INSTALL_ID matches the lockfile" bash -c '[ "$(cat "/usr/local/lib/agent/clis/$1/INSTALL_ID")" = "$(sha256sum "/usr/local/lib/agent/clis/$1/package-lock.json" | cut -c1-16)" ]' _ "$t"
   check "$t: /opt/$t owned by agent"     bash -c '[ "$(stat -c %U "/opt/$1")" = agent ]' _ "$t"
