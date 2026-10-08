@@ -38,13 +38,13 @@ services:
         source: ${AGENT_MEMORY_DIR:?set AGENT_MEMORY_DIR in project.conf}
         target: /opt/memory
         bind: {create_host_path: false}
+      - t3:/home/agent/.t3                # T3 Code: threads, pairings, server log (spec §13.1)
       # - uv-cache:/home/agent/.cache/uv  # OPTIONAL: shared uv cache for reticulate::py_require() (spec §3.4)
-      # - t3:/home/agent/.t3              # RESERVED Phase 2: T3 Code state (spec §13.1)
-    command: >
-      bash -c "sudo /usr/local/bin/init-firewall.sh && /usr/local/bin/agent-init.sh && exec sleep infinity"
-    # RESERVED Phase 2 (T3 Code, spec §13.1). Localhost ONLY, and the firewall needs a matching INPUT
-    # rule (INPUT is default-DROP; see the note in images/base/init-firewall.sh):
-    # ports: ["127.0.0.1:3773:3773"]
+    # Firewall first, then agent-init, then the T3 server (images/base/agent-entrypoint.sh).
+    command: ["/usr/local/bin/agent-entrypoint"]
+    # T3 Code server: published on the HOST's loopback ONLY. The firewall accepts container port 3773
+    # from the Docker gateway alone. Pair a browser with `agent-up pair <project>`.
+    ports: ["127.0.0.1:${T3_PORT:?set T3_PORT in project.conf}:3773"]
 volumes:
   claude-config:
     name: claude-${PROJECT}                # FIXED name: survives rebuilds
@@ -56,5 +56,5 @@ volumes:
   npm-cache:
     name: npm-cache-shared                 # shared: Claude Code downloads once; npm re-verifies sha512
     external: true
-  # t3:
-  #   name: t3-${PROJECT}                  # RESERVED Phase 2
+  t3:
+    name: t3-${PROJECT}                    # FIXED name: T3 threads and pairings survive `agent-up up`

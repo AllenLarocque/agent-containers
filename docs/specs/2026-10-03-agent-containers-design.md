@@ -391,6 +391,12 @@ Phase 1 doesn't build these. It must not block them, and it reserves the pieces 
 
 ### 13.1 T3 Code (Phase 2)
 
+**Built 2026-10-07:** `t3` v0.0.45 pinned (sha256) in base; `agent-entrypoint` runs firewall →
+agent-init → `t3 serve --host 0.0.0.0 --port 3773` (telemetry off, state in `t3-<project>`);
+compose publishes `127.0.0.1:<T3_PORT>:3773`; the firewall accepts tcp 3773 from the container's
+gateway only; `agent-up pair` prints a one-time `http://localhost:<T3_PORT>/pair#token=…` link.
+Client: the browser first; the desktop app later (its local/WSL environments stay off).
+
 **Vetting (licence, account, telemetry checked first):**
 - MIT, open source (`pingdotgg/t3code`).
 - **Pre-1.0:** "very early, expect bugs", so pin an exact version.

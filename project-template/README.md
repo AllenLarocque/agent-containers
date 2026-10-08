@@ -22,10 +22,36 @@ Host: Linux or WSL2 (GNU coreutils).
 | `bin/agent-up up <project>` | checks the digest, the mounts and `project.env`, then `op run ... docker compose ... up -d --force-recreate` |
 | `bin/agent-up config <project>` | prints the rendered compose config: exactly what will run (no secrets needed) |
 | `bin/agent-up shell <project>` | `zsh` in the container as `agent` |
+| `bin/agent-up pair <project>` | prints a one-time T3 Code pairing link (`http://localhost:<T3_PORT>/pair#token=…`, valid 10 min) |
 | `bin/agent-up status \| stop \| down <project>` | `down` removes the container; named volumes are kept |
 
 `<project>` is the project folder name, lowercased to `[a-z0-9_-]` (or `--name` at init). The
 container is `<project>-agent-1`.
+
+## T3 Code
+
+Each container runs a T3 Code server (`t3 serve`, pinned in the image, telemetry off) started by
+`agent-entrypoint` after the firewall and `agent-init`.
+- It is published on the HOST's loopback only: `127.0.0.1:<T3_PORT>` (from `project.conf`, unique
+  per project; `init` picks the next free port from 3773). The firewall accepts container port 3773
+  from the Docker gateway alone, so sibling containers and the network cannot reach it.
+- First time: `agent-up pair <project>`, open the link in your browser (Windows reaches WSL's
+  localhost). Each project gets its own origin, `http://<project>.localhost:<T3_PORT>` (underscores
+  become hyphens), so browser sessions of different projects stay apart. The pairing persists in
+  the `t3-<project>` volume.
+- T3 drives the container's own Claude Code (your login, behind the firewall). Don't enable the
+  desktop app's local environment or WSL integration: those run agents on the host, outside any sandbox.
+
+**Upgrading a project created before T3** (its `compose.yaml` predates it):
+
+```bash
+CFG=~/.config/agent-containers/<project>
+cp ~/GitHub/agent-containers/project-template/config/compose.yaml "$CFG/compose.yaml"
+sed -i 's|/spades-gis@sha256:REPLACE_WITH_DIGEST_FROM_digests.md|/spades-<image>@sha256:<digest>|' "$CFG/compose.yaml"
+grep -h '^T3_PORT=' ~/.config/agent-containers/*/project.conf   # ports already taken
+grep -q '^T3_PORT=' "$CFG/project.conf" || echo 'T3_PORT=3773' >> "$CFG/project.conf"   # a FREE one; `up` refuses a duplicate
+agent-up up <project>
+```
 
 ## Lifecycle
 

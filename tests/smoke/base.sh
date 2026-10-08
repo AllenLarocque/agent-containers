@@ -66,6 +66,9 @@ check "no ssh client in base (git uses HTTPS via gh)" bash -c '! command -v ssh'
 
 check "PE/AI on disk at pinned commit" bash -c 'git -C /opt/reference/pe-ai rev-parse HEAD | grep -q "^e7ae689751316dfe742f31b32d0d659accd0cc41$"'
 check "agent-init present"             test -x /usr/local/bin/agent-init.sh
+check "t3 0.0.45 (pinned)"             bash -c 't3 --version 2>/dev/null | grep -qE "(^|[^0-9.])0\.0\.45([^0-9.]|$)"'
+check "T3CODE_TELEMETRY_ENABLED=false set (t3 docs/user/telemetry.md; its PostHog host is not allowlisted either)" test "${T3CODE_TELEMETRY_ENABLED:-}" = false
+check "entrypoint + agent-t3 present"  test -x /usr/local/bin/agent-entrypoint -a -x /usr/local/bin/agent-t3
 check "agent-init succeeds"            bash -c 'CLAUDE_CONFIG_DIR=/tmp/cc /usr/local/bin/agent-init.sh'
 check "agent-init installed the pinned claude" bash -c 'want=$(jq -r ".dependencies[\"@anthropic-ai/claude-code\"]" /usr/local/lib/agent/claude-code/package.json); claude --version | grep -qE "^${want//./\\.}( |$)"'
 check "PE/AI plugins installed"        bash -c 'jq -e ".plugins | keys | map(select(test(\"@predictiveecology-ai$\"))) | length == 3" /tmp/cc/plugins/installed_plugins.json'

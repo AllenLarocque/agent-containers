@@ -30,12 +30,14 @@ allowed https://www.mozilla.org/
 
 # --- EXACT rule snapshots: ANY new or broadened rule turns this red. ---
 DUID=$(id -u dnsmasq 2>/dev/null) || { bad "no dnsmasq user in the image"; DUID=MISSING; }
-expect_v4=$(sed -e "s|@UP@|$EXPECT_UPSTREAM|g" -e "s|@DUID@|$DUID|g" <<'EOF'
+GW=$(ip -4 route show default | awk '{print $3; exit}')
+expect_v4=$(sed -e "s|@UP@|$EXPECT_UPSTREAM|g" -e "s|@DUID@|$DUID|g" -e "s|@GW@|$GW|g" <<'EOF'
 -P INPUT DROP
 -P FORWARD DROP
 -P OUTPUT DROP
 -A INPUT -i lo -j ACCEPT
 -A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+-A INPUT -s @GW@/32 -p tcp -m tcp --dport 3773 -j ACCEPT
 -A OUTPUT -d 127.0.0.11/32 -m owner ! --uid-owner @DUID@ -j REJECT --reject-with icmp-port-unreachable
 -A OUTPUT -o lo -j ACCEPT
 -A OUTPUT -m state --state RELATED,ESTABLISHED -j ACCEPT

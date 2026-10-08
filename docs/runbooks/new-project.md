@@ -66,8 +66,11 @@ permissions).
    - VS Code: **Dev Containers: Attach to Running Container…** → `<project>-agent-1`, then open
      `/workspace`.
    - Or use `agent-up shell <project>`.
+   - Or **T3 Code** in your browser: `agent-up pair <project>` prints a one-time link
+     (`http://localhost:<T3_PORT>/…`, valid 10 minutes). Pairing persists across `agent-up up`.
 
-   Inside the container, run `claude`. Set up R with `setupProject` as usual.
+   The first time, run `claude` in the container once and log in (subscription). Set up R with
+   `setupProject` as usual.
 
 Later changes: edit the files in `~/.config/agent-containers/<project>/`, then `agent-up up <project>`.
 Nothing in the project folder configures the container.

@@ -15,7 +15,7 @@
 #      for the meta fetch. The temporary rules are removed after the fetch, and by an EXIT trap on
 #      any failure.
 #   3. Therefore ANY failure under set -e leaves the container closed. The final rules only ADD the
-#      ipset ACCEPT and the closing REJECT.
+#      T3 INPUT accept (gateway only), the ipset ACCEPT and the closing REJECT.
 #
 # CONFINEMENT (owner decision 2026-10-04):
 #   - No port-based bypasses: TCP 22 is allowed only to allowlisted hosts (ipset rule, ports
@@ -25,8 +25,8 @@
 #     names (one server=/<domain>/ line each, no default server), so other names get REFUSED: no DNS
 #     tunnelling through arbitrary domains. Root does not get upstream DNS either: the one setup
 #     lookup (api.github.com) runs under the dnsmasq uid via setpriv.
-#   - No host-network ACCEPT. VS Code attaches via `docker exec`; nothing listens for the host.
-#     If a published port is ever needed, add ONE rule: -A INPUT -s $HOST_IP -p tcp --dport <port> -j ACCEPT
+#   - ONE inbound exception: the T3 Code server (tcp 3773), from the container's gateway only (the
+#     Docker host; compose publishes it on the host's 127.0.0.1). VS Code attaches via `docker exec`.
 #   - Re-runnable (the agent may `sudo` it): the ORIGINAL resolver is persisted in /run/firewall-upstream
 #     on first run, because afterwards /etc/resolv.conf points at dnsmasq (127.0.0.1).
 
@@ -107,6 +107,14 @@ DNSMASQ_UID=$(id -u dnsmasq 2>/dev/null) && DNSMASQ_GID=$(id -g dnsmasq) \
 for t in conntrack setpriv dig ipset aggregate jq; do
   command -v "$t" >/dev/null || { echo "ERROR: $t not installed"; exit 1; }
 done
+
+# The container's gateway = the Docker host side of its network. The ONE inbound exception (the T3
+# Code server, container port 3773, published by compose on the host's 127.0.0.1 only) is accepted
+# from this address alone: not from sibling containers, not from anywhere else.
+T3_PORT=3773
+GATEWAY_IP=$(ip -4 route show default 2>/dev/null | awk '{print $3; exit}')
+[[ $GATEWAY_IP =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || { echo "ERROR: no IPv4 default gateway found (got '$GATEWAY_IP')"; exit 1; }
+echo "Gateway (host side) detected as: $GATEWAY_IP"
 
 # Docker's embedded-DNS NAT rules (127.0.0.11 -> its real port), to restore after the flush.
 DOCKER_DNS_RULES=$(iptables-save -t nat | grep "127\.0\.0\.11" || true)
@@ -278,6 +286,8 @@ for domain in "${ALLOWED_DOMAINS[@]}"; do
   dig -r +short "$domain" @127.0.0.1 >/dev/null 2>&1 || true
 done
 
+# T3 Code server: inbound from the host side (gateway) only; replies leave via ESTABLISHED.
+iptables -A INPUT -s "$GATEWAY_IP" -p tcp --dport "$T3_PORT" -j ACCEPT
 # Only allowlisted destinations, only on SSH/HTTP/HTTPS.
 iptables -A OUTPUT -p tcp -m set --match-set allowed-domains dst -m multiport --dports 22,80,443 -j ACCEPT
 # Explicitly REJECT all other outbound traffic for immediate feedback.
