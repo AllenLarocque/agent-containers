@@ -88,6 +88,8 @@ RUN sha256sum /usr/local/lib/agent/claude-code/package-lock.json | cut -c1-16 \
     && chmod 0755 /usr/local/bin/install-claude-code /usr/local/bin/claude
 
 USER agent
+# A .zshrc stops zsh's first-run wizard; interactivecomments lets pasted `cmd  # note` lines work.
+RUN printf '# agent-containers\nsetopt interactivecomments\n' > /home/agent/.zshrc
 ENV CLAUDE_CONFIG_DIR=/home/agent/.claude
 # The pinned version is the only version: upgrades go through the lockfile and a rebuild.
 ENV DISABLE_AUTOUPDATER=1

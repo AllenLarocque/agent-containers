@@ -71,5 +71,13 @@ check "agent-init installed the pinned claude" bash -c 'want=$(jq -r ".dependenc
 check "PE/AI plugins installed"        bash -c 'jq -e ".plugins | keys | map(select(test(\"@predictiveecology-ai$\"))) | length == 3" /tmp/cc/plugins/installed_plugins.json'
 check "superpowers installed"          bash -c 'jq -e ".plugins | has(\"superpowers@superpowers-marketplace\")" /tmp/cc/plugins/installed_plugins.json'
 check "NO hooks in settings"           bash -c 'jq -e "has(\"hooks\") | not" /tmp/cc/settings.json'
+check "zsh: .zshrc present, # comments work" zsh -ic 'echo ok # a comment' 
+# agent-init sets the git identity from the agent's GitHub account (stub gh: no token needed here).
+check "agent-init sets git identity from gh" bash -c '
+  set -e; d=$(mktemp -d); mkdir -p "$d/bin" "$d/home"
+  printf "#!/bin/sh\ncase \"\$1 \$2\" in \"api user\") echo \"agent-x 42\";; esac\nexit 0\n" > "$d/bin/gh"; chmod +x "$d/bin/gh"
+  HOME="$d/home" PATH="$d/bin:$PATH" GH_TOKEN=dummy CLAUDE_CONFIG_DIR=/tmp/cc /usr/local/bin/agent-init.sh >/dev/null 2>&1
+  [ "$(HOME="$d/home" git config --global user.email)" = "42+agent-x@users.noreply.github.com" ]
+  [ "$(HOME="$d/home" git config --global user.name)" = "agent-x" ]'
 
 [ "$fail" -eq 0 ] && echo "SMOKE base: ALL PASSED" || { echo "SMOKE base: FAILURES"; exit 1; }
