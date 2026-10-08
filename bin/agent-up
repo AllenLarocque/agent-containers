@@ -143,6 +143,8 @@ check_files(){
   [ "$prof" = builder ] || die "PROFILE=$prof in $1/project.conf: only builder is built (research is spec §2 Phase 1b)"
   img="$(conf_get "$1/project.conf" IMAGE)"
   case "$img" in base|gis|bio) ;; *) die "IMAGE=$img in $1/project.conf: must be base, gis or bio" ;; esac
+}
+check_t3_port(){ # only up and pair need it: stop/down must work on a config that predates T3
   local port; port="$(conf_get "$1/project.conf" T3_PORT)"
   [[ $port =~ ^[0-9]+$ ]] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] \
     || die "T3_PORT='$port' in $1/project.conf: set a free port 1024-65535, unique per project (e.g. T3_PORT=$(next_t3_port))"
@@ -214,6 +216,7 @@ cmd_up(){
   [ $# -eq 1 ] || usage
   local cfg name; cfg="$(cfg_dir "$1")"; name="$(basename "$cfg")"
   check_files "$cfg"
+  check_t3_port "$cfg"
   check_digest "$cfg/compose.yaml"
   check_project_env "$cfg/project.env"
   check_mounts "$cfg"
@@ -246,6 +249,7 @@ cmd_pair(){
   [ $# -eq 1 ] || usage
   local cfg name port tok; cfg="$(cfg_dir "$1")"; name="$(basename "$cfg")"
   check_files "$cfg"
+  check_t3_port "$cfg"
   port="$(conf_get "$cfg/project.conf" T3_PORT)"
   tok="$(docker exec -u agent "$name-agent-1" agent-t3 pair "$(hostname)")" \
     || die "could not mint a pairing token (is '$name' running? agent-up status $name)"
