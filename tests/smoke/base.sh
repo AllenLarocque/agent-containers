@@ -22,12 +22,23 @@ check "exiftool"                       exiftool -ver
 check "gh"                             gh --version
 check "uv 0.12.19"                     bash -c 'uv --version | grep -qE "^uv 0\.12\.19( |$)"'
 check "node 22"                        bash -c 'node --version | grep -q "^v22\."'
-# Claude Code is proprietary and the images are public: ONLY the integrity-locked spec is baked in.
+# Agent CLIs are vendor software and the images are public: ONLY the integrity-locked specs are baked in.
 check "Claude Code NOT in the image"   bash -c '[ -z "$(find / -xdev \( -path /proc -o -path /sys \) -prune -o -path "*@anthropic-ai/claude-code*" -print -quit 2>/dev/null)" ]'
+check "Codex NOT in the image"         bash -c '[ -z "$(find / -xdev \( -path /proc -o -path /sys \) -prune -o -path "*@openai/codex*" -print -quit 2>/dev/null)" ]'
 check "claude wrapper says not installed" bash -c 'out=$(claude --version 2>&1); [ $? -eq 127 ] && grep -q "not installed yet" <<<"$out"'
-check "Claude Code lockfile has integrity" bash -c 'jq -e ".packages[\"node_modules/@anthropic-ai/claude-code\"].integrity | startswith(\"sha512-\")" /usr/local/lib/agent/claude-code/package-lock.json'
-check "CLAUDE_CODE_ID matches the lockfile" bash -c '[ "$(cat /usr/local/lib/agent/claude-code/CLAUDE_CODE_ID)" = "$(sha256sum /usr/local/lib/agent/claude-code/package-lock.json | cut -c1-16)" ]'
-check "/opt/claude-code owned by agent" bash -c '[ "$(stat -c %U /opt/claude-code)" = agent ]'
+check "codex wrapper says not installed"  bash -c 'out=$(codex --version 2>&1); [ $? -eq 127 ] && grep -q "not installed yet" <<<"$out"'
+check "Claude Code lockfile has integrity" bash -c 'jq -e ".packages[\"node_modules/@anthropic-ai/claude-code\"].integrity | startswith(\"sha512-\")" /usr/local/lib/agent/clis/claude-code/package-lock.json'
+# The integrity guard's NATIVE package must be in the lockfile WITH a hash (else npm ci could not verify it).
+check "Codex lockfile has integrity (wrapper + linux-x64 native)" bash -c 'jq -e "[.packages[\"node_modules/@openai/codex\", \"node_modules/@openai/codex-linux-x64\"][].integrity | startswith(\"sha512-\")] == [true, true]" /usr/local/lib/agent/clis/codex/package-lock.json'
+for t in claude-code codex; do
+  check "$t: INSTALL_ID matches the lockfile" bash -c '[ "$(cat "/usr/local/lib/agent/clis/$1/INSTALL_ID")" = "$(sha256sum "/usr/local/lib/agent/clis/$1/package-lock.json" | cut -c1-16)" ]' _ "$t"
+  check "$t: /opt/$t owned by agent"     bash -c '[ "$(stat -c %U "/opt/$1")" = agent ]' _ "$t"
+  check "$t: install-$t on PATH"          command -v "install-$t"
+done
+# Every named-volume mount point must exist agent-owned (a missing one becomes a root-owned volume).
+check "/home/agent/.codex owned by agent" bash -c '[ "$(stat -c %U /home/agent/.codex)" = agent ]'
+check "CODEX_HOME=/home/agent/.codex"   test "${CODEX_HOME:-}" = /home/agent/.codex
+check "install-agent-cli refuses an unknown tool" bash -c '! install-agent-cli ../etc 2>/dev/null && ! install-agent-cli nosuchtool 2>/dev/null'
 check "firewall script present"        test -x /usr/local/bin/init-firewall.sh
 check "ip6tables present"             command -v ip6tables
 check "allowlist dir present"          test -d /etc/firewall/allowlist.d
@@ -70,11 +81,23 @@ check "t3 0.0.45 (pinned)"             bash -c 't3 --version 2>/dev/null | grep 
 check "T3CODE_TELEMETRY_ENABLED=false set (t3 docs/user/telemetry.md; its PostHog host is not allowlisted either)" test "${T3CODE_TELEMETRY_ENABLED:-}" = false
 check "entrypoint + agent-t3 present"  test -x /usr/local/bin/agent-entrypoint -a -x /usr/local/bin/agent-t3
 check "agent-init succeeds"            bash -c 'CLAUDE_CONFIG_DIR=/tmp/cc /usr/local/bin/agent-init.sh'
-check "agent-init installed the pinned claude" bash -c 'want=$(jq -r ".dependencies[\"@anthropic-ai/claude-code\"]" /usr/local/lib/agent/claude-code/package.json); claude --version | grep -qE "^${want//./\\.}( |$)"'
+check "agent-init installed the pinned claude" bash -c 'want=$(jq -r ".dependencies[\"@anthropic-ai/claude-code\"]" /usr/local/lib/agent/clis/claude-code/package.json); claude --version | grep -qE "^${want//./\\.}( |$)"'
+check "agent-init installed the pinned codex"  bash -c 'want=$(jq -r ".dependencies[\"@openai/codex\"]" /usr/local/lib/agent/clis/codex/package.json); codex --version | grep -qE "^codex-cli ${want//./\\.}$"'
 check "PE/AI plugins installed"        bash -c 'jq -e ".plugins | keys | map(select(test(\"@predictiveecology-ai$\"))) | length == 3" /tmp/cc/plugins/installed_plugins.json'
 check "superpowers installed"          bash -c 'jq -e ".plugins | has(\"superpowers@superpowers-marketplace\")" /tmp/cc/plugins/installed_plugins.json'
 check "NO hooks in settings"           bash -c 'jq -e "has(\"hooks\") | not" /tmp/cc/settings.json'
 check "default permission mode = bypassPermissions" bash -c 'jq -e ".permissions.defaultMode == \"bypassPermissions\"" /tmp/cc/settings.json'
+check "codex config.toml: managed defaults" bash -c 'c=$(cat /home/agent/.codex/config.toml); for l in "approval_policy = \"never\"" "sandbox_mode = \"danger-full-access\"" "check_for_update_on_startup = false" "[analytics]" "enabled = false"; do grep -qxF "$l" <<<"$c" || exit 1; done'
+# login status loads (and so validates) config.toml: a parse error prints "Error loading configuration".
+check "codex accepts that config.toml"  bash -c 'codex login status 2>&1 | grep -q "Not logged in"'
+# A user's own keys survive and a conflicting analytics setting is overridden (codex still parses it).
+check "codex config: user keys kept, analytics enforced" bash -c '
+  set -e; d=$(mktemp -d); printf "model = \"o3\"\napproval_policy = \"on-request\"\n[analytics]\nenabled = true\n[tui]\nnotifications = true\n" > "$d/config.toml"
+  CODEX_HOME="$d" node /usr/local/lib/agent/configure-codex-config.js >/dev/null
+  grep -qx "model = \"o3\"" "$d/config.toml"; grep -qx "notifications = true" "$d/config.toml"
+  if grep -Eq "enabled = true|on-request" "$d/config.toml"; then exit 1; fi   # (set -e ignores `! cmd`)
+  cp "$d/config.toml" "$d/once"; CODEX_HOME="$d" node /usr/local/lib/agent/configure-codex-config.js >/dev/null; cmp "$d/once" "$d/config.toml"
+  CODEX_HOME="$d" codex login status 2>&1 | grep -q "Not logged in"'
 check "zsh: .zshrc present, # comments work" zsh -ic 'echo ok # a comment' 
 # agent-init sets the git identity from the agent's GitHub account (stub gh: no token needed here).
 check "agent-init sets git identity from gh" bash -c '

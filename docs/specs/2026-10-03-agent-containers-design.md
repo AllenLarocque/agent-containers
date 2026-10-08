@@ -120,6 +120,16 @@ They contain no secrets by design.
   (`/opt/claude-code/<lockfile sha256>`), so every recreate gets a fresh verified copy and nothing an
   agent edits there persists or crosses projects. Only npm's cache is shared (`npm-cache-shared`;
   npm re-verifies each cached tarball's sha512). It refuses a silent fallback to the musl build. `DISABLE_AUTOUPDATER=1`. There's room for other agent CLIs later.
+  *Amended 2026-10-08 (Codex):* the installer is generic: `images/base/agent-clis/<tool>/`
+  (`package.json`, `package-lock.json`, `install.conf`: package, command, required native package)
+  and `install-agent-cli <tool>` (symlinks `install-claude-code`, `install-codex`); `/usr/local/bin/<cmd>`
+  is one wrapper. **OpenAI Codex CLI** (`@openai/codex`, Apache-2.0) is the second tool, pinned
+  the same way; its only Linux build is a static musl binary in `@openai/codex-linux-<arch>`, which
+  the guard requires. Login: ChatGPT plan, `codex login --device-auth`; `chatgpt.com` + `openai.com`
+  in the base allowlist; `CODEX_HOME=~/.codex` is the `codex-<project>` volume. `agent-init`
+  enforces `approval_policy="never"`, `sandbox_mode="danger-full-access"`,
+  `check_for_update_on_startup=false`, `[analytics] enabled=false` in `config.toml` (TUI analytics
+  default on), keeping the user's other keys.
 - **The firewall script** (Anthropic reference-devcontainer pattern), extended to read
   `/etc/firewall/allowlist.d/*.txt` (§4).
 - **R bootstrap only:** `Require` and `SpaDES.project` in the site library, enough to
@@ -193,6 +203,7 @@ from the project folder.
   - `${PROJECT_DIR}` → `/workspace` (rw);
   - `claude-<project>` → `~/.claude` (**fixed name**: logins, settings, per-project memory survive
     rebuilds);
+  - `codex-<project>` → `~/.codex` (fixed name: the Codex login and config; added 2026-10-08);
   - `rlib-<project>` → the setupProject standAlone library (fixed name);
   - `require-cache-shared` → Require's cache (shared, external);
   - `uv-cache` (optional, shared);
@@ -290,7 +301,7 @@ revocable** secrets go there.
 |---|---|---|
 | Base OS/R image | `rocker/r-ver@sha256:` in `images/base/Dockerfile` | PR |
 | Our images | by digest in each project's `compose.yaml` | copy from `digests.md` |
-| Claude Code | `images/base/claude-code/package-lock.json` (version + sha512); installed at container start | edit `package.json`, `npm install --package-lock-only`, PR |
+| Claude Code, Codex | `images/base/agent-clis/<tool>/package-lock.json` (version + sha512); installed at container start | edit `package.json`, `npm install --package-lock-only`, PR |
 | uv, NodeSource major | exact versions as build args | PR |
 | PredictiveEcology/AI plugins + reference | one commit SHA (build arg) | PR (CI rebuilds and smoke-tests) |
 | R packages | per project: `setupProject`/`Require`; `Require::pkgSnapshot()` recorded for anything frozen or cited | per project |

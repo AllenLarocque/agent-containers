@@ -44,7 +44,11 @@ cat > "$T/dstub/docker" <<'STUB'
 { echo "ARGS: $*"
   echo "ENV: COMPOSE_FILE=${COMPOSE_FILE-<unset>} COMPOSE_PROFILES=${COMPOSE_PROFILES-<unset>} PROJECT_DIR=${PROJECT_DIR-<unset>} SPADES_AI_DIR=${SPADES_AI_DIR-<unset>} GH_TOKEN=${GH_TOKEN-<unset>}"
 } >> "$DLOG"
-case "$*" in *"agent-t3 pair"*) echo "token=fakeTok_123" ;; esac
+case "$*" in
+  *"agent-t3 pair"*) echo "token=fakeTok_123" ;;
+  "exec -u agent "*" claude --version") echo "9.9.9 (Claude Code)" ;;
+  "exec -u agent "*" codex --version") echo "codex-cli 8.8.8" ;;
+esac
 exit 0
 STUB
 chmod +x "$T/bin/op" "$T/dstub/docker"
@@ -232,8 +236,13 @@ check "passthrough: restored to single GH_TOKEN" grep -qx "      - GH_TOKEN" "$P
 : > "$DLOG"
 check "shell" au shell "$NAME"
 check "  ...docker exec as agent in /workspace" grep -qxF "ARGS: exec -it -u agent -w /workspace $NAME-agent-1 zsh" "$DLOG"
-check "status" au status "$NAME"
+statusout="$(au status "$NAME" 2>&1)" && rc=0 || rc=$?
+check "status" test "$rc" -eq 0
 check "  ...compose ps" grep -qxF "ARGS: $C ps" "$DLOG"
+check "  ...reports the Claude Code version (from the container)" grep -qxF "Claude Code: 9.9.9 (Claude Code)" <<<"$statusout"
+check "  ...reports the Codex version (from the container)" grep -qxF "Codex: codex-cli 8.8.8" <<<"$statusout"
+check "  ...asked each CLI as agent in the project's container" \
+  bash -c 'grep -qxF "ARGS: exec -u agent $2-agent-1 claude --version" "$1" && grep -qxF "ARGS: exec -u agent $2-agent-1 codex --version" "$1"' _ "$DLOG" "$NAME"
 check "stop" au stop "$NAME"
 check "  ...compose stop" grep -qxF "ARGS: $C stop" "$DLOG"
 check "down" au down "$NAME"
@@ -280,6 +289,8 @@ if docker compose version >/dev/null 2>&1; then
     jq -e '[.services.agent.ports[] | {host_ip, target, published: (.published|tostring), protocol}] == [{"host_ip":"127.0.0.1","target":3773,"published":"3773","protocol":"tcp"}]' <<<"$J"
   check "rendered: t3-$NAME volume at /home/agent/.t3" \
     bash -c '[ "$(jq -r ".volumes.t3.name" <<<"$1")" = "t3-$2" ] && jq -e ".services.agent.volumes[] | select(.target==\"/home/agent/.t3\")" <<<"$1" >/dev/null' _ "$J" "$NAME"
+  check "rendered: codex-$NAME volume at /home/agent/.codex (the Codex login survives rebuilds)" \
+    bash -c '[ "$(jq -r ".volumes[\"codex-config\"].name" <<<"$1")" = "codex-$2" ] && jq -e ".services.agent.volumes[] | select(.target==\"/home/agent/.codex\" and .source==\"codex-config\")" <<<"$1" >/dev/null' _ "$J" "$NAME"
   check "rendered: command is the image entrypoint (firewall first)" \
     jq -e '.services.agent.command == ["/usr/local/bin/agent-entrypoint"]' <<<"$J"
   check "rendered: no env_file (secrets only via op run)" test -z "$(jq -r '.services.agent.env_file // empty' <<<"$J")"
@@ -331,10 +342,10 @@ OVR
   if [ -z "$CID" ]; then
     check "sandbox container id" false
   else
-    # The REAL entrypoint runs: firewall -> agent-init (Claude Code + plugins) -> T3. T3 answering on the
+    # The REAL entrypoint runs: firewall -> agent-init (Claude Code, Codex, plugins) -> T3. T3 answering on the
     # host's published port means all three finished.
     T3P=$(sed -n 's/^T3_PORT=//p' "$CFG/project.conf")
-    for _ in $(seq 1 150); do curl -fsS -o /dev/null --max-time 3 "http://127.0.0.1:$T3P/" 2>/dev/null && break; sleep 2; done
+    for _ in $(seq 1 240); do curl -fsS -o /dev/null --max-time 3 "http://127.0.0.1:$T3P/" 2>/dev/null && break; sleep 2; done
     check "firewall initialised by the entrypoint" bash -c 'docker logs "$1" 2>&1 | grep -q "Firewall verification passed - CRAN reachable"' _ "$CID"
     check "  ...and BEFORE agent-init and T3 started (log order)" \
       bash -c 'docker logs "$1" 2>&1 | grep -nE "Firewall verification passed - CRAN|\[agent-init\]|\[agent-t3\]" | head -n 1 | grep -q "Firewall verification"' _ "$CID"
@@ -363,9 +374,9 @@ OVR
       bash -c 'docker logs "$1" 2>&1 | grep -q "\[install-claude-code\] installed: claude"' _ "$CID"
     check "install-claude-code reruns cleanly" docker exec -u agent "$CID" install-claude-code
     check "  ...claude reports the pinned version" \
-      bash -c 'want=$(docker exec "$1" jq -r ".dependencies[\"@anthropic-ai/claude-code\"]" /usr/local/lib/agent/claude-code/package.json); docker exec -u agent "$1" claude --version | grep -qE "^${want//./\\.}( |$)"' _ "$CID"
+      bash -c 'want=$(docker exec "$1" jq -r ".dependencies[\"@anthropic-ai/claude-code\"]" /usr/local/lib/agent/clis/claude-code/package.json); docker exec -u agent "$1" claude --version | grep -qE "^${want//./\\.}( |$)"' _ "$CID"
     check "  ...installed in the container's own layer, under the lockfile's hash" \
-      bash -c 'id=$(docker exec "$1" cat /usr/local/lib/agent/claude-code/CLAUDE_CODE_ID); docker exec "$1" test -x "/opt/claude-code/$id/node_modules/.bin/claude"' _ "$CID"
+      bash -c 'id=$(docker exec "$1" cat /usr/local/lib/agent/clis/claude-code/INSTALL_ID); docker exec "$1" test -x "/opt/claude-code/$id/node_modules/.bin/claude"' _ "$CID"
     check "  ...the download landed in the shared npm cache volume" \
       bash -c '[ -n "$(docker run --rm -v npm-cache-shared:/v "$2" find /v/_cacache -type f -print -quit)" ]' _ "$CID" "$TEMPLATE_IMAGE"
     check "  ...a second run reuses it (no reinstall)" \
@@ -373,6 +384,22 @@ OVR
     check "  ...no temp dirs left behind" \
       bash -c '[ -z "$(docker exec "$1" find /opt/claude-code -maxdepth 1 -name ".tmp.*")" ]' _ "$CID"
     check "auto-updater disabled in the image" test "$(docker exec "$CID" printenv DISABLE_AUTOUPDATER)" = 1
+    # Codex: the same install path (install-agent-cli), its own lockfile, its own login volume.
+    check "the entrypoint installed Codex behind the firewall (npm ci, integrity-checked)" \
+      bash -c 'docker logs "$1" 2>&1 | grep -q "\[install-codex\] installed: codex"' _ "$CID"
+    check "  ...codex reports the pinned version" \
+      bash -c 'want=$(docker exec "$1" jq -r ".dependencies[\"@openai/codex\"]" /usr/local/lib/agent/clis/codex/package.json); docker exec -u agent "$1" codex --version | grep -qE "^codex-cli ${want//./\\.}$"' _ "$CID"
+    check "  ...installed in the container's own layer, under the lockfile's hash, with its native build" \
+      bash -c 'id=$(docker exec "$1" cat /usr/local/lib/agent/clis/codex/INSTALL_ID); docker exec "$1" test -x "/opt/codex/$id/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"' _ "$CID"
+    check "  ...a second run reuses it (no reinstall)" \
+      bash -c 'docker exec -u agent "$1" install-codex | grep -q "present: codex"' _ "$CID"
+    check "  ...CODEX_HOME is the codex-<project> volume, owned by agent" \
+      bash -c '[ "$(docker exec "$1" printenv CODEX_HOME)" = /home/agent/.codex ] && [ "$(docker exec "$1" stat -c %u:%g /home/agent/.codex)" = 1000:1000 ] && docker inspect -f "{{range .Mounts}}{{.Name}}={{.Destination}} {{end}}" "$1" | grep -q "codex-$2=/home/agent/.codex"' _ "$CID" "$NAME"
+    check "  ...config.toml: analytics off, no update check, the container is the sandbox" \
+      bash -c 'c=$(docker exec "$1" cat /home/agent/.codex/config.toml); for l in "approval_policy = \"never\"" "sandbox_mode = \"danger-full-access\"" "check_for_update_on_startup = false" "[analytics]" "enabled = false"; do grep -qxF "$l" <<<"$c" || { echo "missing: $l"; exit 1; }; done' _ "$CID"
+    # `login status` loads (and so validates) config.toml first: a parse error says "Error loading configuration".
+    check "  ...codex accepts that config (login status: not logged in, no config error)" \
+      bash -c 'out=$(docker exec -u agent "$1" codex login status 2>&1); echo "$out"; grep -q "Not logged in" <<<"$out"' _ "$CID"
     # T3 Code: reachable from the host through the published loopback port, and ONLY from the gateway.
     check "T3 server started by the entrypoint" bash -c 'docker logs "$1" 2>&1 | grep -q "\[agent-t3\] server up"' _ "$CID"
     check "  ...reachable from the host at 127.0.0.1:<T3_PORT>" curl -fsS -o /dev/null --max-time 5 "http://127.0.0.1:$T3P/"
@@ -384,6 +411,10 @@ OVR
     check "  ...a pairing token can be minted (exact field, untruncated)" bash -c 'docker exec -u agent "$1" agent-t3 pair ci | grep -Eqx "token=[A-Za-z0-9._~%-]+"' _ "$CID"
     check "platform.claude.com resolves (Claude subscription login)" \
       bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 platform.claude.com A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID"
+    for host in chatgpt.com auth.openai.com; do
+      check "$host resolves (Codex: ChatGPT login and backend)" \
+        bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 "$2" A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID" "$host"
+    done
     check "project-allowlisted www.python.org resolves" \
       bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 www.python.org A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID"
   fi

@@ -22,6 +22,7 @@ services:
         target: /workspace
         bind: {create_host_path: false}
       - claude-config:/home/agent/.claude
+      - codex-config:/home/agent/.codex     # Codex: ChatGPT login (auth.json), config.toml, sessions
       - npm-cache:/home/agent/.npm          # npm download cache (integrity-verified on use), shared
       - require-cache:/home/agent/.cache/R/Require
       - rlib:/home/agent/.local/share/R     # setupProject standAlone library: persists across `agent-up up`
@@ -48,13 +49,15 @@ services:
 volumes:
   claude-config:
     name: claude-${PROJECT}                # FIXED name: survives rebuilds
+  codex-config:
+    name: codex-${PROJECT}                 # FIXED name: the Codex login survives rebuilds
   rlib:
     name: rlib-${PROJECT}                  # FIXED name, per project
   require-cache:
     name: require-cache-shared             # shared across all SpaDES projects
     external: true
   npm-cache:
-    name: npm-cache-shared                 # shared: Claude Code downloads once; npm re-verifies sha512
+    name: npm-cache-shared                 # shared: agent CLIs download once; npm re-verifies sha512
     external: true
   t3:
     name: t3-${PROJECT}                    # FIXED name: T3 threads and pairings survive `agent-up up`

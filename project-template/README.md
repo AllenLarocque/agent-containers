@@ -53,6 +53,22 @@ grep -q '^T3_PORT=' "$CFG/project.conf" || echo 'T3_PORT=3773' >> "$CFG/project.
 agent-up up <project>
 ```
 
+**Upgrading a project created before Codex** (its `compose.yaml` has no `codex-config` volume, so a
+Codex login would be lost at every `agent-up up`). This keeps your `image:` line (digest) and
+`project.conf` (`T3_PORT`) as they are:
+
+```bash
+CFG=~/.config/agent-containers/<project>
+cp "$CFG/compose.yaml" "$CFG/compose.yaml.bak"
+img=$(grep -m1 '^    image: ' "$CFG/compose.yaml.bak")          # your image + digest
+cp ~/GitHub/agent-containers/project-template/config/compose.yaml "$CFG/compose.yaml"
+sed -i "s|^    image: .*|$img|" "$CFG/compose.yaml"
+diff "$CFG/compose.yaml.bak" "$CFG/compose.yaml"   # expect only the codex lines; re-apply any edits of your own
+grep '^T3_PORT=' "$CFG/project.conf"                 # must print one line (else: the T3 upgrade above)
+```
+
+Then upgrade the image as usual (a digest from `digests.md` that includes Codex) and `agent-up up <project>`.
+
 ## Lifecycle
 
 | Action | Steps |
@@ -71,9 +87,15 @@ agent-up up <project>
 | `/opt/reference/spades.ai` | `SPADES_AI_DIR` (default `~/GitHub/spades.ai`) | rw |
 | `/opt/memory` | `AGENT_MEMORY_DIR` (default `~/agent-memory`, a git repo) | rw |
 | `/etc/firewall/allowlist.d/50-project.txt` | `~/.config/agent-containers/<project>/allowlist` | **ro** |
-| `~/.claude`, the project R library | volumes `claude-<project>`, `rlib-<project>` | persist across `up` |
+| `~/.claude`, `~/.codex`, the project R library | volumes `claude-<project>`, `codex-<project>`, `rlib-<project>` | persist across `up` |
 | Require's cache | volume `require-cache-shared` | shared by all projects |
-| npm's download cache (Claude Code installs from it at each start, pinned + integrity-checked) | volume `npm-cache-shared` | shared by all projects |
+| npm's download cache (Claude Code and Codex install from it at each start, pinned + integrity-checked) | volume `npm-cache-shared` | shared by all projects |
+
+**Agent CLIs:** `claude` (Claude Code) and `codex` (OpenAI Codex CLI), each pinned by a lockfile in
+`images/base/agent-clis/<tool>/` and installed at container start (`agent-up status` prints both
+versions). First time in a project: `claude` (log in with your subscription) and
+`codex login --device-auth` (ChatGPT plan: open the printed link on the host, enter the code).
+Both logins live in the project's volumes.
 
 Secrets: each `KEY=op://...` line in `project.env` becomes an environment variable in the
 container. `op run` resolves the values on the host when you run `agent-up up`; they are never
@@ -84,6 +106,11 @@ written to disk.
 - **`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"`** in `compose.yaml` turns off Claude Code's
   telemetry, error reports, auto-updates, `/feedback`, artifacts and Remote Control in the
   container. **Any value disables it, even `"0"`.** To re-enable, delete the line.
+- **Codex `~/.codex/config.toml`**: at every start `agent-init` enforces `approval_policy = "never"`,
+  `sandbox_mode = "danger-full-access"` (the container is the sandbox, as for Claude's
+  `bypassPermissions`), `check_for_update_on_startup = false` and `[analytics] enabled = false`.
+  Your other keys are kept. `chatgpt.com` and `openai.com` are in the base allowlist (login, model
+  backend); analytics would go to chatgpt.com too, so the config switch is what turns it off.
 - **`mem_limit`**: stated explicitly. Memory gates inside the container must read
   `/sys/fs/cgroup/memory.max`, not `/proc/meminfo`.
 - **Reserved for Phase 2 (T3 Code):** the commented `t3` volume and `127.0.0.1:3773` port.

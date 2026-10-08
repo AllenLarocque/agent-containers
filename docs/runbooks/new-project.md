@@ -69,8 +69,9 @@ permissions).
    - Or **T3 Code** in your browser: `agent-up pair <project>` prints a one-time link
      (`http://localhost:<T3_PORT>/…`, valid 10 minutes). Pairing persists across `agent-up up`.
 
-   The first time, run `claude` in the container once and log in (subscription). Set up R with
-   `setupProject` as usual.
+   The first time, run `claude` in the container once and log in (subscription). For Codex
+   (ChatGPT plan), run `codex login --device-auth` once and open the printed link on the host.
+   Both logins persist across `agent-up up`. Set up R with `setupProject` as usual.
 
 Later changes: edit the files in `~/.config/agent-containers/<project>/`, then `agent-up up <project>`.
 Nothing in the project folder configures the container.

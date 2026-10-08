@@ -3,11 +3,15 @@
 # every step is guarded and the script always exits 0, logging what it could not do.
 set -uo pipefail
 log(){ printf '[agent-init] %s\n' "$*"; }
-export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-mkdir -p "$CLAUDE_CONFIG_DIR"
+export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+mkdir -p "$CLAUDE_CONFIG_DIR" "$CODEX_HOME"
 
-# 0. Claude Code itself (not in the image; see install-claude-code.sh). Everything below needs it.
-/usr/local/bin/install-claude-code || log "WARN Claude Code NOT installed: plugins, settings and claude itself unavailable"
+# 0. The agent CLIs themselves (not in the image; see install-agent-cli.sh): every tool with a spec.
+#    Claude's plugins and settings below need claude.
+for spec in /usr/local/lib/agent/clis/*/; do
+  t=$(basename "$spec")
+  /usr/local/bin/install-agent-cli "$t" || log "WARN $t NOT installed: it is unavailable in this container (and anything below that needs it)"
+done
 
 # 1. Plugins. PE/AI from the PINNED local checkout (same commit as /opt/reference/pe-ai, so
 #    plugin and reading copy cannot disagree); personal plugins from GitHub.
@@ -22,8 +26,9 @@ inst superpowers@superpowers-marketplace
 inst claude-hud@claude-hud
 inst message-timestamps@zoharbabin-claude-tools
 
-# 2. Settings (statusLine, no hooks).
+# 2. Settings. Claude: statusLine, no hooks. Codex: no analytics, no update check, the container is the sandbox.
 node /usr/local/lib/agent/configure-claude-settings.js "$(command -v node)" || log "WARN settings not written"
+node /usr/local/lib/agent/configure-codex-config.js || log "WARN codex config not written"
 
 # 3. GitHub: gh reads GH_TOKEN (tier A, scoped agent token) directly; make git use gh.
 if [ -n "${GH_TOKEN:-}" ]; then
