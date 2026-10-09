@@ -2,7 +2,7 @@
 FROM rocker/r-ver:4.5.3@sha256:c3f39b365d1077fe24f8e9ab2742e352b6d3950897f51af1624a5bb5550c21c0
 
 LABEL org.opencontainers.image.source="https://github.com/AllenLarocque/agent-containers" \
-      org.opencontainers.image.description="spades-base: SpaDES agent container base (R, geospatial libs, egress firewall; Claude Code installs at container start)"
+      org.opencontainers.image.description="spades-base: SpaDES agent container base (R, geospatial libs, egress firewall; Claude Code and Codex install at container start)"
 
 ARG TZ=America/Los_Angeles
 ARG UV_VERSION=0.12.19
@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       dnsutils aggregate jq nano vim curl wget ca-certificates tmux libimage-exiftool-perl \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Node 22 (Claude Code requires engines.node >=22).
+# Node 22 (Claude Code requires engines.node >=22; Codex >=16).
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
@@ -62,9 +62,9 @@ RUN curl -fsSL "https://github.com/pingdotgg/t3code/releases/download/v${T3_VERS
 # ownership, and a missing dir becomes root-owned (2026-10-07: ~/.claude was missing; plugins and
 # settings could not be written). The CI 'fresh named volumes' step checks each one.
 RUN groupadd --gid 1000 agent && useradd --uid 1000 --gid 1000 --create-home --shell /bin/zsh agent \
-    && mkdir -p /workspace /etc/firewall/allowlist.d /usr/local/share/npm-global /opt/claude-code \
-    && mkdir -p /home/agent/.local/share/R /home/agent/.cache/R/Require /home/agent/.npm /home/agent/.claude /home/agent/.t3 \
-    && chown -R agent:agent /workspace /usr/local/share/npm-global /opt/claude-code /home/agent/.local /home/agent/.cache /home/agent/.npm /home/agent/.claude /home/agent/.t3
+    && mkdir -p /workspace /etc/firewall/allowlist.d /usr/local/share/npm-global \
+    && mkdir -p /home/agent/.local/share/R /home/agent/.cache/R/Require /home/agent/.npm /home/agent/.claude /home/agent/.codex /home/agent/.t3 \
+    && chown -R agent:agent /workspace /usr/local/share/npm-global /home/agent/.local /home/agent/.cache /home/agent/.npm /home/agent/.claude /home/agent/.codex /home/agent/.t3
 
 # Firewall: init script + base allowlist (*.txt in allowlist.d; the project file is mounted read-only
 # from the owner's host). sudo ONLY for the firewall script. dnsmasq runs as its own unprivileged
@@ -83,26 +83,37 @@ RUN git clone --quiet https://github.com/PredictiveEcology/AI.git /opt/reference
     && chown -R agent:agent /opt/reference
 COPY agent-init.sh /usr/local/bin/agent-init.sh
 COPY configure-claude-settings.js /usr/local/lib/agent/configure-claude-settings.js
+COPY configure-codex-config.js /usr/local/lib/agent/configure-codex-config.js
 COPY agent-entrypoint.sh /usr/local/bin/agent-entrypoint
 COPY agent-t3.sh /usr/local/bin/agent-t3
 RUN chmod 0755 /usr/local/bin/agent-init.sh /usr/local/bin/agent-entrypoint /usr/local/bin/agent-t3
 
-# Claude Code is NOT in the image (it is proprietary; the images are public). The image carries only
-# the pinned, integrity-locked spec; install-claude-code.sh installs it at container start into the
-# container's own layer (/opt/claude-code/<lockfile hash>), from the shared, verified npm cache.
-# To bump: see images/base/claude-code/package.json.
-COPY claude-code/package.json claude-code/package-lock.json /usr/local/lib/agent/claude-code/
-COPY install-claude-code.sh /usr/local/bin/install-claude-code
-COPY claude-wrapper.sh /usr/local/bin/claude
-RUN sha256sum /usr/local/lib/agent/claude-code/package-lock.json | cut -c1-16 \
-      > /usr/local/lib/agent/claude-code/CLAUDE_CODE_ID \
-    && chmod 0755 /usr/local/bin/install-claude-code /usr/local/bin/claude
+# Agent CLIs (Claude Code, Codex) are NOT in the image: the images are public and never redistribute
+# vendor agent binaries (Claude Code is proprietary). The image carries only each tool's pinned,
+# integrity-locked spec (agent-clis/<tool>: package.json, package-lock.json, install.conf);
+# install-agent-cli installs it at container start into the container's own layer
+# (/opt/<tool>/<lockfile hash>), from the shared, verified npm cache. To bump: see agent-clis/<tool>/package.json.
+# To ADD an agent CLI: add agent-clis/<tool>/ (and its config step in agent-init.sh, its home volume in
+# the compose seed + a dir below if it keeps state); this loop gives it /opt/<tool>, install-<tool>, its BIN.
+COPY agent-clis/ /usr/local/lib/agent/clis/
+COPY install-agent-cli.sh /usr/local/bin/install-agent-cli
+COPY agent-cli-wrapper.sh /usr/local/lib/agent/agent-cli-wrapper
+RUN chmod 0755 /usr/local/bin/install-agent-cli /usr/local/lib/agent/agent-cli-wrapper \
+    && set -e && for d in /usr/local/lib/agent/clis/*/; do \
+         t=$(basename "$d"); bin=$(sed -n 's/^BIN=//p' "$d/install.conf"); \
+         [ -n "$bin" ] && [ -f "$d/package-lock.json" ] || { echo "incomplete agent CLI spec: $d"; exit 1; }; \
+         sha256sum "$d/package-lock.json" | cut -c1-16 > "$d/INSTALL_ID"; \
+         install -d -o agent -g agent "/opt/$t"; \
+         ln -s install-agent-cli "/usr/local/bin/install-$t"; \
+         ln -s /usr/local/lib/agent/agent-cli-wrapper "/usr/local/bin/$bin"; \
+       done
 
 USER agent
 # A .zshrc stops zsh's first-run wizard; interactivecomments lets pasted `cmd  # note` lines work.
 RUN printf '# agent-containers\nsetopt interactivecomments\n' > /home/agent/.zshrc
-ENV CLAUDE_CONFIG_DIR=/home/agent/.claude
+ENV CLAUDE_CONFIG_DIR=/home/agent/.claude CODEX_HOME=/home/agent/.codex
 # The pinned version is the only version: upgrades go through the lockfile and a rebuild.
+# (Codex: check_for_update_on_startup = false, written by configure-codex-config.js.)
 ENV DISABLE_AUTOUPDATER=1
 # T3 Code product telemetry off (its PostHog host is not allowlisted either).
 ENV T3CODE_TELEMETRY_ENABLED=false

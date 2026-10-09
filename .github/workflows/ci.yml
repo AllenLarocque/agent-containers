@@ -90,8 +90,9 @@ jobs:
           for t in "${targets[@]}"; do args+=(-v "fresh-vol-$i:$t"); i=$((i+1)); done
           printf '%s\n' "${targets[@]}"
           docker run --rm "${args[@]}" -u 1000:1000 spades-base:ci bash -c 'for t in "$@"; do touch "$t/w" || exit 1; done; echo "all volumes writable"' _ "${targets[@]}"
-          # And what failed in real use: agent-init must write settings + plugins into the claude-config volume.
-          docker run --rm -v fresh-claude:/home/agent/.claude spades-base:ci bash -c '/usr/local/bin/agent-init.sh 2>&1 | tee /tmp/init.log; ! grep -q WARN /tmp/init.log && test -s /home/agent/.claude/settings.json'
+          # And what failed in real use: agent-init must write settings + plugins into the claude-config volume,
+          # and the Codex config into the codex-config volume.
+          docker run --rm -v fresh-claude:/home/agent/.claude -v fresh-codex:/home/agent/.codex spades-base:ci bash -c '/usr/local/bin/agent-init.sh 2>&1 | tee /tmp/init.log; ! grep -q WARN /tmp/init.log && test -s /home/agent/.claude/settings.json && test -s /home/agent/.codex/config.toml'
       - name: Firewall IPv6 classifier unit test (no NET_ADMIN, sources the shipped script)
         if: always()
         run: docker run --rm -v "$PWD/tests:/tests:ro" spades-base:ci bash /tests/firewall/test-v6-classifier.sh
@@ -172,7 +173,7 @@ jobs:
           docker logs epfail 2>&1 | tail -n 20
           [ "$rc" -ne 0 ] || { echo "entrypoint exited 0 despite a failing firewall"; exit 1; }
           docker logs epfail 2>&1 | grep -q "firewall setup FAILED" || { echo "no entrypoint failure message"; exit 1; }
-          if docker logs epfail 2>&1 | grep -qE '\[agent-init\]|\[agent-t3\]|\[install-claude-code\]'; then
+          if docker logs epfail 2>&1 | grep -qE '\[agent-init\]|\[agent-t3\]|\[install-[a-z0-9-]+\]'; then
             echo "something started after the firewall failed"; exit 1
           fi
           docker rm -f epfail

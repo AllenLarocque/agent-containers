@@ -268,12 +268,16 @@ cmd_compose(){ # $1 compose subcommand, $2 project
 }
 cmd_status(){
   cmd_compose ps "$@"
-  local c ver; c="$(basename "$(cfg_dir "$1")")-agent-1"
-  if ver="$(docker exec -u agent "$c" claude --version 2>/dev/null)" && [ -n "$ver" ]; then
-    echo "Claude Code: $ver"
-  else
-    echo "Claude Code: MISSING or container not running (install log: docker logs $c | grep install-claude-code)"
-  fi
+  # One line per agent CLI this clone knows (images/base/agent-clis/<tool>/install.conf).
+  local c ver conf tool name bin; c="$(basename "$(cfg_dir "$1")")-agent-1"
+  for conf in "$HERE"/../images/base/agent-clis/*/install.conf; do
+    tool="$(basename "$(dirname "$conf")")"; name="$(conf_get "$conf" NAME)"; bin="$(conf_get "$conf" BIN)"
+    if ver="$(docker exec -u agent "$c" "$bin" --version 2>/dev/null)" && [ -n "$ver" ]; then
+      echo "$name: $ver"
+    else
+      echo "$name: MISSING or container not running (install log: docker logs $c | grep install-$tool)"
+    fi
+  done
 }
 
 # Only the owner's config defines the sandbox: ambient compose settings and interpolation variables

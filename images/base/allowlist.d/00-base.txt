@@ -10,6 +10,11 @@ api.anthropic.com
 # (first real use, 2026-10-07).
 platform.claude.com
 registry.npmjs.org
+# --- OpenAI Codex (ChatGPT plan). chatgpt.com: the model backend (/backend-api/codex) and the
+# analytics endpoint, which configure-codex-config.js switches off ([analytics] enabled = false).
+# openai.com: auth.openai.com (`codex login --device-auth`, token refresh) and api.openai.com.
+chatgpt.com
+openai.com
 # --- VS Code server + extensions
 marketplace.visualstudio.com
 vscode.blob.core.windows.net
