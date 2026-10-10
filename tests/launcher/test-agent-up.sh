@@ -571,6 +571,10 @@ else
   echo "SKIP: render checks (docker compose not available here; CI runs them)"
 fi
 
+# In CI, a container's state and log tail as ONE annotation (job logs are not readable remotely).
+diag(){ [ -n "${GITHUB_ACTIONS:-}" ] || return 0
+  local m; m=$( { docker inspect -f 'state={{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}}' "$1"; docker logs "$1" 2>&1 | grep -vE '^\[install-|^Adding GitHub range' | tail -n 40; } 2>&1 | sed 's/%/%25/g; s/\r//g' | awk '{printf "%s%%0A", $0}')
+  echo "::notice title=$2 container::$m"; }
 # ---- behavioural: the rendered sandbox against the CI-built image (TEMPLATE_IMAGE=spades-base:ci).
 # `agent-up up` needs a registry digest, so this uses the SAME compose arguments agent-up uses
 # (pinned above) plus one override that swaps in the local image and skips agent-init.
@@ -616,6 +620,7 @@ OVR
     T3P=$(sed -n 's/^T3_PORT=//p' "$CFG/project.conf")
     for _ in $(seq 1 240); do curl -fsS -o /dev/null --max-time 3 "http://127.0.0.1:$T3P/" 2>/dev/null && break; sleep 2; done
     check "firewall initialised by the entrypoint" bash -c 'docker logs "$1" 2>&1 | grep -q "Firewall verification passed - CRAN reachable"' _ "$CID"
+    diag "$CID" builder
     check "  ...and BEFORE agent-init and T3 started (log order)" \
       bash -c 'docker logs "$1" 2>&1 | grep -nE "Firewall verification passed - CRAN|\[agent-init\]|\[agent-t3\]" | head -n 1 | grep -q "Firewall verification"' _ "$CID"
     # The file is mode 600 owned by the CI runner (not UID 1000), so only root can read it.
@@ -723,6 +728,7 @@ OVR
   else
     RP=$(sed -n 's/^T3_PORT=//p' "$RCFG/project.conf")
     for _ in $(seq 1 240); do curl -fsS -o /dev/null --max-time 3 "http://127.0.0.1:$RP/" 2>/dev/null && break; sleep 2; done
+    diag "$RID" research
     check "research: firewall in research mode (read from the switch)" \
       bash -c 'docker logs "$1" 2>&1 | grep -q "^Profile: research" && docker logs "$1" 2>&1 | grep -q "Firewall verification passed - research"' _ "$RID"
     check "research: NO GH_TOKEN and no OP_* in the container (ambient owner secrets did not leak)" \
