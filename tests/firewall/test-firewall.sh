@@ -136,7 +136,7 @@ if [ "$EXPECT_T3_CONNECT" = 1 ]; then
   [ -z "$others" ] && ok "t3-tunnel holds only the SRV targets' addresses" || echo "NOTE: t3-tunnel also holds $others (other argotunnel.com lookups, e.g. by the firewall's priming)"
   # UDP (QUIC) really matches the udp rule: its packet counter moves for one datagram to an edge IP.
   if [ "${#tips[@]}" -gt 0 ]; then
-    cnt(){ iptables -L OUTPUT -n -v -x | awk '/match-set t3-tunnel dst udp dpt:7844/{print $1}'; }
+    cnt(){ iptables -L OUTPUT -n -v -x | awk '/t3-tunnel/ && /dpt:7844/ && ($4=="udp" || $4=="17") {print $1}'; }
     before=$(cnt); echo probe > "/dev/udp/${tips[0]}/7844" 2>/dev/null; after=$(cnt)
     [ -n "$before" ] && [ "${after:-0}" -gt "$before" ] && ok "UDP to ${tips[0]}:7844 is ACCEPTed by the t3-tunnel udp rule ($before -> $after)" \
       || bad "UDP to ${tips[0]}:7844 did not match the t3-tunnel udp rule ($before -> $after)"

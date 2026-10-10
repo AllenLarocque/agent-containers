@@ -36,7 +36,9 @@ if [ -n "$GH_IP" ]; then rejected_here "$GH_IP" 7844 "allowlisted api.github.com
 else bad "api.github.com does not resolve"; fi
 
 # cloudflared, pinned to what T3 v0.0.45 itself downloads (packages/shared/src/relayClient.ts).
-# A token for a tunnel that does not exist: reaching the edge = an error FROM THE SERVER SIDE.
+# A token for a tunnel that does not exist: reaching the edge = an error FROM THE SERVER SIDE. Over
+# QUIC the edge drops the registration as a control-stream failure, which only happens on an
+# ESTABLISHED QUIC connection (a blocked dial logs "failed to dial to edge with quic" instead).
 CF_URL=https://github.com/cloudflare/cloudflared/releases/download/2026.5.2/cloudflared-linux-amd64
 CF_SHA=5286698547f03df745adb2355f04c12dde52ef425491e81f433642d695521886
 CF=$(mktemp -d)/cloudflared
@@ -47,7 +49,7 @@ else
 fi
 FAKE_TOKEN=$(printf '{"a":"%s","t":"%s","s":"%s"}' "$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')" \
   "$(cat /proc/sys/kernel/random/uuid)" "$(head -c 32 /dev/urandom | base64 -w0)" | base64 -w0)
-EDGE_RESPONSE='error from server side|Unauthorized|[Ii]nvalid tunnel|[Tt]unnel not found'
+EDGE_RESPONSE='error from server side|Unauthorized|[Ii]nvalid tunnel|[Tt]unnel not found|control stream encountered a failure'
 run_cloudflared(){ # $1 protocol -> its log
   timeout "${2:-45}" "$CF" tunnel --no-autoupdate --protocol "$1" --loglevel debug run --token "$FAKE_TOKEN" 2>&1
 }
