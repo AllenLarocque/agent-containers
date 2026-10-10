@@ -112,6 +112,22 @@ environment. For notifications: Settings → Notifications → **Device Notifica
 publishing must be on for the environment (`t3 connect publish` above); the matching switch in the
 apps is *to be confirmed on first use*.
 
+**T3 Connect gotchas** (first real use, 2026-10-09):
+- `t3 connect --headless` may ask whether to install a **background service**, and that prompt
+  blocks. Answer **n** (the container starts the server itself), then run `t3 connect publish` and
+  `agent-up up <project>`.
+- Approve the device code with the **same T3 account** the apps use. Two T3 accounts can share an
+  email with different sign-in methods (e.g. Google vs. email code), and a browser that is already
+  signed in may skip the code prompt and approve with whichever account it holds.
+- A newly linked environment may only appear in the **phone app** after signing out of T3 Connect
+  and back in.
+- Keep the apps' **"GitHub routing" OFF**: it shares GitHub access across environments, which
+  crosses the per-project isolation (each project has its own scoped token).
+- T3 may offer **no 2FA of its own**: protect the account behind your sign-in method instead (e.g.
+  Google 2-Step Verification).
+- Right after `agent-up up`, `t3 connect status` may still say *pending*. Check
+  `~/.t3/serve.log` in the container for `tunnel connection registered`.
+
 **Disable:** `t3 connect unlink` in the container (keeps the T3 login; `t3 connect logout` also
 clears it), then `T3_CONNECT=0` in `project.conf` and `agent-up up <project>`. Unlink first:
 without it, the server keeps trying to reach the relay, which the firewall now blocks.
