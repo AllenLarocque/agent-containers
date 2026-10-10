@@ -12,8 +12,7 @@
 >   must leave for the later phases (§13).
 >
 > Docker Sandboxes (`sbx`) was evaluated and put **on hold**: proprietary, mandatory login,
-> telemetry on by default. See `docs/spikes/2026-10-05-docker-sandboxes-spike.md` on branch
-> `spike/docker-sandboxes`.
+> telemetry on by default. See [`docs/spikes/2026-10-05-docker-sandboxes-spike.md`](../spikes/2026-10-05-docker-sandboxes-spike.md).
 **Needed by:** the week of 2026-10-05 (new GIS / predictive-modelling / fire-modelling SpaDES
 project; transition to team work).
 

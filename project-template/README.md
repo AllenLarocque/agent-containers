@@ -42,11 +42,18 @@ Each container runs a T3 Code server (`t3 serve`, pinned in the image, telemetry
 - First time: `agent-up pair <project>`, open the link in your browser (Windows reaches WSL's
   localhost). Each project gets its own origin, `http://<project>.localhost:<T3_PORT>` (underscores
   become hyphens), so browser sessions of different projects stay apart. The pairing persists in
-  the `t3-<project>` volume.
+  the `t3-<project>` volume. In T3, add the project by its CONTAINER path, `/workspace`.
 - T3 names the environment after the container's hostname, which `agent-up` sets to the project
   name (underscores become hyphens; e.g. `spades-bioinformatics`) instead of a random container ID.
-  An existing environment shows the new name only after `agent-up up <project>`; the apps may need
-  a refresh (phone app: T3 Connect sign-out and sign-in).
+  The browser shows the new name after `agent-up up <project>`. Through T3 Connect the name is
+  fixed when the environment is **linked**, so one linked earlier keeps its old name until relinked
+  (see the T3 Connect gotchas).
+- Phone (or another of your devices) without T3 Connect: with Tailscale on Windows, run in PowerShell
+  `tailscale serve --bg <T3_PORT>`; the first time it asks you to enable Serve and HTTPS
+  certificates for the tailnet. **Never enable Funnel** (it makes T3 public). `tailscale serve status`
+  must say `(tailnet only)`. Pair the device with the same token on the tailnet address:
+  `https://<machine>.<tailnet>.ts.net/pair#token=…`. A second project needs its own HTTPS port:
+  `tailscale serve --bg --https=8443 <its T3_PORT>`.
 - T3 drives the container's own Claude Code (your login, behind the firewall). Don't enable the
   desktop app's local environment or WSL integration: those run agents on the host, outside any sandbox.
 
@@ -131,6 +138,14 @@ apps is *to be confirmed on first use*.
   Google 2-Step Verification).
 - Right after `agent-up up`, `t3 connect status` may still say *pending*. Check
   `~/.t3/serve.log` in the container for `tunnel connection registered`.
+- **Renaming a linked environment** (e.g. one linked before `agent-up` set readable hostnames): the
+  relay stores the name only at link time; restarts and `t3 connect publish` don't update it. In
+  the container: `t3 connect unlink` (a "could not stop its tunnel" timeout warning is harmless;
+  unlink also turns exposure and publishing OFF), then `t3 connect link`, `t3 connect publish`, and
+  `agent-up up <project>`. The T3 login, the environment ID and your threads are kept.
+- After a relink the phone may say **"Failed to fetch remote environment endpoint"** for several
+  minutes while the PC app already works (the new tunnel address propagating). Wait ~10 minutes
+  before debugging.
 
 **Disable:** `t3 connect unlink` in the container (keeps the T3 login; `t3 connect logout` also
 clears it), then `T3_CONNECT=0` in `project.conf` and `agent-up up <project>`. Unlink first:
