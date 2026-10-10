@@ -43,6 +43,35 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libglpk-dev \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# RStudio Server, pinned and verified (a mismatch fails the build). Installed here, STARTED only where the
+# owner set RSTUDIO=1 (agent-rstudio, as the agent; never root). Posit's jammy build is its noble build too.
+# EARLY in base (right after the system libraries, before anything that changes often): the ~1.3 GB layer
+# stays cached across base edits and is one shared layer under gis and bio.
+# NOT rocker's install_rstudio.sh: it adds s6, a `rstudio` user (collides with uid 1000) and a system git
+# credential helper. The package's postinst may start the server once, which mints a secure-cookie-key and
+# a database: the images are public, so that state is deleted (ours lives in /var/lib/rstudio-agent,
+# created per container).
+# GitHub Copilot's bundled language server (~0.84 GB) is DELETED in this same layer (owner decision
+# 2026-10-10: size; Copilot is also off in rsession.conf + rstudio-prefs.json). It must be this RUN: a
+# later layer would hide the files but still ship their bytes. The build fails if the directory is not
+# where we expect (a version bump that moves it must be looked at), or if any Copilot file is left in bin/.
+# Quarto stays: it carries the pandoc RStudio uses to knit R Markdown (bin/quarto/bin/tools).
+RUN deb="rstudio-server-$(echo "$RSTUDIO_VERSION" | tr + -)-amd64.deb" \
+    && curl -fsSL "https://download2.rstudio.org/server/jammy/amd64/$deb" -o "/tmp/$deb" \
+    && echo "${RSTUDIO_SHA256}  /tmp/$deb" | sha256sum -c - \
+    && apt-get update && apt-get install -y --no-install-recommends "/tmp/$deb" \
+    && apt-get clean && rm -rf /var/lib/apt/lists/* "/tmp/$deb" \
+    && rm -rf /var/lib/rstudio-server/secure-cookie-key /var/lib/rstudio-server/session-rpc-key \
+              /var/lib/rstudio-server/rstudio-os.sqlite* /var/run/rstudio-server /var/log/rstudio \
+    && copilot=/usr/lib/rstudio-server/bin/copilot-language-server-js \
+    && { [ -d "$copilot" ] || { echo "Copilot language server not at $copilot: check this RStudio version's layout"; exit 1; }; } \
+    && rm -rf "$copilot" \
+    && left="$(find /usr/lib/rstudio-server/bin -maxdepth 2 -iname '*copilot*')" \
+    && { [ -z "$left" ] || { echo "Copilot files left after removal: $left"; exit 1; }; } \
+    && { find /usr/lib/rstudio-server/bin/quarto -name pandoc -type f -perm -u+x | grep -q . \
+         || { echo "no pandoc under RStudio's Quarto: R Markdown knitting would break"; exit 1; }; } \
+    && mkdir -p /etc/R
+
 # R bootstrap ONLY: enough to run setupProject(). Everything else is provisioned per project
 # by setupProject(standAlone = TRUE), which hides the site library anyway.
 RUN Rscript -e " \
@@ -63,20 +92,8 @@ RUN curl -fsSL "https://github.com/pingdotgg/t3code/releases/download/v${T3_VERS
     && mkdir -p /opt/t3 && tar xzf /tmp/t3.tgz -C /opt/t3 && rm /tmp/t3.tgz \
     && ln -s "/opt/t3/t3-${T3_VERSION}-linux-x64/t3" /usr/local/bin/t3
 
-# RStudio Server, pinned and verified (a mismatch fails the build). Installed here, STARTED only where the
-# owner set RSTUDIO=1 (agent-rstudio, as the agent; never root). Posit's jammy build is its noble build too.
-# NOT rocker's install_rstudio.sh: it adds s6, a `rstudio` user (collides with uid 1000) and a system git
-# credential helper. The package's postinst may start the server once, which mints a secure-cookie-key and
-# a database: the images are public, so that state is deleted (ours lives in /var/lib/rstudio-agent,
-# created per container).
-RUN deb="rstudio-server-$(echo "$RSTUDIO_VERSION" | tr + -)-amd64.deb" \
-    && curl -fsSL "https://download2.rstudio.org/server/jammy/amd64/$deb" -o "/tmp/$deb" \
-    && echo "${RSTUDIO_SHA256}  /tmp/$deb" | sha256sum -c - \
-    && apt-get update && apt-get install -y --no-install-recommends "/tmp/$deb" \
-    && apt-get clean && rm -rf /var/lib/apt/lists/* "/tmp/$deb" \
-    && rm -rf /var/lib/rstudio-server/secure-cookie-key /var/lib/rstudio-server/session-rpc-key \
-              /var/lib/rstudio-server/rstudio-os.sqlite* /var/run/rstudio-server /var/log/rstudio \
-    && mkdir -p /etc/R
+# RStudio configuration (rserver.conf, rsession.conf, rstudio-prefs.json, ...): small and edited often, so
+# copied late, never invalidating the install layer above.
 COPY rstudio/ /etc/rstudio/
 
 # Non-root user, fixed UID/GID 1000 (matches the WSL user for bind-mount ownership).
@@ -114,7 +131,8 @@ COPY rstudio-auth.sh /usr/local/lib/agent/rstudio-auth
 COPY rsession-agent.sh /usr/local/lib/agent/rsession-agent
 RUN chmod 0755 /usr/local/bin/agent-init.sh /usr/local/bin/agent-entrypoint /usr/local/bin/agent-t3 /usr/local/bin/agent-rstudio \
       /usr/local/lib/agent/rstudio-auth /usr/local/lib/agent/rsession-agent \
-    && chmod 0644 /etc/rstudio/rserver.conf /etc/rstudio/rsession.conf /etc/rstudio/agent-database.conf /etc/rstudio/file-locks
+    && chmod 0644 /etc/rstudio/rserver.conf /etc/rstudio/rsession.conf /etc/rstudio/agent-database.conf /etc/rstudio/file-locks \
+         /etc/rstudio/rstudio-prefs.json
 
 # Agent CLIs (Claude Code, Codex) are NOT in the image: the images are public and never redistribute
 # vendor agent binaries (Claude Code is proprietary). The image carries only each tool's pinned,

@@ -20,6 +20,9 @@ c(){ curl -q -s -A "$UA" --max-time "${CT:-20}" "$@"; }
 code(){ c -o /dev/null -w '%{http_code} %{redirect_url}' "$@"; }
 PW=$(cat /run/secrets/rstudio-password 2>/dev/null) || PW=""
 
+# Copilot dropped from the image (owner decision 2026-10-10); RStudio must still start and run R (below).
+[ ! -e /usr/lib/rstudio-server/bin/copilot-language-server-js ] && ok "Copilot language server absent from the image" \
+  || bad "/usr/lib/rstudio-server/bin/copilot-language-server-js is present"
 [ "$(id -un)" = agent ] && ok "running as agent" || bad "must run as agent, not $(id -un)"
 [ -n "$PW" ] && ok "password file readable by the agent" || bad "/run/secrets/rstudio-password not readable"
 
@@ -95,6 +98,9 @@ if [ -s /tmp/rprofile-marker ]; then
     [ "$(m gh_token)" = "$EXPECT_GH_TOKEN" ] && ok "GH_TOKEN (project.env) reaches R, as in the agent's shell" || bad "GH_TOKEN in R: '$(m gh_token)'"
   fi
   [ "$(m home)" = /home/agent ] && ok "HOME=/home/agent in R" || bad "HOME in R: $(m home)"
+  # R Markdown knitting from RStudio uses RSTUDIO_PANDOC: Quarto's bundled pandoc (why Quarto is kept).
+  [ -n "$(m pandoc)" ] && [ -x "$(m pandoc)/pandoc" ] && ok "RSTUDIO_PANDOC has an executable pandoc ($(m pandoc))" \
+    || bad "RSTUDIO_PANDOC in R: '$(m pandoc)' (no executable pandoc there)"
 else
   bad "no R session sourced /workspace/.Rprofile within 90 s"
 fi
@@ -113,6 +119,9 @@ fi
 ls -d /var/lib/rstudio-agent/initial-project-done >/dev/null 2>&1 && ok "first-session marker set (later sessions follow RStudio's own project choice)" || bad "no initial-project marker"
 L="$HOME/.local/share/rstudio/agent-rserver.log"
 grep -q 'rsession-env\] WARN' "$L" 2>/dev/null && bad "rsession-agent warned: $(grep 'rsession-env' "$L" | tail -n 2)" || ok "rsession-agent read the container environment (no warning)"
+# Informational: anything RStudio logged about Copilot (expected: nothing, or "disabled").
+cl=$(grep -ih copilot "$HOME"/.local/share/rstudio/log/*.log "$L" 2>/dev/null | tail -n 5)
+[ -z "$cl" ] && ok "no Copilot lines in RStudio's logs" || { echo "INFO: Copilot lines in RStudio's logs:"; sed 's/^/        /' <<<"$cl"; }
 if [ "$fail" -ne 0 ]; then
   echo "---- $L (tail)"; tail -n 30 "$L" 2>/dev/null | sed 's/^/        /'
   for f in "$HOME"/.local/share/rstudio/log/*.log; do echo "---- $f (tail)"; tail -n 15 "$f" | sed 's/^/        /'; done

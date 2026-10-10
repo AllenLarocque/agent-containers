@@ -133,7 +133,9 @@ jobs:
             done
             echo "== spades-base: RStudio Server (its install layer, its dir, libclang/LLVM it depends on)"
             docker history --no-trunc --format '{{.Size}}\t{{.CreatedBy}}' spades-base:ci | grep -m1 'rstudio-server-' | cut -c1-100
-            docker run --rm -u root spades-base:ci du -sh /usr/lib/rstudio-server /usr/lib/rstudio-server/bin/copilot-language-server-js /usr/lib/rstudio-server/bin/quarto /usr/lib/rstudio-server/bin/node /usr/lib/llvm-18 2>/dev/null
+            docker run --rm -u root spades-base:ci du -sh /usr/lib/rstudio-server /usr/lib/rstudio-server/bin/quarto /usr/lib/rstudio-server/bin/node /usr/lib/llvm-18 2>/dev/null
+            echo "== spades-base: RStudio's pandoc (Quarto's) and any Copilot file left (expected: none)"
+            docker run --rm -u root spades-base:ci sh -c 'find /usr/lib/rstudio-server -name pandoc -type f; find /usr/lib/rstudio-server -iname "*copilot*" | head -n 20'
             echo "== spades-base: big directories"
             docker run --rm -u root spades-base:ci du -sh /usr/local/lib/R /usr/lib/x86_64-linux-gnu /usr/share /usr/local/share /opt /usr/lib/R 2>/dev/null
             echo "== spades-bio: conda"

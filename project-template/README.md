@@ -248,7 +248,11 @@ What `RSTUDIO=1` changes, and nothing else:
   into the same library**, and vice versa: two installers in one library corrupt it. Take turns.
 - RStudio cannot attach to an R process the agent started (`Rscript`, a tmux run). Follow those
   through their outputs and logs (Files pane, or a terminal in RStudio: `tail -f`).
-- Copilot and Posit Assistant are off in `rsession.conf` (and nothing of theirs is allowlisted).
+- Copilot and Posit Assistant are off in `rsession.conf` (and nothing of theirs is allowlisted);
+  Copilot's language server is not even in the image. Quarto (and its pandoc, for knitting R
+  Markdown) is.
+- Builders only: the shared research container never runs RStudio (`agent-up` refuses `RSTUDIO=1`
+  there).
 
 **Disable:** `RSTUDIO=0` in `project.conf`, then `agent-up up <project>`. The port, the firewall
 rule and the server are gone; the password file and the `rstudio-<project>` volume are kept for

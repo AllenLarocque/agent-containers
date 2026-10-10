@@ -14,6 +14,9 @@
 #    /workspace has exactly one), so R starts in /workspace and sources its .Rprofile, which is how
 #    setupProject's library takes effect. Only the FIRST: RS_INITIAL_PROJECT overrides RStudio's own
 #    project switching, so later sessions (a project switch, a restart) follow RStudio's choice.
+# 3. RSTUDIO_PANDOC: R Markdown (rmarkdown::render, Knit) finds pandoc through it. RStudio Server does
+#    not export it before R starts (CI: empty in .Rprofile), so it is set here, unless already set, to
+#    the pandoc bundled in RStudio's Quarto (bin/quarto/bin/tools/<arch>; why Quarto stays in the image).
 set -uo pipefail
 REAL=/usr/lib/rstudio-server/bin/rsession
 STATE=/var/lib/rstudio-agent
@@ -38,5 +41,12 @@ if [ -z "${RS_INITIAL_PROJECT:-}" ] && mkdir "$STATE/initial-project-done" 2>/de
   projs=(/workspace/*.Rproj)
   shopt -u nullglob
   [ "${#projs[@]}" -eq 1 ] && export RS_INITIAL_PROJECT="${projs[0]}"
+fi
+if [ -z "${RSTUDIO_PANDOC:-}" ]; then
+  tools=/usr/lib/rstudio-server/bin/quarto/bin/tools
+  for d in "$tools/$(uname -m)" "$tools"; do
+    if [ -x "$d/pandoc" ]; then export RSTUDIO_PANDOC="$d"; break; fi
+  done
+  [ -n "${RSTUDIO_PANDOC:-}" ] || warn "no pandoc under $tools: R Markdown cannot render from RStudio"
 fi
 exec "$REAL" "$@"

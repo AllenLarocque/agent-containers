@@ -573,7 +573,8 @@ v2026.09.0+174): no telemetry or crash reporting; the update check is desktop-on
 `rsession.conf` (`copilot-enabled=0`, `allow-copilot=0`, `allow-posit-assistant=0`,
 `posit-assistant-enabled=0`, `posit-assistant-installation-enabled=0`, the last also stopping its
 update checks; every key checked against `session-options.json` at that tag, since an unknown key
-stops rsession). No runtime egress: nothing is allowlisted.
+stops rsession), plus `/etc/rstudio/rstudio-prefs.json` `copilot_enabled: false`. Copilot's
+language server is not in the image at all (below). No runtime egress: nothing is allowlisted.
 
 **Install (base image):** `RSTUDIO_VERSION=2026.09.0+174` (stable, published 2026-09-11; Posit's
 jammy build, which it ships for noble too). Posit publishes no checksum file for server .debs, so
@@ -581,10 +582,15 @@ jammy build, which it ships for noble too). Posit publishes no checksum file for
 Posit's code-signing key `8B65 E5A1 07BB EFE3 BA99 C597 51C0 B5BB 19F9 2D60`. Not rocker's
 `install_rstudio.sh` (s6, a `rstudio` user colliding with uid 1000, a system git credential helper).
 The postinst's build-time state (secure-cookie-key, session-rpc-key, SQLite database) is deleted: the
-images are public. Size: the install layer is ~2.1 GB (RStudio 1.6 GB: Copilot language server
-~0.84 GB, Quarto ~0.45 GB, Node ~0.12 GB; plus the package's hard `libclang-dev` dependency). *Above
-the 700 MB budget for base: whether it stays in base (gis/bio inherit it), is trimmed, or moves to
-separate images is the owner's decision (pending).*
+images are public. **Size (owner decision 2026-10-10: option b, trim in base):** the full package is
+~2.1 GB (RStudio 1.6 GB: Copilot language server ~0.84 GB, Quarto ~0.45 GB, Node ~0.12 GB; plus the
+package's hard `libclang-dev` dependency, LLVM/clang ~0.45 GB). The Copilot language server
+(`bin/copilot-language-server-js`) is deleted **in the same RUN** that installs the package (a later
+layer would still ship its bytes); the build fails if it is not where expected or any Copilot file is
+left in `bin/`. Quarto is kept: its bundled pandoc (`bin/quarto/bin/tools`) is the one RStudio uses
+to knit R Markdown (`RSTUDIO_PANDOC`, checked end to end in CI). Net ≈ +1.27 GB, in base, as one layer
+placed right after the system libraries (before anything that changes often), so gis and bio share
+it and base edits do not rebuild it. Above the original 700 MB base budget, accepted by the owner.
 
 **Runtime:**
 - `rserver` runs **as the agent** (non-root is supported: `server-user=agent`; `auth-none` defaults

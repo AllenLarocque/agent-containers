@@ -8,5 +8,6 @@ writeLines(c(
   paste("rstudio", Sys.getenv("RSTUDIO")),
   paste("gh_token", Sys.getenv("GH_TOKEN")),
   paste("op_token", nzchar(Sys.getenv("OP_SERVICE_ACCOUNT_TOKEN"))),
-  paste("home", Sys.getenv("HOME"))
+  paste("home", Sys.getenv("HOME")),
+  paste("pandoc", Sys.getenv("RSTUDIO_PANDOC"))
 ), "/tmp/rprofile-marker")
