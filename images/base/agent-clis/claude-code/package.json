@@ -3,6 +3,6 @@
   "private": true,
   "description": "Pinned Claude Code, installed at container start by agent-init.sh (npm ci verifies every tarball against the sha512 in package-lock.json). Bump: change the version here, run `npm install --package-lock-only` in this directory, rebuild.",
   "dependencies": {
-    "@anthropic-ai/claude-code": "2.1.295"
+    "@anthropic-ai/claude-code": "2.1.296"
   }
 }
