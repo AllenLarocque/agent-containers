@@ -4,7 +4,7 @@ This folder is **not copied into your project by hand.** `bin/agent-up init` use
 
 | Seed | Copied to | Who edits it |
 |---|---|---|
-| `config/compose.yaml`, `config/project.env`, `config/allowlist` (+ `config/allowlist.bio-example` for `--image bio`) | `~/.config/agent-containers/<project>/` | you, the owner. **Never mounted** into the container, except `allowlist` (read-only) and, with `T3_CONNECT=1`, the generated T3 Connect switch (read-only) |
+| `config/compose.yaml`, `config/project.env`, `config/allowlist` (+ `config/allowlist.bio-example` for `--image bio`) | `~/.config/agent-containers/<project>/` | you, the owner. **Never mounted** into the container, except `allowlist` (read-only) and, with `T3_CONNECT=1` / `RSTUDIO=1`, the generated switches and RStudio password (read-only) |
 | `repo/.github/CODEOWNERS`, `repo/.github/workflows/gitleaks.yml`, `repo/.gitignore` | the project folder (only where absent) | you; commit them |
 | `config/compose.research.yaml` | `~/.config/agent-containers/research/compose.yaml` (`init --profile research`) | you |
 | `instructions/research.md`, `instructions/builder-research.md` | `<config>/.generated/agent-instructions.md` at every `agent-up` run, mounted **read-only** as Claude's managed `CLAUDE.md` and Codex's `AGENTS.md` (research container; builders with `RESEARCH=1`) | change them here (PR) |
@@ -26,6 +26,7 @@ Host: Linux or WSL2 (GNU coreutils).
 | `bin/agent-up config <project>` | prints the rendered compose config: exactly what will run (no secrets needed) |
 | `bin/agent-up shell <project>` | `zsh` in the container as `agent` |
 | `bin/agent-up pair <project>` | prints a one-time T3 Code pairing link (`http://localhost:<T3_PORT>/pair#token=…`, valid 10 min) |
+| `bin/agent-up rstudio <project>` | prints the RStudio Server address, user and password (only with `RSTUDIO=1`) |
 | `bin/agent-up status \| stop \| down <project>` | `down` removes the container; named volumes are kept |
 
 `<project>` is the project folder name, lowercased to `[a-z0-9_-]` (or `--name` at init). The
@@ -42,6 +43,10 @@ Each container runs a T3 Code server (`t3 serve`, pinned in the image, telemetry
   localhost). Each project gets its own origin, `http://<project>.localhost:<T3_PORT>` (underscores
   become hyphens), so browser sessions of different projects stay apart. The pairing persists in
   the `t3-<project>` volume.
+- T3 names the environment after the container's hostname, which `agent-up` sets to the project
+  name (underscores become hyphens; e.g. `spades-bioinformatics`) instead of a random container ID.
+  An existing environment shows the new name only after `agent-up up <project>`; the apps may need
+  a refresh (phone app: T3 Connect sign-out and sign-in).
 - T3 drives the container's own Claude Code (your login, behind the firewall). Don't enable the
   desktop app's local environment or WSL integration: those run agents on the host, outside any sandbox.
 
@@ -110,6 +115,22 @@ neither turn it on nor off (re-running the firewall reads the same mounted file)
 environment. For notifications: Settings → Notifications → **Device Notifications**. Activity
 publishing must be on for the environment (`t3 connect publish` above); the matching switch in the
 apps is *to be confirmed on first use*.
+
+**T3 Connect gotchas** (first real use, 2026-10-09):
+- `t3 connect --headless` may ask whether to install a **background service**, and that prompt
+  blocks. Answer **n** (the container starts the server itself), then run `t3 connect publish` and
+  `agent-up up <project>`.
+- Approve the device code with the **same T3 account** the apps use. Two T3 accounts can share an
+  email with different sign-in methods (e.g. Google vs. email code), and a browser that is already
+  signed in may skip the code prompt and approve with whichever account it holds.
+- A newly linked environment may only appear in the **phone app** after signing out of T3 Connect
+  and back in.
+- Keep the apps' **"GitHub routing" OFF**: it shares GitHub access across environments, which
+  crosses the per-project isolation (each project has its own scoped token).
+- T3 may offer **no 2FA of its own**: protect the account behind your sign-in method instead (e.g.
+  Google 2-Step Verification).
+- Right after `agent-up up`, `t3 connect status` may still say *pending*. Check
+  `~/.t3/serve.log` in the container for `tunnel connection registered`.
 
 **Disable:** `t3 connect unlink` in the container (keeps the T3 login; `t3 connect logout` also
 clears it), then `T3_CONNECT=0` in `project.conf` and `agent-up up <project>`. Unlink first:
@@ -187,6 +208,64 @@ limits with every builder; treat `~/agent-research/` as untrusted on the host to
 (`RESEARCH` absent = 0). To opt in, add `RESEARCH=1` (and, only if you moved it, `RESEARCH_DIR=...`)
 to its `project.conf`. The research container needs an image digest from `digests.md` dated after
 this change (an older image ignores the switch and stays on the builder allowlist).
+## RStudio Server (opt-in)
+
+The open-source RStudio Server (AGPLv3, pinned in the image) can run in a project's container, so
+you can work in RStudio in your browser next to the agent. It is **off by default, per project**
+(decision 2026-10-09, spec §13.3).
+
+What `RSTUDIO=1` changes, and nothing else:
+- the container also runs `rserver`, started by `agent-entrypoint` after T3, **as the agent**
+  (uid 1000, never root). R sessions run as the agent too: same files, same R, same project library;
+- compose publishes it on the HOST's loopback only: `127.0.0.1:<RSTUDIO_PORT>` (`init` picks the
+  next free port from 8787). The firewall accepts container port 8787 from the Docker gateway alone
+  (one INPUT rule, like T3's); sibling containers and the network cannot reach it. No egress change:
+  nothing new is allowlisted;
+- sign-in is required: user `agent` and a random per-project password that `agent-up` writes to
+  `~/.config/agent-containers/<project>/.generated/rstudio-password` (mode 600) and mounts
+  read-only. It is never an environment variable. Delete the file and `agent-up up` to rotate it;
+- RStudio's own state (open files, history, preferences, its logs) lives in the
+  `rstudio-<project>` volume.
+
+**Enable:**
+
+1. In `~/.config/agent-containers/<project>/project.conf` set `RSTUDIO=1` (it may say
+   `RSTUDIO=0`: change that line). `RSTUDIO_PORT` must be set too (`init` writes it).
+2. `agent-up up <project>`. `docker logs <project>-agent-1` shows `RStudio Server: ON` and
+   `[agent-rstudio] server up`.
+3. `agent-up rstudio <project>`: open the printed `http://rstudio-<project>.localhost:<RSTUDIO_PORT>`
+   (underscores become hyphens) and sign in as `agent` with the printed password. The per-project
+   host is required: RStudio's sign-in cookies are per host, not per port, so two projects (or T3)
+   on `localhost` would sign each other out.
+
+**Working alongside the agent:**
+- The first R session opens the project's `.Rproj` (when `/workspace` has exactly one), so R starts in
+  `/workspace` and sources its `.Rprofile`: the setupProject library is active, as in the agent's
+  shell. Sessions never suspend (a resumed session could skip `.Rprofile`).
+- R in RStudio gets the same environment as R in the agent's shell (including `GH_TOKEN` and the
+  other `project.env` secrets), minus anything `OP_*`.
+- **Don't run `setupProject()` (or install packages) from RStudio while the agent is installing
+  into the same library**, and vice versa: two installers in one library corrupt it. Take turns.
+- RStudio cannot attach to an R process the agent started (`Rscript`, a tmux run). Follow those
+  through their outputs and logs (Files pane, or a terminal in RStudio: `tail -f`).
+- Copilot and Posit Assistant are off in `rsession.conf` (and nothing of theirs is allowlisted);
+  Copilot's language server is not even in the image. Quarto (and its pandoc, for knitting R
+  Markdown) is.
+- Builders only: the shared research container never runs RStudio (`agent-up` refuses `RSTUDIO=1`
+  there).
+
+**Disable:** `RSTUDIO=0` in `project.conf`, then `agent-up up <project>`. The port, the firewall
+rule and the server are gone; the password file and the `rstudio-<project>` volume are kept for
+next time.
+
+**Upgrading an existing project:** nothing to do to keep it off (no `RSTUDIO` line means 0). To opt
+in, add both lines to its `project.conf`, with a port no other project uses
+(`grep -h '_PORT=' ~/.config/agent-containers/*/project.conf` lists the taken ones):
+```bash
+printf 'RSTUDIO=1\nRSTUDIO_PORT=8787\n' >> ~/.config/agent-containers/<project>/project.conf
+```
+The image must include RStudio Server (a digest from `digests.md` dated after this change).
+`agent-up up` refuses a port that is taken.
 
 ## Lifecycle
 
@@ -210,6 +289,8 @@ this change (an older image ignores the switch and stays on the builder allowlis
 | `/research/briefs` (only with `RESEARCH=1`) | `RESEARCH_DIR/<project>/briefs` | rw |
 | `/research/reports`, `/research/downloads` (only with `RESEARCH=1`) | `RESEARCH_DIR/<project>/reports`, `.../downloads`: written by the research container | **ro** (untrusted) |
 | `/etc/claude-code/CLAUDE.md`, `~/.codex/AGENTS.md` (only with `RESEARCH=1`) | `.generated/agent-instructions.md`, from `instructions/builder-research.md` | **ro** |
+| `/etc/firewall/rstudio`, `/run/secrets/rstudio-password` (only with `RSTUDIO=1`) | `~/.config/agent-containers/<project>/.generated/rstudio{,-password}`, written by `agent-up` | **ro** |
+| `~/.local/share/rstudio` (only with `RSTUDIO=1`) | volume `rstudio-<project>` | persists across `up` |
 | `~/.claude`, `~/.codex`, the project R library | volumes `claude-<project>`, `codex-<project>`, `rlib-<project>` | persist across `up` |
 | Require's cache | volume `require-cache-shared` | shared by all projects |
 | npm's download cache (Claude Code and Codex install from it at each start, pinned + integrity-checked) | volume `npm-cache-shared` | shared by all projects |
@@ -278,6 +359,10 @@ Cloudflare's tunnel edge only, where T3 Connect is on), and to DNS for allowlist
   - your **T3 account must have 2FA**: it is now a way into the container.
   The blast radius is that project's agent capabilities (its workspace, its tier-A secrets, its
   allowlist), not the host or other projects.
+- **RStudio Server, where enabled (`RSTUDIO=1`):** it runs as the agent, so the password protects it
+  from other local users and browser pages, **not from the agent**: the agent can read the password
+  file and could replace the server on port 8787 with its own. Treat what you see there as you treat
+  the agent's files. It is reachable only from your host's loopback.
 - **Tier-A secrets are readable inside the container**, and visible to anyone on the host who can
   run `docker inspect`. Keep them scoped and short-lived (spec §5).
 - **First real `agent-up up` on WSL2 / Docker Desktop:** check the firewall log

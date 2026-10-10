@@ -3,3 +3,5 @@
 .env
 .env.tmp
 .env.*
+# RStudio per-user project state (RStudio Server, RSTUDIO=1)
+.Rproj.user/

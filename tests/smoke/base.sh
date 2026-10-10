@@ -80,6 +80,25 @@ check "agent-init present"             test -x /usr/local/bin/agent-init.sh
 check "t3 0.0.45 (pinned)"             bash -c 't3 --version 2>/dev/null | grep -qE "(^|[^0-9.])0\.0\.45([^0-9.]|$)"'
 check "T3CODE_TELEMETRY_ENABLED=false set (t3 docs/user/telemetry.md; its PostHog host is not allowlisted either)" test "${T3CODE_TELEMETRY_ENABLED:-}" = false
 check "entrypoint + agent-t3 present"  test -x /usr/local/bin/agent-entrypoint -a -x /usr/local/bin/agent-t3
+# RStudio Server (spec §13.3): installed, pinned, configured; started only where the owner enabled it.
+check "RStudio Server 2026.09.0+174 (pinned)" bash -c '/usr/lib/rstudio-server/bin/rstudio-server version | grep -q "^2026\.09\.0+174 "'
+check "agent-rstudio present"           test -x /usr/local/bin/agent-rstudio
+# The image is public: no cookie key, RPC key or database minted at build time may ship in it.
+check "no RStudio keys or database baked in" bash -c '[ -z "$(find / -xdev \( -path /proc -o -path /sys \) -prune -o \( -name secure-cookie-key -o -name session-rpc-key -o -name "rstudio-os.sqlite*" \) -print 2>/dev/null)" ]'
+check "/var/lib/rstudio-agent agent-owned, 700" bash -c '[ "$(stat -c %U:%a /var/lib/rstudio-agent)" = agent:700 ] && [ -z "$(ls -A /var/lib/rstudio-agent)" ]'
+check "/home/agent/.local/share/rstudio owned by agent (volume mount point)" bash -c '[ "$(stat -c %U /home/agent/.local/share/rstudio)" = agent ]'
+# --check-config reports every unrecognised rserver.conf key and exits non-zero.
+check "rserver accepts rserver.conf (--check-config, as agent)" /usr/lib/rstudio-server/bin/rserver --check-config
+check "rserver.conf: sign-in required, as agent, via rstudio-auth" bash -c 'c=/etc/rstudio/rserver.conf; for l in auth-none=0 server-user=agent auth-pam-helper-path=/usr/local/lib/agent/rstudio-auth rsession-path=/usr/local/lib/agent/rsession-agent rsession-which-r=/usr/local/bin/R www-port=8787; do grep -qx "$l" "$c" || exit 1; done'
+check "rsession.conf: no suspend, /workspace, assistants off" bash -c 'c=/etc/rstudio/rsession.conf; for l in session-timeout-minutes=0 session-default-working-dir=/workspace session-default-new-project-dir=/workspace copilot-enabled=0 allow-copilot=0 allow-posit-assistant=0 posit-assistant-enabled=0 posit-assistant-installation-enabled=0; do grep -qx "$l" "$c" || exit 1; done; ! grep -q "^r-libs-user" "$c"'
+check "RStudio config files root-owned, not agent-writable" bash -c 'for f in /etc/rstudio/rserver.conf /etc/rstudio/rsession.conf /etc/rstudio/agent-database.conf /etc/rstudio/file-locks /etc/rstudio/rstudio-prefs.json /usr/local/lib/agent/rstudio-auth /usr/local/lib/agent/rsession-agent; do [ "$(stat -c %U "$f")" = root ] && [ ! -w "$f" ] || exit 1; done'
+# Copilot dropped from the image (owner decision 2026-10-10: size), pinned off in config; Quarto kept (pandoc).
+check "Copilot language server NOT in the image" bash -c '[ ! -e /usr/lib/rstudio-server/bin/copilot-language-server-js ] && [ -z "$(find /usr/lib/rstudio-server -iname "*copilot-language-server*" 2>/dev/null)" ]'
+check "rstudio-prefs.json: copilot_enabled false (valid JSON)" bash -c '[ "$(jq -r .copilot_enabled /etc/rstudio/rstudio-prefs.json)" = false ]'
+check "RStudio's Quarto + pandoc present (R Markdown knitting)" bash -c 'q=/usr/lib/rstudio-server/bin/quarto; [ -x "$q/bin/quarto" ] && find "$q" -name pandoc -type f -perm -u+x | grep -q .'
+check "RSTUDIO_DISABLE_CHECK_FOR_UPDATES=1" test "${RSTUDIO_DISABLE_CHECK_FOR_UPDATES:-}" = 1
+# rstudio-auth fails closed without the owner's password file (none is mounted in the smoke test).
+check "rstudio-auth refuses without the password file" bash -c '[ ! -e /run/secrets/rstudio-password ] && ! printf "%s" anything-long-enough-123 | /usr/local/lib/agent/rstudio-auth agent rstudio 1'
 check "agent-init succeeds"            bash -c 'CLAUDE_CONFIG_DIR=/tmp/cc /usr/local/bin/agent-init.sh'
 check "agent-init installed the pinned claude" bash -c 'want=$(jq -r ".dependencies[\"@anthropic-ai/claude-code\"]" /usr/local/lib/agent/clis/claude-code/package.json); claude --version | grep -qE "^${want//./\\.}( |$)"'
 check "agent-init installed the pinned codex"  bash -c 'want=$(jq -r ".dependencies[\"@openai/codex\"]" /usr/local/lib/agent/clis/codex/package.json); codex --version | grep -qE "^codex-cli ${want//./\\.}$"'

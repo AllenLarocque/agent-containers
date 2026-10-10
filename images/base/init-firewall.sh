@@ -15,8 +15,9 @@
 #      for the meta fetch. The temporary rules are removed after the fetch, and by an EXIT trap on
 #      any failure.
 #   3. Therefore ANY failure under set -e leaves the container closed. The final rules only ADD the
-#      T3 INPUT accept (gateway only), the ipset ACCEPT, the T3 Connect tunnel ACCEPTs (only when the
-#      owner enabled it) and the closing REJECT.
+#      T3 INPUT accept (gateway only), the RStudio INPUT accept (gateway only, only when the owner
+#      enabled it), the ipset ACCEPT, the T3 Connect tunnel ACCEPTs (only when the owner enabled it)
+#      and the closing REJECT.
 #
 # CONFINEMENT (owner decision 2026-10-04):
 #   - No port-based bypasses: TCP 22 is allowed only to allowlisted hosts (ipset rule, ports
@@ -28,6 +29,7 @@
 #     lookup (api.github.com) runs under the dnsmasq uid via setpriv.
 #   - ONE inbound exception: the T3 Code server (tcp 3773), from the container's gateway only (the
 #     Docker host; compose publishes it on the host's 127.0.0.1). VS Code attaches via `docker exec`.
+#     A second one ONLY where the owner enabled RStudio Server (below): tcp 8787, same pattern.
 #   - Re-runnable (the agent may `sudo` it): the ORIGINAL resolver is persisted in /run/firewall-upstream
 #     on first run, because afterwards /etc/resolv.conf points at dnsmasq (127.0.0.1).
 #
@@ -45,6 +47,10 @@
 # and its own networks. Everything else is unchanged: the same DROP-first ordering, owner-only upstream
 # DNS, the T3 INPUT rule from the gateway only, IPv6 default-deny, idempotent re-run.
 # Absent file (or PROFILE=builder): the builder rules, byte-identical to before (CI snapshot).
+# RSTUDIO SERVER (owner opt-in per project, decision 2026-10-09, spec §13.3): when /etc/firewall/rstudio
+# says RSTUDIO=1, ONE more INPUT rule accepts tcp 8787 from the container's gateway only (the host;
+# compose publishes it on the host's 127.0.0.1), exactly like the T3 rule. No egress change.
+# Absent file (or RSTUDIO=0): the rules are exactly the ones without the feature.
 
 # IPv6 is "unavailable" only if the kernel genuinely has no usable IPv6 to leak.
 # $1 = ip6tables error text; $2 = if_inet6 path (default /proc/net/if_inet6; a parameter for the unit test).
@@ -101,6 +107,17 @@ fi
 # (incl. the 255.255.255.255 broadcast).
 RESEARCH_DENY=(0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24
                192.168.0.0/16 198.18.0.0/15 224.0.0.0/4 240.0.0.0/4)
+# RStudio Server switch: same mount, same rules (agent-up writes .generated/rstudio from RSTUDIO).
+RSTUDIO_FILE=/etc/firewall/rstudio
+RSTUDIO=0
+if [ -e "$RSTUDIO_FILE" ]; then
+  case "$(cat "$RSTUDIO_FILE" 2>/dev/null)" in
+    RSTUDIO=0) ;;
+    RSTUDIO=1) RSTUDIO=1 ;;
+    *) echo "ERROR: $RSTUDIO_FILE must hold exactly RSTUDIO=0 or RSTUDIO=1"; exit 1 ;;
+  esac
+fi
+RSTUDIO_PORT=8787
 TUNNEL_DOMAIN=argotunnel.com   # cloudflared's edge: SRV _v2-origintunneld._tcp.argotunnel.com -> region*.v2.argotunnel.com
 TUNNEL_PORT=7844
 
@@ -146,6 +163,11 @@ elif [ "$T3_CONNECT" = 1 ]; then
   echo "T3 Connect: ON (t3.codes allowlisted; $TUNNEL_DOMAIN on port $TUNNEL_PORT only)"
 else
   echo "T3 Connect: off"
+fi
+if [ "$RSTUDIO" = 1 ]; then
+  echo "RStudio Server: ON (inbound tcp $RSTUDIO_PORT from the gateway only)"
+else
+  echo "RStudio Server: off"
 fi
 
 # The ORIGINAL upstream resolver. First run: /etc/resolv.conf (in Docker: 127.0.0.11 on user-defined
@@ -391,6 +413,10 @@ fi
 
 # T3 Code server: inbound from the host side (gateway) only; replies leave via ESTABLISHED.
 iptables -A INPUT -s "$GATEWAY_IP" -p tcp --dport "$T3_PORT" -j ACCEPT
+# RStudio Server, only where the owner enabled it: the same pattern, its own port.
+if [ "$RSTUDIO" = 1 ]; then
+  iptables -A INPUT -s "$GATEWAY_IP" -p tcp --dport "$RSTUDIO_PORT" -j ACCEPT
+fi
 if [ "$PROFILE" = builder ]; then
   # Only allowlisted destinations, only on SSH/HTTP/HTTPS.
   iptables -A OUTPUT -p tcp -m set --match-set allowed-domains dst -m multiport --dports 22,80,443 -j ACCEPT
@@ -440,6 +466,13 @@ elif [ "$T3_CONNECT" = 1 ] && [ "$n_tunnel" != 2 ]; then
 fi
 if [ "$T3_CONNECT" = 0 ] && iptables -S OUTPUT | grep -q -- "--dport $TUNNEL_PORT"; then
   echo "ERROR: Firewall verification failed - T3 Connect is off but a $TUNNEL_PORT rule is present"; exit 1
+fi
+n_rstudio=$(iptables -S INPUT | grep -c -- "--dport $RSTUDIO_PORT -j ACCEPT" || true)
+if [ "$RSTUDIO" = 1 ] && [ "$n_rstudio" != 1 ]; then
+  echo "ERROR: Firewall verification failed - RStudio Server is on but its INPUT rule is missing ($n_rstudio of 1)"; exit 1
+fi
+if [ "$RSTUDIO" = 0 ] && [ "$n_rstudio" != 0 ]; then
+  echo "ERROR: Firewall verification failed - RStudio Server is off but a $RSTUDIO_PORT INPUT rule is present"; exit 1
 fi
 if [ "$PROFILE" = builder ]; then
   if curl -q --connect-timeout 5 https://1.1.1.1/ >/dev/null 2>&1; then
