@@ -87,6 +87,8 @@ check "project.conf: T3_CONNECT=0 (T3 Connect is opt-in)" grep -qx "T3_CONNECT=0
 check "project.conf: RESEARCH=0 (opt-in), RESEARCH_DIR=~/agent-research" \
   bash -c 'grep -qx "RESEARCH=0" "$1" && grep -qx "RESEARCH_DIR=$2/agent-research" "$1"' _ "$CFG/project.conf" "$H"
 check "a builder init does not create the research exchange" test ! -e "$H/agent-research"
+check "project.conf: RSTUDIO=0 (RStudio Server is opt-in)" grep -qx "RSTUDIO=0" "$CFG/project.conf"
+check "project.conf: first project gets RSTUDIO_PORT=8787" grep -qx "RSTUDIO_PORT=8787" "$CFG/project.conf"
 check "project.env names this project's vault" grep -q "op://agent-$NAME/github-agent/token" "$CFG/project.env"
 check "compose uses spades-gis by default, digest placeholder kept" \
   grep -q "spades-gis@sha256:REPLACE_WITH_DIGEST_FROM_digests.md" "$CFG/compose.yaml"
@@ -103,6 +105,7 @@ check "  ...existing CODEOWNERS kept" grep -qx '\* @me' "$P2/.github/CODEOWNERS"
 check "  ...compose uses spades-bio" grep -q "spades-bio@sha256:" "$CFGROOT/bio2/compose.yaml"
 check "  ...bio domains appended to the allowlist" grep -qx "mycoportal.org" "$CFGROOT/bio2/allowlist"
 check "  ...second project gets the next free T3_PORT (3774)" grep -qx "T3_PORT=3774" "$CFGROOT/bio2/project.conf"
+check "  ...and the next free RSTUDIO_PORT (8788)" grep -qx "RSTUDIO_PORT=8788" "$CFGROOT/bio2/project.conf"
 
 # ---- init: symlinks, permissions, atomicity, names
 SP1="$T/symproj1"; mkdir -p "$SP1/.github"; ln -s "$T/evil-target" "$SP1/.github/CODEOWNERS"
@@ -207,7 +210,7 @@ AMBIENT=(COMPOSE_FILE=evil.yaml COMPOSE_PROFILES=evil PROJECT_DIR=/evil SPADES_A
 rc=0; out=$(au up "$NAME" 2>&1) || rc=$?
 AMBIENT=()
 check "up succeeds (stub op + stub docker)" test "$rc" -eq 0
-C="compose --env-file $CFG/project.conf -f $CFG/compose.yaml -f $CFG/.generated/env-passthrough.yaml -f $CFG/.generated/t3-connect.yaml -f $CFG/.generated/research.yaml --project-directory $CFG -p $NAME"
+C="compose --env-file $CFG/project.conf -f $CFG/compose.yaml -f $CFG/.generated/env-passthrough.yaml -f $CFG/.generated/t3-connect.yaml -f $CFG/.generated/research.yaml -f $CFG/.generated/rstudio.yaml --project-directory $CFG -p $NAME"
 check "  ...op run resolves project.env, then runs docker compose" \
   grep -qxF "OP: run --env-file $CFG/project.env -- docker $C up -d --force-recreate" "$OPLOG"
 check "  ...docker compose gets ONLY the config dir's files" grep -qxF "ARGS: $C up -d --force-recreate" "$DLOG"
@@ -225,6 +228,9 @@ check "  ...and no firewall switch file exists" test ! -e "$CFG/.generated/t3-co
 RO="$CFG/.generated/research.yaml"
 check "RESEARCH=0: the research overlay adds nothing" bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent: {}")" ]' _ "$RO"
 check "  ...no profile switch, no instructions file" bash -c '[ ! -e "$1/profile" ] && [ ! -e "$1/agent-instructions.md" ]' _ "$CFG/.generated"
+RSO="$CFG/.generated/rstudio.yaml"
+check "RSTUDIO=0: the RStudio overlay adds nothing" bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent: {}")" ]' _ "$RSO"
+check "  ...no RStudio switch file and no password generated" bash -c '[ ! -e "$1/rstudio" ] && [ ! -e "$1/rstudio-password" ]' _ "$CFG/.generated"
 
 # ---- passthrough coverage
 cp "$CFG/project.env" "$T/penv2.bak"
@@ -325,6 +331,97 @@ au config "$NAME" >/dev/null 2>&1 || true
 AMBIENT=()
 check "an ambient T3_CONNECT=1 in the owner's shell changes nothing (only project.conf counts)" test ! -e "$CFG/.generated/t3-connect"
 
+# ---- RStudio Server (owner opt-in): validated by up/config/rstudio only; a missing key is 0
+cp "$CFG/project.conf" "$T/pconf-rs.bak"
+for v in 2 yes on " 1"; do
+  sed -i "s/^RSTUDIO=.*/RSTUDIO=$v/" "$CFG/project.conf"
+  : > "$DLOG"
+  refuses "up refuses RSTUDIO='$v'" "RSTUDIO='$v'.*must be 0 \(off\) or 1 \(on\)" au up "$NAME"
+  check "  ...without reaching docker" test ! -s "$DLOG"
+  refuses "config refuses RSTUDIO='$v'" "RSTUDIO='$v'" au config "$NAME"
+  check "stop works with RSTUDIO='$v' (lifecycle never validates it)" au stop "$NAME"
+  check "down works with RSTUDIO='$v'" au down "$NAME"
+  check "status works with RSTUDIO='$v'" au status "$NAME"
+  check "  ...and an invalid value opens nothing (no switch file, no password)" \
+    bash -c '[ ! -e "$1/rstudio" ] && [ ! -e "$1/rstudio-password" ]' _ "$CFG/.generated"
+done
+sed -i '/^RSTUDIO=/d; /^RSTUDIO_PORT=/d' "$CFG/project.conf"
+check "up accepts a config without RSTUDIO/RSTUDIO_PORT (predates them: off)" au up "$NAME"
+check "  ...overlay adds nothing" bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent: {}")" ]' _ "$RSO"
+check "stop works without RSTUDIO" au stop "$NAME"
+check "down works without RSTUDIO" au down "$NAME"
+refuses "agent-up rstudio says it is off" "RStudio Server is off for 'demo-proj'.*RSTUDIO=1" au rstudio "$NAME"
+echo "RSTUDIO=1" >> "$CFG/project.conf"
+refuses "RSTUDIO=1 without RSTUDIO_PORT is refused by up" "RSTUDIO_PORT=''" au up "$NAME"
+check "  ...but stop still works" au stop "$NAME"
+check "  ...and down" au down "$NAME"
+check "  ...rendering RStudio off for them (compose never sees an unset RSTUDIO_PORT)" \
+  bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent: {}")" ] && [ ! -e "$2/rstudio" ] && [ ! -e "$2/rstudio-password" ]' _ "$RSO" "$CFG/.generated"
+for v in 80 abc 70000; do
+  sed -i '/^RSTUDIO_PORT=/d' "$CFG/project.conf"; echo "RSTUDIO_PORT=$v" >> "$CFG/project.conf"
+  refuses "RSTUDIO_PORT=$v is refused" "RSTUDIO_PORT='$v'" au config "$NAME"
+done
+sed -i 's/^RSTUDIO_PORT=.*/RSTUDIO_PORT=3773/' "$CFG/project.conf"
+refuses "RSTUDIO_PORT equal to its own T3_PORT is refused" "equals its T3_PORT" au up "$NAME"
+sed -i 's/^RSTUDIO_PORT=.*/RSTUDIO_PORT=3774/' "$CFG/project.conf"
+refuses "RSTUDIO_PORT used as another project's T3_PORT is refused" "RSTUDIO_PORT=3774 .*also used by bio2 \(T3_PORT\)" au up "$NAME"
+sed -i 's/^RSTUDIO_PORT=.*/RSTUDIO_PORT=8788/' "$CFG/project.conf"
+refuses "RSTUDIO_PORT used by another project's RSTUDIO_PORT is refused" "RSTUDIO_PORT=8788 .*also used by bio2 \(RSTUDIO_PORT\)" au rstudio "$NAME"
+sed -i 's/^RSTUDIO_PORT=.*/RSTUDIO_PORT=8787/' "$CFG/project.conf"
+refuses "agent-up rstudio before any up: no password yet" "no password yet .*agent-up up demo-proj" au rstudio "$NAME"
+: > "$DLOG"
+upout="$(au up "$NAME" 2>&1)" && rc=0 || rc=$?
+check "up with RSTUDIO=1" test "$rc" -eq 0
+check "  ...prints the RStudio address and how to get the password" \
+  grep -qxF "agent-up: RStudio Server at http://rstudio-demo-proj.localhost:8787 (user and password: agent-up rstudio demo-proj)" <<<"$upout"
+check "  ...docker compose gets the RStudio overlay" grep -qxF "ARGS: $C up -d --force-recreate" "$DLOG"
+check "  ...firewall switch file says RSTUDIO=1" test "$(cat "$CFG/.generated/rstudio")" = "RSTUDIO=1"
+PWF="$CFG/.generated/rstudio-password"
+check "  ...password file: mode 600, 32 hex characters (128 bits)" \
+  bash -c '[ "$(stat -c %a "$1")" = 600 ] && grep -Eqx "[0-9a-f]{32}" "$1"' _ "$PWF"
+check "  ...the password is not printed by up" bash -c '! grep -qF "$(cat "$1")" <<<"$2"' _ "$PWF" "$upout"
+check "  ...overlay mounts the switch and the password read-only, adds the port and volume" \
+  bash -c 'grep -qx "        target: /etc/firewall/rstudio" "$1" && grep -qx "        target: /run/secrets/rstudio-password" "$1" && [ "$(grep -cx "        read_only: true" "$1")" = 2 ] && grep -qF "127.0.0.1:\${RSTUDIO_PORT" "$1" && grep -qx "    name: rstudio-\${PROJECT}" "$1"' _ "$RSO"
+pw1=$(cat "$PWF")
+au up "$NAME" >/dev/null 2>&1
+check "  ...the password is kept across up" test "$(cat "$PWF")" = "$pw1"
+chmod 644 "$PWF"; au config "$NAME" >/dev/null 2>&1
+check "  ...and its mode is put back to 600" test "$(stat -c %a "$PWF")" = 600
+rsout="$(au rstudio "$NAME" 2>&1)" && rc=0 || rc=$?
+check "agent-up rstudio prints the per-project origin, user and password" \
+  bash -c '[ "$1" -eq 0 ] && grep -qxF "  http://rstudio-demo-proj.localhost:8787" <<<"$2" && grep -qxF "  user:     agent" <<<"$2" && grep -qxF "  password: $3" <<<"$2"' _ "$rc" "$rsout" "$pw1"
+check "  ...and a plain localhost fallback" grep -qF "http://localhost:8787" <<<"$rsout"
+printf 'two words here!!\n' > "$PWF"
+refuses "a password file with spaces is refused" "rstudio-password must be one line of 16\+ printable" au config "$NAME"
+printf 'short\n' > "$PWF"
+refuses "a short password file is refused" "rstudio-password must be one line" au config "$NAME"
+rm -f "$PWF"; au config "$NAME" >/dev/null 2>&1
+check "deleting the password file rotates it" bash -c 'grep -Eqx "[0-9a-f]{32}" "$1" && [ "$(cat "$1")" != "$2" ]' _ "$PWF" "$pw1"
+sed -i 's/^RSTUDIO=.*/RSTUDIO=0/' "$CFG/project.conf"
+check "back to RSTUDIO=0: config succeeds" au config "$NAME"
+check "  ...the switch file is gone (the password is kept for next time)" bash -c '[ ! -e "$1/rstudio" ] && [ -e "$1/rstudio-password" ]' _ "$CFG/.generated"
+cp "$CFG/project.env" "$T/penv-rs.bak"
+for k in RSTUDIO RSTUDIO_PORT RSTUDIO_CONFIG_DIR RS_LOG_LEVEL; do
+  echo "$k=op://v/i/f" >> "$CFG/project.env"
+  refuses "up refuses reserved key $k in project.env" "reserved.*$k" au up "$NAME"
+  cp "$T/penv-rs.bak" "$CFG/project.env"
+done
+AMBIENT=(RSTUDIO=1 RSTUDIO_PORT=9999)
+au config "$NAME" >/dev/null 2>&1 || true
+AMBIENT=()
+check "an ambient RSTUDIO=1 in the owner's shell changes nothing (only project.conf counts)" test ! -e "$CFG/.generated/rstudio"
+# a project name with an underscore: hyphens in the browser origin
+UP="$T/my_proj"; mkdir -p "$UP"
+au init "$UP" >/dev/null 2>&1
+sed -i 's/^RSTUDIO=.*/RSTUDIO=1/' "$CFGROOT/my_proj/project.conf"
+au config my_proj >/dev/null 2>&1
+# six projects so far hold RSTUDIO_PORT 8787-8792
+check "init of my_proj: the next RSTUDIO_PORT free across all projects (8793)" grep -qx "RSTUDIO_PORT=8793" "$CFGROOT/my_proj/project.conf"
+rsout="$(au rstudio my_proj 2>&1)" || true
+check "agent-up rstudio my_proj: origin rstudio-my-proj.localhost (underscore -> hyphen)" grep -qxF "  http://rstudio-my-proj.localhost:8793" <<<"$rsout"
+rm -rf "$CFGROOT/my_proj"
+cp "$T/pconf-rs.bak" "$CFG/project.conf"
+au config "$NAME" >/dev/null 2>&1 || true
 # ---- research profile: the ONE shared research container (spec §2.1, Phase 1b)
 RCFG="$CFGROOT/research"; RD="$H/agent-research"
 refuses "init --profile research refuses another name" "always named 'research'" au init --profile research --name foo
@@ -342,7 +439,7 @@ check "  ...created the research exchange root" test -d "$RD"
 refuses "init --profile research never overwrites" 'already exists' au init --profile research
 refuses "up research refuses the placeholder digest" 'not pinned to a real digest' au up research
 sed -i "s/REPLACE_WITH_DIGEST_FROM_digests.md/$H64/" "$RCFG/compose.yaml"
-RC="compose --env-file $RCFG/project.conf -f $RCFG/compose.yaml -f $RCFG/.generated/env-passthrough.yaml -f $RCFG/.generated/t3-connect.yaml -f $RCFG/.generated/research.yaml --project-directory $RCFG -p research"
+RC="compose --env-file $RCFG/project.conf -f $RCFG/compose.yaml -f $RCFG/.generated/env-passthrough.yaml -f $RCFG/.generated/t3-connect.yaml -f $RCFG/.generated/research.yaml -f $RCFG/.generated/rstudio.yaml --project-directory $RCFG -p research"
 : > "$DLOG"; rm -f "$OPLOG"; TOK=""
 AMBIENT=(OP_SERVICE_ACCOUNT_TOKEN=owner-op-token GH_TOKEN=owner-gh-token)
 rc=0; out=$(au up research 2>&1) || rc=$?
@@ -359,6 +456,15 @@ check "  ...research instructions written (readable: mode 644)" \
 check "  ...switch read-only at /etc/firewall/profile; instructions read-only at Claude's managed CLAUDE.md + Codex's AGENTS.md" \
   bash -c 'f="$1"; for t in /etc/firewall/profile /etc/claude-code/CLAUDE.md /home/agent/.codex/AGENTS.md; do grep -A1 "target: \"$t\"" "$f" | grep -q "read_only: true" || { echo "not ro: $t"; exit 1; }; done' _ "$RCFG/.generated/research.yaml"
 check "  ...no project subfolders yet: no /research mounts" bash -c '! grep -q "target: \"/research/" "$1"' _ "$RCFG/.generated/research.yaml"
+check "  ...no RStudio Server for the research container (overlay adds nothing, no switch, no password)" \
+  bash -c '[ "$(grep -v "^#" "$1/rstudio.yaml")" = "$(printf "services:\n  agent: {}")" ] && [ ! -e "$1/rstudio" ] && [ ! -e "$1/rstudio-password" ]' _ "$RCFG/.generated"
+cp "$RCFG/project.conf" "$T/rconf-rs.bak"
+printf 'RSTUDIO=1\nRSTUDIO_PORT=8999\n' >> "$RCFG/project.conf"
+refuses "config research refuses RSTUDIO=1 (builders only)" "RStudio Server is for builder projects only" au config research
+refuses "rstudio research refuses (builders only)" "RStudio Server is for builder projects only" au rstudio research
+check "  ...stop research still works with RSTUDIO=1 in its config (renders RStudio off)" au stop research
+check "  ...and its overlay stays empty" bash -c '[ ! -e "$1/rstudio" ] && [ ! -e "$1/rstudio-password" ]' _ "$RCFG/.generated"
+cp "$T/rconf-rs.bak" "$RCFG/project.conf"
 : > "$DLOG"
 check "shell research opens /research" au shell research
 check "  ...docker exec -w /research" grep -qxF "ARGS: exec -it -u agent -w /research research-agent-1 zsh" "$DLOG"
@@ -554,6 +660,28 @@ if docker compose version >/dev/null 2>&1; then
   check "rendered research: ambient GH_TOKEN / OP_SERVICE_ACCOUNT_TOKEN never appear" research_hidden
   AMBIENT=()
   ( cd "$T" && aureal config "$NAME" >/dev/null 2>&1 ) || true   # regenerate the T3_CONNECT=0 overlay
+  # RStudio OFF must render exactly what the launcher rendered before RStudio existed (no overlay).
+  JPRE="$(cd "$T" && env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u T3_PORT -u T3_CONNECT HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" \
+          docker compose --env-file "$CFG/project.conf" -f "$CFG/compose.yaml" -f "$CFG/.generated/env-passthrough.yaml" \
+          -f "$CFG/.generated/t3-connect.yaml" --project-directory "$CFG" -p "$NAME" config --format json)"
+  check "rendered (RSTUDIO=0): identical to the config rendered without the RStudio overlay" \
+    bash -c 'diff <(jq -S . <<<"$1") <(jq -S . <<<"$2")' _ "$JPRE" "$J"
+  check "rendered (RSTUDIO=0): no rstudio volume, no 8787" \
+    bash -c '[ "$(jq -r ".volumes.rstudio // empty" <<<"$1")" = "" ] && ! grep -q 8787 <<<"$1"' _ "$J"
+  sed -i 's/^RSTUDIO=.*/RSTUDIO=1/' "$CFG/project.conf"
+  JR="$(render "$T")"
+  sed -i 's/^RSTUDIO=.*/RSTUDIO=0/' "$CFG/project.conf"
+  ( cd "$T" && aureal config "$NAME" >/dev/null 2>&1 ) || true   # regenerate the RSTUDIO=0 overlay
+  check "rendered (RSTUDIO=1): ports = T3 + RStudio, both on the host's 127.0.0.1 only" \
+    jq -e '[.services.agent.ports[] | {host_ip, target, published: (.published|tostring), protocol}] | sort_by(.target) == [{"host_ip":"127.0.0.1","target":3773,"published":"3773","protocol":"tcp"},{"host_ip":"127.0.0.1","target":8787,"published":"8787","protocol":"tcp"}]' <<<"$JR"
+  check "rendered (RSTUDIO=1): rstudio-$NAME volume at /home/agent/.local/share/rstudio" \
+    bash -c '[ "$(jq -r ".volumes.rstudio.name" <<<"$1")" = "rstudio-$2" ] && jq -e ".services.agent.volumes[] | select(.target==\"/home/agent/.local/share/rstudio\" and .source==\"rstudio\")" <<<"$1" >/dev/null' _ "$JR" "$NAME"
+  check "rendered (RSTUDIO=1): switch + password from the config dir, read-only" \
+    bash -c 'jq -e --arg s "$2" --arg p "$3" "[.services.agent.volumes[] | select(.target==\"/etc/firewall/rstudio\" or .target==\"/run/secrets/rstudio-password\") | {type, source, read_only}] | sort_by(.source) == ([{\"type\":\"bind\",\"source\":\$s,\"read_only\":true},{\"type\":\"bind\",\"source\":\$p,\"read_only\":true}] | sort_by(.source))" <<<"$1"' _ "$JR" "$CFG/.generated/rstudio" "$CFG/.generated/rstudio-password"
+  check "rendered (RSTUDIO=1): the password is not in the environment" \
+    bash -c '! jq -r ".services.agent.environment | to_entries[] | .value" <<<"$1" | grep -qF "$(cat "$2")"' _ "$JR" "$CFG/.generated/rstudio-password"
+  check "rendered (RSTUDIO=1): otherwise identical to RSTUDIO=0" \
+    bash -c 'diff <(jq -S "del(.volumes.rstudio) | .services.agent.ports |= map(select(.target != 8787)) | .services.agent.volumes |= map(select(.target != \"/etc/firewall/rstudio\" and .target != \"/run/secrets/rstudio-password\" and .target != \"/home/agent/.local/share/rstudio\"))" <<<"$1") <(jq -S . <<<"$2")' _ "$JR" "$J"
   ambient_hidden(){ local o; o="$(cd "$T" && aureal config "$NAME" --format json)" || return 1; ! grep -q dummy-render <<<"$o"; }
   AMBIENT=(GH_TOKEN=dummy-render)
   check "rendered: config never prints the owner's ambient value of a passthrough key" ambient_hidden
@@ -586,22 +714,29 @@ if [ -n "${TEMPLATE_IMAGE:-}" ]; then
   sed -i 's/^T3_CONNECT=.*/T3_CONNECT=1/' "$CFG/project.conf"
   # Research exchange ON too (its folders exist from the research section above).
   sed -i 's/^RESEARCH=.*/RESEARCH=1/' "$CFG/project.conf"
+  # RStudio Server ON too: project.conf -> overlay -> read-only switch -> firewall + entrypoint -> rserver.
+  sed -i 's/^RSTUDIO=.*/RSTUDIO=1/' "$CFG/project.conf"
   au config "$NAME" >/dev/null 2>&1 || true   # (re)writes .generated/ (stub docker)
+  # CI-ONLY: the runner's uid is not 1000, so the agent could not read the 0600 password file.
+  # In real use the host user IS uid 1000 (spec §3.1) and the file stays 0600.
+  chmod 644 "$CFG/.generated/rstudio-password"
+  cp "$ROOT/tests/rstudio/fixture-Rprofile" "$P/.Rprofile"; cp "$ROOT/tests/rstudio/fixture.Rproj" "$P/demo.Rproj"
   cat > "$T/override.yaml" <<OVR
 services:
   agent:
     image: $TEMPLATE_IMAGE
     mem_limit: 4g
+    volumes: ["$ROOT/tests:/tests:ro"]   # test scripts only (tests/rstudio)
 OVR
   dc(){ env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u COMPOSE_FILE HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" GH_TOKEN=dummy-in-container \
           docker compose --env-file "$CFG/project.conf" -f "$CFG/compose.yaml" -f "$CFG/.generated/env-passthrough.yaml" \
-          -f "$CFG/.generated/t3-connect.yaml" -f "$CFG/.generated/research.yaml" -f "$T/override.yaml" --project-directory "$CFG" -p "$NAME" "$@"; }
+          -f "$CFG/.generated/t3-connect.yaml" -f "$CFG/.generated/research.yaml" -f "$CFG/.generated/rstudio.yaml" -f "$T/override.yaml" --project-directory "$CFG" -p "$NAME" "$@"; }
   # The research container: agent-up's exact arguments, with the owner's ambient secrets in compose's
   # environment (they must NOT reach the container).
   rdc(){ env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u COMPOSE_FILE HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" \
           GH_TOKEN=ambient-gh OP_SERVICE_ACCOUNT_TOKEN=ambient-op \
           docker compose --env-file "$RCFG/project.conf" -f "$RCFG/compose.yaml" -f "$RCFG/.generated/env-passthrough.yaml" \
-          -f "$RCFG/.generated/t3-connect.yaml" -f "$RCFG/.generated/research.yaml" -f "$T/override.yaml" --project-directory "$RCFG" -p research "$@"; }
+          -f "$RCFG/.generated/t3-connect.yaml" -f "$RCFG/.generated/research.yaml" -f "$RCFG/.generated/rstudio.yaml" -f "$T/override.yaml" --project-directory "$RCFG" -p research "$@"; }
   trap 'dc down -v >/dev/null 2>&1 || true; rdc down -v >/dev/null 2>&1 || true; rm -rf "$T"' EXIT
   for v in require-cache-shared npm-cache-shared; do
     docker volume inspect "$v" >/dev/null 2>&1 || docker volume create "$v" >/dev/null
@@ -701,6 +836,29 @@ OVR
       bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 relay.t3.codes A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID"
     check "  ...an agent re-run of the firewall keeps it ON (the switch, not the env, decides)" \
       bash -c 'out=$(docker exec -u agent -e T3_CONNECT=0 "$1" sudo /usr/local/bin/init-firewall.sh 2>&1) && grep -q "^T3 Connect: ON" <<<"$out"' _ "$CID"
+    # RStudio Server (RSTUDIO=1 above): started by the entrypoint after T3, only because of the switch.
+    RSP=$(sed -n 's/^RSTUDIO_PORT=//p' "$CFG/project.conf")
+    for _ in $(seq 1 60); do [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$RSP/")" != 000 ] && break; sleep 2; done
+    check "RStudio: the firewall read the switch (log says ON)" bash -c 'docker logs "$1" 2>&1 | grep -q "^RStudio Server: ON"' _ "$CID"
+    check "  ...one INPUT rule for 8787, from the gateway only" \
+      bash -c 'gw=$(docker exec "$1" ip -4 route show default | awk "{print \$3; exit}"); [ "$(docker exec -u root "$1" iptables -S INPUT | grep -- "--dport 8787")" = "-A INPUT -s $gw/32 -p tcp -m tcp --dport 8787 -j ACCEPT" ]' _ "$CID"
+    check "  ...the switch is a read-only mount (even root cannot write it)" \
+      bash -c 'out="$(docker exec -u root "$1" sh -c "echo RSTUDIO=0 > /etc/firewall/rstudio" 2>&1)"; rc=$?; [ "$rc" -ne 0 ] && printf "%s" "$out" | grep -q "Read-only file system"' _ "$CID"
+    check "  ...so is the password file" \
+      bash -c 'out="$(docker exec -u root "$1" sh -c "echo x > /run/secrets/rstudio-password" 2>&1)"; rc=$?; [ "$rc" -ne 0 ] && printf "%s" "$out" | grep -q "Read-only file system"' _ "$CID"
+    check "  ...the password is not in the container's environment" \
+      bash -c '! docker exec "$1" env | grep -qF "$(cat "$2")"' _ "$CID" "$CFG/.generated/rstudio-password"
+    check "  ...started by the entrypoint after T3" \
+      bash -c 'docker logs "$1" 2>&1 | grep -nE "\[agent-t3\] server up|\[agent-rstudio\] server up" | cut -d: -f2- | tr "\n" "|" | grep -q "^\[agent-t3\] server up.*|\[agent-rstudio\] server up"' _ "$CID"
+    check "  ...reachable from the host at 127.0.0.1:<RSTUDIO_PORT> under rstudio-<project>.localhost (sign-in page)" \
+      bash -c '[ "$(curl -s -o /dev/null -w "%{http_code} %{redirect_url}" --max-time 5 -H "Host: rstudio-$2.localhost:$1" "http://127.0.0.1:$1/")" != "000 " ]' _ "$RSP" "$NAME"
+    check "  ...NOT reachable from a sibling container on the same network (firewall: gateway only)" \
+      bash -c 'net=$(docker inspect -f "{{range \$k,\$v := .NetworkSettings.Networks}}{{\$k}}{{end}}" "$1"); ip=$(docker inspect -f "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}" "$1"); [ -n "$net" ] && [ -n "$ip" ] || exit 1; rc=0; docker run --rm --network "$net" "$2" curl -sS -o /dev/null --max-time 5 "http://$ip:8787/" || rc=$?; echo "curl rc=$rc (28 = timed out: dropped by the firewall)"; [ "$rc" -eq 28 ]' _ "$CID" "$TEMPLATE_IMAGE"
+    check "  ...rstudio-$NAME volume at ~/.local/share/rstudio, owned by agent" \
+      bash -c 'docker inspect -f "{{range .Mounts}}{{.Name}}={{.Destination}} {{end}}" "$1" | grep -q "rstudio-$2=/home/agent/.local/share/rstudio" && [ "$(docker exec "$1" stat -c %u /home/agent/.local/share/rstudio)" = 1000 ]' _ "$CID" "$NAME"
+    # Sign in with the generated password, open the IDE, and check the R session (tests/rstudio).
+    check "  ...sign-in + R session end to end (tests/rstudio/test-rstudio.sh)" \
+      docker exec -u agent -e EXPECT_GH_TOKEN=dummy-in-container "$CID" bash /tests/rstudio/test-rstudio.sh
     check "project-allowlisted www.python.org resolves" \
       bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 www.python.org A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID"
     # Research exchange (RESEARCH=1): briefs out read-write; reports and downloads in, read-only.

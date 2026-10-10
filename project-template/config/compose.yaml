@@ -5,6 +5,9 @@
 # .generated/env-passthrough.yaml; secret VALUES exist only in the environment of `op run`.
 # T3 Connect (T3_CONNECT=1 in project.conf) is added by the generated .generated/t3-connect.yaml:
 # a read-only firewall switch + TUNNEL_EDGE_IP_VERSION=4; with T3_CONNECT=0 it adds nothing.
+# RStudio Server (RSTUDIO=1 in project.conf) is added by the generated .generated/rstudio.yaml: the
+# 127.0.0.1:<RSTUDIO_PORT> port, the rstudio-<project> volume, a read-only firewall switch and the
+# read-only password file; with RSTUDIO=0 it adds nothing.
 name: ${PROJECT:?set PROJECT in project.conf}
 services:
   agent:

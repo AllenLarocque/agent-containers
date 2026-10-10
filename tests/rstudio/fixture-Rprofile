@@ -1,0 +1,12 @@
+# Test fixture (tests/rstudio/test-rstudio.sh): stands in for the .Rprofile setupProject writes. It puts a
+# project library first on .libPaths() and records what the R session sees.
+dir.create("/tmp/fixture-lib", showWarnings = FALSE)
+.libPaths(c("/tmp/fixture-lib", .libPaths()))
+writeLines(c(
+  paste("wd", getwd()),
+  paste("libpaths", paste(.libPaths(), collapse = ":")),
+  paste("rstudio", Sys.getenv("RSTUDIO")),
+  paste("gh_token", Sys.getenv("GH_TOKEN")),
+  paste("op_token", nzchar(Sys.getenv("OP_SERVICE_ACCOUNT_TOKEN"))),
+  paste("home", Sys.getenv("HOME"))
+), "/tmp/rprofile-marker")

@@ -102,6 +102,9 @@ and can send data anywhere must not also hold private data or credentials.
   gets a public, auth-gated tunnel hostname and trusts T3's relay (a compromised relay signing key
   could mint sessions); the T3 account must have 2FA. Blast radius: that project's agent
   capabilities. The switch is owner config, never agent-writable.
+- *(2026-10-09, owner-approved)* **RStudio Server, per project, opt-in** (§13.3): it runs as the
+  agent, so its password guards against other local users and pages, not against the agent (which
+  could read it or replace the server). Host loopback only; no new egress.
 
 Revisit if builders start consuming untrusted content heavily.
 
@@ -248,7 +251,7 @@ from the project folder.
   compose.yaml                          # generated from the seed, then owner-edited
   project.env                           # op:// references only
   allowlist                             # project domains → /etc/firewall/allowlist.d/50-project.txt:ro
-  project.conf                          # PROJECT_DIR, PROFILE (builder|research; research = the one shared research container, §2.1), IMAGE (base|gis|bio), T3_PORT, T3_CONNECT (0|1, absent = 0; §13.1), RESEARCH (0|1, absent = 0) + RESEARCH_DIR (§2.1)
+  project.conf                          # PROJECT_DIR, PROFILE (builder|research; research = the one shared research container, §2.1), IMAGE (base|gis|bio), T3_PORT, T3_CONNECT (0|1, absent = 0; §13.1), RESEARCH (0|1, absent = 0) + RESEARCH_DIR (§2.1), RSTUDIO (0|1, absent = 0; builders only) + RSTUDIO_PORT (§13.3)
 <project-dir>/                          # the agent's read-write workspace: code, data, outputs, CLAUDE.md
 ```
 
@@ -258,7 +261,7 @@ from the project folder.
 |---|---|
 | `agent-up init <project-dir> [--image gis] [--profile builder]` | creates `~/.config/agent-containers/<project>/` from the seeds; prints the remaining steps (vault, digest) |
 | `agent-up init --profile research` | creates `~/.config/agent-containers/research/` (compose + `project.conf` only: no secrets) and `~/agent-research/` (§2.1) |
-| `agent-up up <project>` | checks the image digest, mounts and `project.env`, then `op run --env-file <cfg>/project.env -- docker compose --env-file <cfg>/project.conf -f <cfg>/compose.yaml -f <cfg>/.generated/env-passthrough.yaml -f <cfg>/.generated/t3-connect.yaml --project-directory <cfg> -p <project> up -d --force-recreate` (generated overlays: the `project.env` key names only, never values; and the T3 Connect switch, empty unless `T3_CONNECT=1`, §13.1) |
+| `agent-up up <project>` | checks the image digest, mounts and `project.env`, then `op run --env-file <cfg>/project.env -- docker compose --env-file <cfg>/project.conf -f <cfg>/compose.yaml -f <cfg>/.generated/env-passthrough.yaml -f <cfg>/.generated/t3-connect.yaml -f <cfg>/.generated/research.yaml -f <cfg>/.generated/rstudio.yaml --project-directory <cfg> -p <project> up -d --force-recreate` (generated overlays: the `project.env` key names only, never values; and the T3 Connect switch, empty unless `T3_CONNECT=1`, §13.1; the research mounts, §2.1; RStudio Server, empty unless `RSTUDIO=1`, §13.3) |
 | `agent-up config <project>` | prints the rendered compose config; no secrets needed |
 | `agent-up shell <project>` | `docker exec -it -u agent <project>-agent-1 zsh` |
 | `agent-up status \| stop \| down <project>` | compose wrappers |
@@ -554,3 +557,63 @@ from a `~/agent-memory` git repo on the host (empty at first).
 **Phase 3 designs:** structure, what goes where, curation, how handoffs are written and found, and
 whether shared memory needs provenance (which project wrote what). T3 thread history isn't
 memory: it is per environment and won't be relied on.
+
+### 13.3 RStudio Server (decided 2026-10-09, owner-approved)
+
+The open-source RStudio Server (AGPLv3, `rstudio/rstudio`), per project, opt-in: the owner works in
+RStudio in the browser next to the agent, in the same container.
+
+**Vetting (licence, account, telemetry first):** AGPLv3, no account. In the server source (tag
+v2026.09.0+174): no telemetry or crash reporting; the update check is desktop-only
+(`RSTUDIO_DISABLE_CHECK_FOR_UPDATES=1` set anyway). Copilot and Posit Assistant are pinned off in
+`rsession.conf` (`copilot-enabled=0`, `allow-copilot=0`, `allow-posit-assistant=0`,
+`posit-assistant-enabled=0`, `posit-assistant-installation-enabled=0`, the last also stopping its
+update checks; every key checked against `session-options.json` at that tag, since an unknown key
+stops rsession). No runtime egress: nothing is allowlisted.
+
+**Install (base image):** `RSTUDIO_VERSION=2026.09.0+174` (stable, published 2026-09-11; Posit's
+jammy build, which it ships for noble too). Posit publishes no checksum file for server .debs, so
+`RSTUDIO_SHA256` is from the first download, whose embedded dpkg-sig signature verified against
+Posit's code-signing key `8B65 E5A1 07BB EFE3 BA99 C597 51C0 B5BB 19F9 2D60`. Not rocker's
+`install_rstudio.sh` (s6, a `rstudio` user colliding with uid 1000, a system git credential helper).
+The postinst's build-time state (secure-cookie-key, session-rpc-key, SQLite database) is deleted: the
+images are public. Size: the install layer is ~2.1 GB (RStudio 1.6 GB: Copilot language server
+~0.84 GB, Quarto ~0.45 GB, Node ~0.12 GB; plus the package's hard `libclang-dev` dependency). *Above
+the 700 MB budget for base: whether it stays in base (gis/bio inherit it), is trimmed, or moves to
+separate images is the owner's decision (pending).*
+
+**Runtime:**
+- `rserver` runs **as the agent** (non-root is supported: `server-user=agent`; `auth-none` defaults
+  to 1 when non-root, so `auth-none=0` is explicit). Its state is in `/var/lib/rstudio-agent` (the
+  container's own layer: a fresh cookie key per container), its database config is
+  `/etc/rstudio/agent-database.conf` (the package's `database.conf` is `rstudio-server`-owned, 600),
+  its logs in the `rstudio-<project>` volume (`~/.local/share/rstudio`).
+- `agent-entrypoint` runs `agent-rstudio start` after T3, only when the read-only switch
+  `/etc/firewall/rstudio` says `RSTUDIO=1`; it never fails the start.
+- Sign-in: `auth-pam-helper-path=rstudio-auth`, which accepts only user `agent` with the password in
+  the owner's per-project file (agent-up: `.generated/rstudio-password`, 128 bits, 0600, mounted
+  read-only at `/run/secrets/rstudio-password`; never an environment variable).
+- Sessions: `rsession-path=rsession-agent`. rserver starts rsession with a scrubbed environment;
+  the wrapper adds the environment rserver was started with (the container's minus `OP_*`, read from
+  `/proc/<rserver>/environ`, never written to disk; RStudio's own values win; `RS_*`/`RSTUDIO_*` are
+  never passed), so R in RStudio sees what R in the agent's shell sees (incl. `GH_TOKEN`). The first
+  session of a container gets `RS_INITIAL_PROJECT=<the one .Rproj in /workspace>` (only the first:
+  that variable overrides RStudio's own project switching). `session-default-working-dir` and
+  `session-default-new-project-dir` are `/workspace`; `session-timeout-minutes=0` (a resumed session
+  may skip `.Rprofile` and lose the setupProject library). `r-libs-user` is not set.
+- **agent-up:** `RSTUDIO=0|1` + `RSTUDIO_PORT` in `project.conf` (`init` writes 0 and the next port
+  from 8787 free across every project's `T3_PORT`/`RSTUDIO_PORT`; absent = 0). `up`, `config` and
+  `rstudio` validate them; `stop`/`down`/`status` never refuse (an incomplete config renders RStudio
+  off for them). `.generated/rstudio.yaml`: with 1, `127.0.0.1:${RSTUDIO_PORT}:8787`, the
+  `rstudio-<project>` volume, the switch and the password (both read-only); with 0, nothing: the
+  rendered compose and the firewall rules are byte-identical to before (CI). `RSTUDIO`, `RS_*` and
+  `RSTUDIO_*` are reserved in `project.env`. `agent-up rstudio <project>` prints
+  `http://rstudio-<project, _ -> ->.localhost:<RSTUDIO_PORT>`, user `agent` and the password: a
+  per-project host because RStudio's cookies are per host, not per port.
+- **Builders only:** the research container (§2.1) never runs RStudio: `agent-up` refuses
+  `RSTUDIO=1` in its config (`config`/`up`/`rstudio`) and renders its overlay empty (`stop`/`down`).
+- **Firewall, only when on:** one INPUT rule, tcp 8787 from the container's gateway only (the T3
+  pattern). No egress change.
+
+**Upgrade note:** existing configs need nothing to stay off. To opt in, add `RSTUDIO=1` and a free
+`RSTUDIO_PORT` to `project.conf` and use an image that includes RStudio Server.

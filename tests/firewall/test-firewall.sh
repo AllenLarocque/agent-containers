@@ -6,11 +6,14 @@
 #      step BEFORE the firewall ran; never read back from the firewall's own state).
 #      EXPECT_T3_CONNECT = 1 when the CI step mounted /etc/firewall/t3-connect with T3_CONNECT=1
 #      (default 0: the rules must be exactly the ones without the feature).
+#      EXPECT_RSTUDIO = 1 when the CI step mounted /etc/firewall/rstudio with RSTUDIO=1 (default 0:
+#      exactly the rules without RStudio Server).
 set -uo pipefail
 fail=0
 ok(){ echo "OK:   $*"; }; bad(){ echo "FAIL: $*"; fail=1; }
 : "${EXPECT_UPSTREAM:?EXPECT_UPSTREAM must be set to the pre-firewall resolver}"
 EXPECT_T3_CONNECT=${EXPECT_T3_CONNECT:-0}
+EXPECT_RSTUDIO=${EXPECT_RSTUDIO:-0}
 blocked(){ if curl --connect-timeout 5 -s "$1" >/dev/null 2>&1; then bad "$1 reachable, should be BLOCKED"; else ok "$1 blocked"; fi; }
 allowed(){ if curl --connect-timeout 10 -sSf "$1" >/dev/null 2>&1; then ok "$1 reachable"; else bad "$1 blocked, should be ALLOWED"; fi; }
 blocked https://example.com
@@ -41,7 +44,7 @@ expect_v4=$(sed -e "s|@UP@|$EXPECT_UPSTREAM|g" -e "s|@DUID@|$DUID|g" -e "s|@GW@|
 -A INPUT -i lo -j ACCEPT
 -A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
 -A INPUT -s @GW@/32 -p tcp -m tcp --dport 3773 -j ACCEPT
--A OUTPUT -d 127.0.0.11/32 -m owner ! --uid-owner @DUID@ -j REJECT --reject-with icmp-port-unreachable
+@RS@-A OUTPUT -d 127.0.0.11/32 -m owner ! --uid-owner @DUID@ -j REJECT --reject-with icmp-port-unreachable
 -A OUTPUT -o lo -j ACCEPT
 -A OUTPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
 -A OUTPUT -d @UP@/32 -p udp -m udp --dport 53 -m owner --uid-owner @DUID@ -j ACCEPT
@@ -58,6 +61,14 @@ if [ "$EXPECT_T3_CONNECT" = 1 ]; then
   expect_v4=${expect_v4/@T3@/$t3_rules}
 else
   expect_v4=${expect_v4/@T3@/}
+fi
+# RStudio Server ON adds exactly this INPUT rule (gateway only, like T3's); OFF adds nothing.
+if [ "$EXPECT_RSTUDIO" = 1 ]; then
+  rs_rule="-A INPUT -s $GW/32 -p tcp -m tcp --dport 8787 -j ACCEPT
+"
+  expect_v4=${expect_v4/@RS@/$rs_rule}
+else
+  expect_v4=${expect_v4/@RS@/}
 fi
 expect_v6=$(cat <<'EOF'
 -P INPUT DROP

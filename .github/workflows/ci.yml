@@ -131,6 +131,9 @@ jobs:
               docker history --no-trunc --format '{{.Size}}\t{{.CreatedBy}}' "spades-$img:ci" | grep -v '^0B' \
                 | sort -h -r | head -n 8 | cut -c1-160
             done
+            echo "== spades-base: RStudio Server (its install layer, its dir, libclang/LLVM it depends on)"
+            docker history --no-trunc --format '{{.Size}}\t{{.CreatedBy}}' spades-base:ci | grep -m1 'rstudio-server-' | cut -c1-100
+            docker run --rm -u root spades-base:ci du -sh /usr/lib/rstudio-server /usr/lib/rstudio-server/bin/copilot-language-server-js /usr/lib/rstudio-server/bin/quarto /usr/lib/rstudio-server/bin/node /usr/lib/llvm-18 2>/dev/null
             echo "== spades-base: big directories"
             docker run --rm -u root spades-base:ci du -sh /usr/local/lib/R /usr/lib/x86_64-linux-gnu /usr/share /usr/local/share /opt /usr/lib/R 2>/dev/null
             echo "== spades-bio: conda"
@@ -144,7 +147,9 @@ jobs:
           # A fresh named volume inherits the ownership of the image dir it mounts on. The list is read from
           # the compose template itself, so a new volume cannot be added without being checked here.
           mapfile -t targets < <(grep -oE '^ +- [a-z0-9-]+:(/home/agent/[^ ]+)' project-template/config/compose.yaml | sed -E 's/.*:(\/home\/agent\/[^ ]+)/\1/')
-          [ "${#targets[@]}" -ge 5 ] || { echo "parsed only ${#targets[@]} volume targets: ${targets[*]}"; exit 1; }
+          # Volumes that agent-up's generated overlays add (RSTUDIO=1: the rstudio-<project> volume).
+          mapfile -t -O "${#targets[@]}" targets < <(grep -oE '"      - [a-z0-9-]+:/home/agent/[^ "]+' bin/agent-up | sed -E 's/.*:(\/home\/agent\/[^ "]+)/\1/')
+          [ "${#targets[@]}" -ge 6 ] || { echo "parsed only ${#targets[@]} volume targets: ${targets[*]}"; exit 1; }
           args=(); i=0
           for t in "${targets[@]}"; do args+=(-v "fresh-vol-$i:$t"); i=$((i+1)); done
           printf '%s\n' "${targets[@]}"
@@ -257,6 +262,36 @@ jobs:
           docker exec -u root -e EXPECT_UPSTREAM="$UP" -e EDGE_IP="$EDGE_IP" -e ANNOTATE=1 fwres bash /tests/firewall/test-research.sh || rc=1
           docker rm -f fwres
           docker network rm resnet
+          exit $rc
+      - name: RStudio Server (switch ON; firewall snapshot; start as agent, sign in, R session; metrics)
+        if: always() && steps.mode.outputs.mode == 'full'
+        run: |
+          # The owner's switch + password file, mounted read-only exactly as agent-up's generated overlay does.
+          printf 'RSTUDIO=1\n' > /tmp/rstudio-switch
+          od -An -tx1 -N16 /dev/urandom | tr -d ' \n' > /tmp/rstudio-password
+          chmod 644 /tmp/rstudio-password   # CI-ONLY: the runner is not uid 1000 (in real use: 0600, host uid 1000)
+          printf 'www.python.org' > /tmp/40-extra.txt
+          printf 'www.r-project.org\r\ncran.r-project.org  # inline comment\n\n# comment only\nwww.mozilla.org' > /tmp/50-project.txt
+          ws=$(mktemp -d); cp tests/rstudio/fixture-Rprofile "$ws/.Rprofile"; cp tests/rstudio/fixture.Rproj "$ws/fixture.Rproj"
+          sudo chown -R 1000:1000 "$ws"   # CI-ONLY (as for the acceptance project)
+          docker run -d --name rs --cap-add NET_ADMIN --cap-add NET_RAW \
+            -e GH_TOKEN=dummy-gh -e OP_SERVICE_ACCOUNT_TOKEN=must-not-reach-r \
+            -v /tmp/rstudio-switch:/etc/firewall/rstudio:ro -v /tmp/rstudio-password:/run/secrets/rstudio-password:ro \
+            -v /tmp/40-extra.txt:/etc/firewall/allowlist.d/40-extra.txt:ro \
+            -v /tmp/50-project.txt:/etc/firewall/allowlist.d/50-project.txt:ro \
+            -v "$ws:/workspace" -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
+          UP=$(docker exec rs awk '/^nameserver/{print $2; exit}' /etc/resolv.conf); echo "original resolver: $UP"
+          docker exec rs sudo /usr/local/bin/init-firewall.sh | tee /tmp/rs-fw.log
+          grep -q '^RStudio Server: ON' /tmp/rs-fw.log
+          rc=0   # run every suite, fail at the end; FAIL lines become annotations (logs are not readable remotely)
+          run(){ "$@" 2>&1 | tee -a /tmp/rs.log; return "${PIPESTATUS[0]}"; }
+          run docker exec -u root -e EXPECT_UPSTREAM="$UP" -e EXPECT_RSTUDIO=1 rs bash /tests/firewall/test-firewall.sh || rc=1
+          run docker exec -u agent -e EXPECT_GH_TOKEN=dummy-gh -e ANNOTATE=1 rs bash /tests/rstudio/test-rstudio.sh || rc=1
+          if [ "$rc" -ne 0 ]; then
+            msg=$(grep -E '^(FAIL|        )' /tmp/rs.log | head -n 60 | sed 's/%/%25/g; s/\r//g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=RStudio Server tests::$msg"
+          fi
+          docker rm -f rs
           exit $rc
       - name: Firewall rejects invalid allowlist entry without touching iptables
         if: steps.mode.outputs.mode == 'full'

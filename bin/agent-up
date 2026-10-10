@@ -20,6 +20,7 @@ usage:
   agent-up config <project> [ARGS...]    print the rendered compose config (no secrets needed)
   agent-up shell <project>               zsh in the container as `agent`
   agent-up pair <project>                print a one-time T3 Code pairing link (valid 10 min)
+  agent-up rstudio <project>             print the RStudio Server address, user and password (RSTUDIO=1)
   agent-up status|stop|down <project>
 USAGE
   exit 2
@@ -29,6 +30,16 @@ conf_get(){ sed -n "s/^$2=//p" "$1" | tail -n 1; }   # $1 project.conf, $2 KEY
 next_t3_port(){ # lowest port >= 3773 not used by another project's config
   local p=3773 used
   used="$(cat "$CFG_ROOT"/*/project.conf 2>/dev/null | sed -n 's/^T3_PORT=//p' | sort -u)"
+  while grep -qx "$p" <<<"$used"; do p=$((p+1)); done
+  printf '%s' "$p"
+}
+
+all_ports(){ # every T3_PORT and RSTUDIO_PORT in every project's config, one per line
+  cat "$CFG_ROOT"/*/project.conf 2>/dev/null | sed -n 's/^\(T3_PORT\|RSTUDIO_PORT\)=//p' | sort -u
+}
+next_rstudio_port(){ # lowest port >= 8787 not used by any project's T3_PORT or RSTUDIO_PORT
+  local p=8787 used
+  used="$(all_ports)"
   while grep -qx "$p" <<<"$used"; do p=$((p+1)); done
   printf '%s' "$p"
 }
@@ -90,6 +101,10 @@ T3_CONNECT=0
 # (project-template/README.md "Research container").
 RESEARCH=0
 RESEARCH_DIR=$HOME/agent-research
+# RStudio Server in the browser: 0 = off, 1 = on (opt-in; project-template/README.md "RStudio Server").
+# Its host port (127.0.0.1 only), unique across all projects' T3_PORT and RSTUDIO_PORT.
+RSTUDIO=0
+RSTUDIO_PORT=$(next_rstudio_port)
 CONFEOF
   chmod 600 "$tmp/compose.yaml" "$tmp/project.env" "$tmp/allowlist" "$tmp/project.conf"
   chmod 700 "$tmp"
@@ -322,14 +337,48 @@ check_research_overlaps(){ # every research root (writable by the research conta
     done
   done
 }
+rstudio(){ # $1 config dir -> the RSTUDIO value as written; absent = 0 (configs that predate it)
+  local v; v="$(conf_get "$1/project.conf" RSTUDIO)"; printf '%s' "${v:-0}"
+}
+rstudio_on(){ # RSTUDIO=1 with a well-formed RSTUDIO_PORT. stop/down render with this and never refuse:
+  # an incomplete config renders RStudio off for them (up/config/rstudio refuse it instead).
+  # Builders only: the research container never runs RStudio (spec §13.3).
+  local port; port="$(conf_get "$1/project.conf" RSTUDIO_PORT)"
+  [ "$(profile "$1")" = builder ] && [ "$(rstudio "$1")" = 1 ] && [[ $port =~ ^[0-9]+$ ]] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ]
+}
+check_rstudio_port(){ # $1 config dir: a free port, used by no other T3_PORT/RSTUDIO_PORT (nor this T3_PORT)
+  local port other k; port="$(conf_get "$1/project.conf" RSTUDIO_PORT)"
+  [[ $port =~ ^[0-9]+$ ]] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] \
+    || die "RSTUDIO_PORT='$port' in $1/project.conf: set a free port 1024-65535, unique across projects (e.g. RSTUDIO_PORT=$(next_rstudio_port))"
+  [ "$(conf_get "$1/project.conf" T3_PORT)" != "$port" ] || die "RSTUDIO_PORT=$port in $1/project.conf equals its T3_PORT: pick another (free: $(next_rstudio_port))"
+  for other in "$CFG_ROOT"/*/project.conf; do
+    [ -f "$other" ] && [ "$other" != "$1/project.conf" ] || continue
+    for k in T3_PORT RSTUDIO_PORT; do
+      [ "$(conf_get "$other" "$k")" != "$port" ] \
+        || die "RSTUDIO_PORT=$port in $1/project.conf is also used by $(basename "$(dirname "$other")") ($k): pick another (free: $(next_rstudio_port))"
+    done
+  done
+}
+check_rstudio(){ # only up, config and rstudio: stop/down/status must work whatever the values
+  if [ "$(profile "$1")" = research ]; then
+    [ "$(rstudio "$1")" = 0 ] || die "RSTUDIO='$(rstudio "$1")' in $1/project.conf: RStudio Server is for builder projects only, not the research container"
+    return 0
+  fi
+  case "$(rstudio "$1")" in
+    0) ;;
+    1) check_rstudio_port "$1" ;;
+    *) die "RSTUDIO='$(rstudio "$1")' in $1/project.conf: must be 0 (off) or 1 (on)" ;;
+  esac
+}
 t3_host(){ printf '%s.localhost' "$(printf '%s' "$1" | tr '_' '-')"; } # per-project browser origin (cookies are per host, not per port)
+rstudio_host(){ printf 'rstudio-%s' "$(t3_host "$1")"; } # its own origin: not T3's, not another project's
 check_digest(){
   grep -Eq '^[[:space:]]*image:[[:space:]]*[^[:space:]]+@sha256:[0-9a-f]{64}[[:space:]]*$' "$1" \
     || die "$1: the image is not pinned to a real digest (@sha256:<64 hex>). Copy one from agent-containers/digests.md."
 }
 check_project_env(){ # op:// references only; never echo a line (it could hold a pasted secret)
   local bad reserved
-  reserved="$(grep -nE '^[[:space:]]*(PROJECT|PROJECT_DIR|PROFILE|IMAGE|SPADES_AI_DIR|AGENT_MEMORY_DIR|T3_PORT|T3_CONNECT|RESEARCH|PATH|HOME|COMPOSE|(COMPOSE|DOCKER|OP|TUNNEL|RESEARCH)_[A-Za-z0-9_]*)=' "$1" | sed 's/^\([0-9]*\):[[:space:]]*\([A-Za-z0-9_]*\)=.*/line \1: \2/' | paste -sd, - || true)"
+  reserved="$(grep -nE '^[[:space:]]*(PROJECT|PROJECT_DIR|PROFILE|IMAGE|SPADES_AI_DIR|AGENT_MEMORY_DIR|T3_PORT|T3_CONNECT|RESEARCH|RSTUDIO|PATH|HOME|COMPOSE|(COMPOSE|DOCKER|OP|TUNNEL|RESEARCH|RS|RSTUDIO)_[A-Za-z0-9_]*)=' "$1" | sed 's/^\([0-9]*\):[[:space:]]*\([A-Za-z0-9_]*\)=.*/line \1: \2/' | paste -sd, - || true)"
   [ -z "$reserved" ] || die "$1 uses reserved key name(s) that would override compose or the launcher ($reserved); rename them"
   bad="$(grep -nEv '^[[:space:]]*(#|$)' "$1" | grep -Ev '^[0-9]+:[A-Za-z_][A-Za-z0-9_]*=op://[^[:space:]]+$' | cut -d: -f1 | paste -sd, - || true)"
   [ -z "$bad" ] || die "$1 may hold only KEY=op://... references; offending line number(s): $bad (values not shown)"
@@ -456,11 +505,53 @@ write_research(){ # the research profile's switch + instructions + exchange; a b
     rm -f "$g/agent-instructions.md"
   fi
 }
+write_rstudio(){ # RSTUDIO=1 (rstudio_on): port, volume, read-only switch + password. Otherwise: nothing.
+  local out="$1/.generated/rstudio.yaml" flag="$1/.generated/rstudio" pw="$1/.generated/rstudio-password"
+  mkdir -p "$1/.generated"; chmod 700 "$1/.generated"
+  if rstudio_on "$1"; then
+    # One random password per project, kept across `up` (delete the file to rotate it). 128 bits.
+    if [ ! -e "$pw" ]; then
+      ( umask 077; od -An -tx1 -N16 /dev/urandom | tr -d ' \n' > "$pw.tmp" && mv "$pw.tmp" "$pw" ) \
+        || die "could not write $pw"
+    fi
+    chmod 600 "$pw"
+    [ "$(wc -l < "$pw")" -le 1 ] && [[ "$(cat "$pw")" =~ ^[[:graph:]]{16,}$ ]] \
+      || die "$pw must be one line of 16+ printable characters, no spaces (delete it to generate a new one)"
+  fi
+  {
+    echo "# GENERATED by agent-up from RSTUDIO in project.conf. Do not edit."
+    echo "services:"
+    if rstudio_on "$1"; then
+      echo "  agent:"
+      echo "    ports: [\"127.0.0.1:\${RSTUDIO_PORT:?set RSTUDIO_PORT in project.conf}:8787\"]   # the HOST's loopback only"
+      echo "    volumes:"
+      echo "      - rstudio:/home/agent/.local/share/rstudio   # RStudio state (open files, history, prefs, logs)"
+      echo "      - type: bind                  # read by the root firewall at start; the agent cannot change it"
+      echo "        source: ./.generated/rstudio"
+      echo "        target: /etc/firewall/rstudio"
+      echo "        read_only: true"
+      echo "        bind: {create_host_path: false}"
+      echo "      - type: bind                  # the sign-in password (rstudio-auth reads it); never an env var"
+      echo "        source: ./.generated/rstudio-password"
+      echo "        target: /run/secrets/rstudio-password"
+      echo "        read_only: true"
+      echo "        bind: {create_host_path: false}"
+      echo "volumes:"
+      echo "  rstudio:"
+      echo "    name: rstudio-\${PROJECT}"
+    else
+      echo "  agent: {}"
+    fi
+  } > "$out"
+  # Only an exact, validated 1 opens anything; any other value (stop/down do not validate) is off.
+  if rstudio_on "$1"; then echo "RSTUDIO=1" > "$flag"; else rm -f "$flag"; fi
+}
 compose_cmd(){ # sets COMPOSE for config dir $1
   COMPOSE=(docker compose --env-file "$1/project.conf" -f "$1/compose.yaml" -f "$1/.generated/env-passthrough.yaml"
-           -f "$1/.generated/t3-connect.yaml" -f "$1/.generated/research.yaml" --project-directory "$1" -p "$(basename "$1")")
+           -f "$1/.generated/t3-connect.yaml" -f "$1/.generated/research.yaml" -f "$1/.generated/rstudio.yaml"
+           --project-directory "$1" -p "$(basename "$1")")
 }
-prepare(){ check_files "$1"; write_passthrough "$1"; write_t3_connect "$1"; write_research "$1"; compose_cmd "$1"; }
+prepare(){ check_files "$1"; write_passthrough "$1"; write_t3_connect "$1"; write_research "$1"; write_rstudio "$1"; compose_cmd "$1"; }
 
 cmd_up(){
   [ $# -eq 1 ] || usage
@@ -469,6 +560,7 @@ cmd_up(){
   check_t3_port "$cfg"
   check_t3_connect "$cfg"
   check_research "$cfg"
+  check_rstudio "$cfg"
   check_digest "$cfg/compose.yaml"
   if [ "$(profile "$cfg")" = research ]; then check_research_env "$cfg"; else check_project_env "$cfg/project.env"; fi
   check_mounts "$cfg"
@@ -504,6 +596,9 @@ cmd_up(){
   if [ "$(t3_connect "$cfg")" = 1 ]; then
     echo "agent-up: T3 Connect is ON (first time: agent-up shell $name; t3 connect --headless; then agent-up up $name)"
   fi
+  if [ "$(rstudio "$cfg")" = 1 ]; then
+    echo "agent-up: RStudio Server at http://$(rstudio_host "$name"):$(conf_get "$cfg/project.conf" RSTUDIO_PORT) (user and password: agent-up rstudio $name)"
+  fi
 }
 cmd_config(){
   [ $# -ge 1 ] || usage
@@ -512,6 +607,7 @@ cmd_config(){
   if [ "$(profile "$cfg")" = research ]; then check_research_env "$cfg"; else check_project_env "$cfg/project.env"; fi
   check_t3_connect "$cfg"
   check_research "$cfg"
+  check_rstudio "$cfg"
   prepare "$cfg"
   # Never print the owner's ambient value of a passthrough key: it is only meaningful under `op run`.
   local k
@@ -537,6 +633,22 @@ cmd_pair(){
   echo "  http://$(t3_host "$name"):$port/pair#$tok"
   echo "Its own browser origin keeps this project's T3 session apart from other projects'."
   echo "If your browser cannot open it, use: http://localhost:$port/pair#$tok"
+}
+cmd_rstudio(){
+  [ $# -eq 1 ] || usage
+  local cfg name port pw; cfg="$(cfg_dir "$1")"; name="$(basename "$cfg")"
+  check_files "$cfg"
+  check_rstudio "$cfg"
+  [ "$(rstudio "$cfg")" = 1 ] || die "RStudio Server is off for '$name': set RSTUDIO=1 in $cfg/project.conf, then agent-up up $name"
+  pw="$cfg/.generated/rstudio-password"
+  [ -s "$pw" ] || die "no password yet for '$name': run agent-up up $name first"
+  port="$(conf_get "$cfg/project.conf" RSTUDIO_PORT)"
+  echo "RStudio Server for '$name':"
+  echo "  http://$(rstudio_host "$name"):$port"
+  echo "  user:     agent"
+  echo "  password: $(cat "$pw")"
+  echo "Its own browser origin keeps this project's RStudio sign-in apart from other projects' (and from T3)."
+  echo "If your browser cannot open it, use: http://localhost:$port"
 }
 cmd_compose(){ # $1 compose subcommand, $2 project
   local sub="$1"; shift
@@ -571,7 +683,8 @@ cmd_status(){
 # Only the owner's config defines the sandbox: ambient compose settings and interpolation variables
 # must not override it (a shell variable beats --env-file in compose).
 unset COMPOSE_FILE COMPOSE_PROFILES COMPOSE_PATH_SEPARATOR COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES \
-      PROJECT PROJECT_DIR PROFILE IMAGE SPADES_AI_DIR AGENT_MEMORY_DIR T3_PORT T3_CONNECT RESEARCH RESEARCH_DIR
+      PROJECT PROJECT_DIR PROFILE IMAGE SPADES_AI_DIR AGENT_MEMORY_DIR T3_PORT T3_CONNECT RESEARCH RESEARCH_DIR \
+      RSTUDIO RSTUDIO_PORT
 
 [ $# -ge 1 ] || usage
 cmd="$1"; shift
@@ -581,6 +694,7 @@ case "$cmd" in
   config) cmd_config "$@" ;;
   shell)  cmd_shell "$@" ;;
   pair)   cmd_pair "$@" ;;
+  rstudio) cmd_rstudio "$@" ;;
   status) cmd_status "$@" ;;
   stop)   cmd_compose stop "$@" ;;
   down)   cmd_compose down "$@" ;;
