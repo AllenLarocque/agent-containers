@@ -107,6 +107,9 @@ jobs:
           # so a block inside the container is the firewall (not a dead port).
           SSH_PROBE_IP=$(getent ahostsv4 gitlab.com | awk 'NR==1{print $1}')
           timeout 8 bash -c "</dev/tcp/$SSH_PROBE_IP/22" && echo "runner reaches $SSH_PROBE_IP:22"
+          # T3 Connect OFF (no switch mounted): a Cloudflare tunnel edge that really listens on 7844.
+          EDGE_IP=$(getent ahostsv4 region1.v2.argotunnel.com | awk 'NR==1{print $1}')
+          timeout 8 bash -c "</dev/tcp/$EDGE_IP/7844" && echo "runner reaches $EDGE_IP:7844"
           docker run -d --name fw --cap-add NET_ADMIN --cap-add NET_RAW \
             -v /tmp/40-extra.txt:/etc/firewall/allowlist.d/40-extra.txt:ro \
             -v /tmp/50-project.txt:/etc/firewall/allowlist.d/50-project.txt:ro \
@@ -116,6 +119,7 @@ jobs:
           rc=0   # run both suites, fail at the end
           docker exec -u root -e EXPECT_UPSTREAM="$UP" fw bash /tests/firewall/test-firewall.sh || rc=1
           docker exec -u agent -e EXPECT_UPSTREAM="$UP" -e SSH_PROBE_IP="$SSH_PROBE_IP" fw bash /tests/firewall/test-agent-egress.sh || rc=1
+          docker exec -u agent -e MODE=off -e EDGE_IP="$EDGE_IP" -e ANNOTATE=1 fw bash /tests/firewall/test-t3-connect.sh || rc=1
           docker rm -f fw
           exit $rc
       - name: Firewall on a compose-like network (Docker DNS 127.0.0.11) + idempotent re-run
@@ -139,6 +143,34 @@ jobs:
           docker exec -u agent -e EXPECT_UPSTREAM="$UP" -e REQUIRE_DOCKER_DNS=1 fwn bash /tests/firewall/test-agent-egress.sh || rc=1
           docker rm -f fwn
           docker network rm fwnet
+          exit $rc
+      - name: Firewall with T3 Connect ON (compose-like network, idempotent re-run, real cloudflared)
+        if: always()
+        run: |
+          # The owner's switch, mounted read-only exactly as agent-up's generated overlay does.
+          printf 'T3_CONNECT=1\n' > /tmp/t3-connect
+          printf 'www.python.org' > /tmp/40-extra.txt
+          EDGE_IP=$(getent ahostsv4 region1.v2.argotunnel.com | awk 'NR==1{print $1}')
+          timeout 8 bash -c "</dev/tcp/$EDGE_IP/7844" && echo "runner reaches $EDGE_IP:7844"
+          docker network create t3net
+          docker run -d --name fwt3 --network t3net --cap-add NET_ADMIN --cap-add NET_RAW \
+            -v /tmp/t3-connect:/etc/firewall/t3-connect:ro \
+            -v /tmp/40-extra.txt:/etc/firewall/allowlist.d/40-extra.txt:ro \
+            -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
+          UP=$(docker exec fwt3 awk '/^nameserver/{print $2; exit}' /etc/resolv.conf); echo "original resolver: $UP"
+          docker exec fwt3 sudo /usr/local/bin/init-firewall.sh
+          docker exec fwt3 sudo /usr/local/bin/init-firewall.sh
+          rc=0   # run every suite, fail at the end; FAIL lines become annotations (logs are not readable remotely)
+          run(){ "$@" 2>&1 | tee -a /tmp/t3.log; return "${PIPESTATUS[0]}"; }
+          run docker exec -u root -e EXPECT_UPSTREAM="$UP" -e EXPECT_T3_CONNECT=1 fwt3 bash /tests/firewall/test-firewall.sh || rc=1
+          run docker exec -u agent -e EXPECT_UPSTREAM="$UP" -e REQUIRE_DOCKER_DNS=1 fwt3 bash /tests/firewall/test-agent-egress.sh || rc=1
+          run docker exec -u agent -e MODE=on -e EDGE_IP="$EDGE_IP" fwt3 bash /tests/firewall/test-t3-connect.sh || rc=1
+          if [ "$rc" -ne 0 ]; then
+            msg=$(grep -E '^(FAIL|        )' /tmp/t3.log | head -n 40 | sed 's/%/%25/g; s/\r//g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=T3 Connect ON firewall tests::$msg"
+          fi
+          docker rm -f fwt3
+          docker network rm t3net
           exit $rc
       - name: Firewall rejects invalid allowlist entry without touching iptables
         run: |

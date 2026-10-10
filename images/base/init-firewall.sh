@@ -15,7 +15,8 @@
 #      for the meta fetch. The temporary rules are removed after the fetch, and by an EXIT trap on
 #      any failure.
 #   3. Therefore ANY failure under set -e leaves the container closed. The final rules only ADD the
-#      T3 INPUT accept (gateway only), the ipset ACCEPT and the closing REJECT.
+#      T3 INPUT accept (gateway only), the ipset ACCEPT, the T3 Connect tunnel ACCEPTs (only when the
+#      owner enabled it) and the closing REJECT.
 #
 # CONFINEMENT (owner decision 2026-10-04):
 #   - No port-based bypasses: TCP 22 is allowed only to allowlisted hosts (ipset rule, ports
@@ -29,6 +30,12 @@
 #     Docker host; compose publishes it on the host's 127.0.0.1). VS Code attaches via `docker exec`.
 #   - Re-runnable (the agent may `sudo` it): the ORIGINAL resolver is persisted in /run/firewall-upstream
 #     on first run, because afterwards /etc/resolv.conf points at dnsmasq (127.0.0.1).
+#
+# T3 CONNECT (owner opt-in per project, decision 2026-10-09, spec §13.1): when /etc/firewall/t3-connect
+# says T3_CONNECT=1, t3.codes joins the allowlist (relay + login, ports 22/80/443 like any entry) and
+# argotunnel.com resolves too, but its addresses go into a SEPARATE ipset (t3-tunnel) that is open on
+# port 7844 ONLY (cloudflared: QUIC/UDP, HTTP2/TCP fallback). 7844 is never open to any other host.
+# Absent file (or T3_CONNECT=0): the rules are exactly the ones without the feature.
 
 # IPv6 is "unavailable" only if the kernel genuinely has no usable IPv6 to leak.
 # $1 = ip6tables error text; $2 = if_inet6 path (default /proc/net/if_inet6; a parameter for the unit test).
@@ -55,6 +62,22 @@ DNSMASQ_CONF=/etc/dnsmasq.d/allowlist.conf
 
 # ===================== 0. READ-ONLY PHASE (nothing below changes any state) =====================
 
+# T3 Connect switch. agent-up mounts it READ-ONLY from the owner's config dir (.generated/t3-connect,
+# from T3_CONNECT in project.conf); /etc/firewall is root-owned, so the agent can neither edit nor
+# create it. Deliberately NOT an environment variable: sudo resets the environment, and the agent
+# controls its own. Anything but the two exact values aborts here, before any change.
+T3_CONNECT_FILE=/etc/firewall/t3-connect
+T3_CONNECT=0
+if [ -e "$T3_CONNECT_FILE" ]; then
+  case "$(cat "$T3_CONNECT_FILE" 2>/dev/null)" in
+    T3_CONNECT=0) ;;
+    T3_CONNECT=1) T3_CONNECT=1 ;;
+    *) echo "ERROR: $T3_CONNECT_FILE must hold exactly T3_CONNECT=0 or T3_CONNECT=1"; exit 1 ;;
+  esac
+fi
+TUNNEL_DOMAIN=argotunnel.com   # cloudflared's edge: SRV _v2-origintunneld._tcp.argotunnel.com -> region*.v2.argotunnel.com
+TUNNEL_PORT=7844
+
 # Parse every file line by line (never `cat` them together: a file without a trailing newline
 # would glue its last line to the next file's first). Validate EVERY token here, before any
 # change, so a bad entry aborts with the existing rules untouched (never fail open).
@@ -79,8 +102,20 @@ done
 if [ "${#RAW_DOMAINS[@]}" -eq 0 ]; then
   echo "ERROR: no domains found in $ALLOWLIST_DIR/*.txt"; exit 1
 fi
+if [ "$T3_CONNECT" = 1 ]; then
+  RAW_DOMAINS+=(t3.codes)   # app./relay./clerk.t3.codes (the relay's OTLP trace host is NOT added)
+fi
 mapfile -t ALLOWED_DOMAINS < <(printf '%s\n' "${RAW_DOMAINS[@]}" | tr 'A-Z' 'a-z' | sort -u)
 echo "Allowlist: ${#ALLOWED_DOMAINS[@]} domains from $(printf '%s ' "${ALLOWLIST_FILES[@]##*/}")"
+TUNNEL_LISTED=0   # the owner also allowlisted argotunnel.com itself: one ipset= line names both sets
+for d in "${ALLOWED_DOMAINS[@]}"; do
+  if [ "$d" = "$TUNNEL_DOMAIN" ]; then TUNNEL_LISTED=1; fi
+done
+if [ "$T3_CONNECT" = 1 ]; then
+  echo "T3 Connect: ON (t3.codes allowlisted; $TUNNEL_DOMAIN on port $TUNNEL_PORT only)"
+else
+  echo "T3 Connect: off"
+fi
 
 # The ORIGINAL upstream resolver. First run: /etc/resolv.conf (in Docker: 127.0.0.11 on user-defined
 # networks, the host's resolver on the default bridge). Re-run: resolv.conf already points at our own
@@ -180,6 +215,7 @@ conntrack -F >/dev/null
 pkill -x dnsmasq 2>/dev/null || true
 for _ in $(seq 1 50); do pgrep -x dnsmasq >/dev/null || break; sleep 0.1; done
 ipset destroy allowed-domains 2>/dev/null || true
+ipset destroy t3-tunnel 2>/dev/null || true
 
 [ "$PERSIST_UPSTREAM" = 1 ] && { umask 022; echo "$UPSTREAM_DNS" > "$UPSTREAM_FILE"; }
 
@@ -220,6 +256,9 @@ done
 echo "Temporary setup rules: HTTPS to api.github.com at $(printf '%s ' "${SETUP_GH_IPS[@]}")"
 
 ipset create allowed-domains hash:net
+if [ "$T3_CONNECT" = 1 ]; then
+  ipset create t3-tunnel hash:net   # argotunnel.com's addresses ONLY (filled by dnsmasq)
+fi
 
 echo "Fetching GitHub IP ranges..."
 # --resolve pins curl to exactly the IPs allowed above.
@@ -272,7 +311,20 @@ mkdir -p /etc/dnsmasq.d
   echo "bind-interfaces"
   # One line per domain: a single joined ipset= line overflows dnsmasq's config line limit.
   for d in "${ALLOWED_DOMAINS[@]}"; do echo "server=/$d/$UPSTREAM_DNS"; done
-  for d in "${ALLOWED_DOMAINS[@]}"; do echo "ipset=/$d/allowed-domains"; done
+  for d in "${ALLOWED_DOMAINS[@]}"; do
+    if [ "$T3_CONNECT" = 1 ] && [ "$d" = "$TUNNEL_DOMAIN" ]; then
+      echo "ipset=/$d/allowed-domains,t3-tunnel"
+    else
+      echo "ipset=/$d/allowed-domains"
+    fi
+  done
+  # T3 Connect: argotunnel.com resolves (all record types, so cloudflared's SRV lookup works), and its
+  # addresses land in t3-tunnel ONLY. dnsmasq adds the A records of each lookup of a name under it,
+  # i.e. cloudflared's own lookups of the SRV targets.
+  if [ "$T3_CONNECT" = 1 ] && [ "$TUNNEL_LISTED" = 0 ]; then
+    echo "server=/$TUNNEL_DOMAIN/$UPSTREAM_DNS"
+    echo "ipset=/$TUNNEL_DOMAIN/t3-tunnel"
+  fi
 } > "$DNSMASQ_CONF.tmp"
 chmod 0644 "$DNSMASQ_CONF.tmp"
 mv "$DNSMASQ_CONF.tmp" "$DNSMASQ_CONF"
@@ -285,11 +337,22 @@ echo "nameserver 127.0.0.1" > /etc/resolv.conf
 for domain in "${ALLOWED_DOMAINS[@]}"; do
   dig -r +short "$domain" @127.0.0.1 >/dev/null 2>&1 || true
 done
+if [ "$T3_CONNECT" = 1 ]; then   # the edge targets cloudflared will pick (it looks them up itself anyway)
+  for t in $(dig -r +short +time=3 +tries=2 SRV "_v2-origintunneld._tcp.$TUNNEL_DOMAIN" @127.0.0.1 2>/dev/null | awk '{print $4}' || true); do
+    dig -r +short "$t" @127.0.0.1 >/dev/null 2>&1 || true
+  done
+fi
 
 # T3 Code server: inbound from the host side (gateway) only; replies leave via ESTABLISHED.
 iptables -A INPUT -s "$GATEWAY_IP" -p tcp --dport "$T3_PORT" -j ACCEPT
 # Only allowlisted destinations, only on SSH/HTTP/HTTPS.
 iptables -A OUTPUT -p tcp -m set --match-set allowed-domains dst -m multiport --dports 22,80,443 -j ACCEPT
+# T3 Connect only: cloudflared to Cloudflare's tunnel edge, port 7844 (QUIC/UDP, HTTP2/TCP), and
+# only to the t3-tunnel set: no other allowlisted host gets 7844, and argotunnel gets nothing else.
+if [ "$T3_CONNECT" = 1 ]; then
+  iptables -A OUTPUT -p udp --dport "$TUNNEL_PORT" -m set --match-set t3-tunnel dst -j ACCEPT
+  iptables -A OUTPUT -p tcp --dport "$TUNNEL_PORT" -m set --match-set t3-tunnel dst -j ACCEPT
+fi
 # Explicitly REJECT all other outbound traffic for immediate feedback.
 iptables -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
 
@@ -302,6 +365,13 @@ for ch in INPUT FORWARD OUTPUT; do
 done
 if iptables -S OUTPUT | grep -q -- '--dport 443 -j ACCEPT'; then
   echo "ERROR: Firewall verification failed - a temporary setup rule (--dport 443 -j ACCEPT) is still present"; exit 1
+fi
+n_tunnel=$(iptables -S OUTPUT | grep -c -- "--dport $TUNNEL_PORT -m set --match-set t3-tunnel dst -j ACCEPT" || true)
+if [ "$T3_CONNECT" = 1 ] && [ "$n_tunnel" != 2 ]; then
+  echo "ERROR: Firewall verification failed - T3 Connect is on but the $TUNNEL_PORT rules are missing ($n_tunnel of 2)"; exit 1
+fi
+if [ "$T3_CONNECT" = 0 ] && iptables -S OUTPUT | grep -q -- "--dport $TUNNEL_PORT"; then
+  echo "ERROR: Firewall verification failed - T3 Connect is off but a $TUNNEL_PORT rule is present"; exit 1
 fi
 if curl -q --connect-timeout 5 https://1.1.1.1/ >/dev/null 2>&1; then
   echo "ERROR: Firewall verification failed - was able to reach https://1.1.1.1 (literal IP)"; exit 1
@@ -329,6 +399,14 @@ if ! curl -q --connect-timeout 5 https://api.github.com/zen >/dev/null 2>&1; the
   echo "ERROR: Firewall verification failed - unable to reach https://api.github.com"; exit 1
 fi
 echo "Firewall verification passed - able to reach https://api.github.com as expected"
+
+if [ "$T3_CONNECT" = 1 ]; then   # soft, like CRAN below: T3 Connect being down must not brick the start
+  if [ -n "$(dig -r +short +time=3 +tries=2 SRV "_v2-origintunneld._tcp.$TUNNEL_DOMAIN" @127.0.0.1 2>/dev/null)" ]; then
+    echo "Firewall verification passed - T3 Connect tunnel edge discoverable (SRV via dnsmasq)"
+  else
+    echo "WARNING: T3 Connect is on but the tunnel edge SRV record did not resolve right now"
+  fi
+fi
 
 # Soft check: a transient CRAN outage should not brick container startup, but a broken
 # dynamic allowlist should be visible in the log.

@@ -62,6 +62,9 @@ for f in /etc/firewall/allowlist.d/*.txt; do
   ( : >> "$f" ) 2>/dev/null && bad "agent can write $f" || ok "agent cannot write $f"
 done
 ( : > /etc/firewall/allowlist.d/99-agent.txt ) 2>/dev/null && bad "agent can add a file to /etc/firewall/allowlist.d" || ok "agent cannot add allowlist files"
+# The T3 Connect switch: absent (off) the agent cannot create it; mounted (on) it cannot change it.
+( : >> /etc/firewall/t3-connect ) 2>/dev/null && bad "agent can create or write /etc/firewall/t3-connect" || ok "agent cannot create or write the T3 Connect switch"
+( : > /etc/firewall/agent-probe ) 2>/dev/null && bad "agent can create files in /etc/firewall" || ok "agent cannot create files in /etc/firewall"
 ( : >> /etc/dnsmasq.d/allowlist.conf ) 2>/dev/null && bad "agent can write the dnsmasq config" || ok "agent cannot write the dnsmasq config"
 ( : >> /run/firewall-upstream ) 2>/dev/null && bad "agent can write /run/firewall-upstream" || ok "agent cannot write /run/firewall-upstream"
 ( : >> /etc/resolv.conf ) 2>/dev/null && bad "agent can write /etc/resolv.conf" || ok "agent cannot write /etc/resolv.conf"
