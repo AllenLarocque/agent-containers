@@ -261,7 +261,7 @@ from the project folder.
 |---|---|
 | `agent-up init <project-dir> [--image gis] [--profile builder]` | creates `~/.config/agent-containers/<project>/` from the seeds; prints the remaining steps (vault, digest) |
 | `agent-up init --profile research` | creates `~/.config/agent-containers/research/` (compose + `project.conf` only: no secrets) and `~/agent-research/` (§2.1) |
-| `agent-up up <project>` | checks the image digest, mounts and `project.env`, then `op run --env-file <cfg>/project.env -- docker compose --env-file <cfg>/project.conf -f <cfg>/compose.yaml -f <cfg>/.generated/env-passthrough.yaml -f <cfg>/.generated/t3-connect.yaml -f <cfg>/.generated/research.yaml -f <cfg>/.generated/rstudio.yaml --project-directory <cfg> -p <project> up -d --force-recreate` (generated overlays: the `project.env` key names only, never values; and the T3 Connect switch, empty unless `T3_CONNECT=1`, §13.1; the research mounts, §2.1; RStudio Server, empty unless `RSTUDIO=1`, §13.3) |
+| `agent-up up <project>` | checks the image digest, mounts and `project.env`, then `op run --env-file <cfg>/project.env -- docker compose --env-file <cfg>/project.conf -f <cfg>/compose.yaml -f <cfg>/.generated/env-passthrough.yaml -f <cfg>/.generated/t3-connect.yaml -f <cfg>/.generated/research.yaml -f <cfg>/.generated/rstudio.yaml -f <cfg>/.generated/hostname.yaml --project-directory <cfg> -p <project> up -d --force-recreate` (generated overlays: the `project.env` key names only, never values; and the T3 Connect switch, empty unless `T3_CONNECT=1`, §13.1; the research mounts, §2.1; RStudio Server, empty unless `RSTUDIO=1`, §13.3; the hostname, §13.1) |
 | `agent-up config <project>` | prints the rendered compose config; no secrets needed |
 | `agent-up shell <project>` | `docker exec -it -u agent <project>-agent-1 zsh` |
 | `agent-up status \| stop \| down <project>` | compose wrappers |
@@ -503,6 +503,10 @@ Client: the browser first; the desktop app later (its local/WSL environments sta
 
 **Fit:** T3 keeps execution where the workspace is. Its server ("environment") owns the agent
 processes, git and files, and clients only display and steer over authenticated RPC. So:
+- *(2026-10-09)* the container's **hostname is the project name** (`_` → `-`; generated overlay
+  `.generated/hostname.yaml`, always): T3 labels an environment by `/etc/machine-info`
+  PRETTY_HOSTNAME → hostnamectl → hostname, which was the random container ID. Nothing in the
+  firewall or the entrypoint reads the hostname.
 - **one container = one T3 environment.** `t3` runs *inside* each builder container, behind the
   firewall, using that container's Claude login;
 - **the T3 desktop app on Windows is only a client**, showing every project in one sidebar;

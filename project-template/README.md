@@ -43,6 +43,10 @@ Each container runs a T3 Code server (`t3 serve`, pinned in the image, telemetry
   localhost). Each project gets its own origin, `http://<project>.localhost:<T3_PORT>` (underscores
   become hyphens), so browser sessions of different projects stay apart. The pairing persists in
   the `t3-<project>` volume.
+- T3 names the environment after the container's hostname, which `agent-up` sets to the project
+  name (underscores become hyphens; e.g. `spades-bioinformatics`) instead of a random container ID.
+  An existing environment shows the new name only after `agent-up up <project>`; the apps may need
+  a refresh (phone app: T3 Connect sign-out and sign-in).
 - T3 drives the container's own Claude Code (your login, behind the firewall). Don't enable the
   desktop app's local environment or WSL integration: those run agents on the host, outside any sandbox.
 

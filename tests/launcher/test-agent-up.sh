@@ -210,7 +210,7 @@ AMBIENT=(COMPOSE_FILE=evil.yaml COMPOSE_PROFILES=evil PROJECT_DIR=/evil SPADES_A
 rc=0; out=$(au up "$NAME" 2>&1) || rc=$?
 AMBIENT=()
 check "up succeeds (stub op + stub docker)" test "$rc" -eq 0
-C="compose --env-file $CFG/project.conf -f $CFG/compose.yaml -f $CFG/.generated/env-passthrough.yaml -f $CFG/.generated/t3-connect.yaml -f $CFG/.generated/research.yaml -f $CFG/.generated/rstudio.yaml --project-directory $CFG -p $NAME"
+C="compose --env-file $CFG/project.conf -f $CFG/compose.yaml -f $CFG/.generated/env-passthrough.yaml -f $CFG/.generated/t3-connect.yaml -f $CFG/.generated/research.yaml -f $CFG/.generated/rstudio.yaml -f $CFG/.generated/hostname.yaml --project-directory $CFG -p $NAME"
 check "  ...op run resolves project.env, then runs docker compose" \
   grep -qxF "OP: run --env-file $CFG/project.env -- docker $C up -d --force-recreate" "$OPLOG"
 check "  ...docker compose gets ONLY the config dir's files" grep -qxF "ARGS: $C up -d --force-recreate" "$DLOG"
@@ -225,6 +225,8 @@ check "  ...and holds no value or reference" bash -c '! grep -Eq "fake-secret|op
 T3O="$CFG/.generated/t3-connect.yaml"
 check "T3_CONNECT=0: the T3 Connect overlay adds nothing" bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent: {}")" ]' _ "$T3O"
 check "  ...and no firewall switch file exists" test ! -e "$CFG/.generated/t3-connect"
+check "the container gets a readable hostname (T3's environment name): the project name" \
+  bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent:\n    hostname: demo-proj")" ]' _ "$CFG/.generated/hostname.yaml"
 RO="$CFG/.generated/research.yaml"
 check "RESEARCH=0: the research overlay adds nothing" bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent: {}")" ]' _ "$RO"
 check "  ...no profile switch, no instructions file" bash -c '[ ! -e "$1/profile" ] && [ ! -e "$1/agent-instructions.md" ]' _ "$CFG/.generated"
@@ -418,6 +420,9 @@ au config my_proj >/dev/null 2>&1
 # six projects so far hold RSTUDIO_PORT 8787-8792
 check "init of my_proj: the next RSTUDIO_PORT free across all projects (8793)" grep -qx "RSTUDIO_PORT=8793" "$CFGROOT/my_proj/project.conf"
 rsout="$(au rstudio my_proj 2>&1)" || true
+check "my_proj: hostname my-proj (underscore -> hyphen)" grep -qx "    hostname: my-proj" "$CFGROOT/my_proj/.generated/hostname.yaml"
+au config odd-name- >/dev/null 2>&1 || true
+check "odd-name-: hostname odd-name (no trailing hyphen)" grep -qx "    hostname: odd-name" "$CFGROOT/odd-name-/.generated/hostname.yaml"
 check "agent-up rstudio my_proj: origin rstudio-my-proj.localhost (underscore -> hyphen)" grep -qxF "  http://rstudio-my-proj.localhost:8793" <<<"$rsout"
 rm -rf "$CFGROOT/my_proj"
 cp "$T/pconf-rs.bak" "$CFG/project.conf"
@@ -439,7 +444,7 @@ check "  ...created the research exchange root" test -d "$RD"
 refuses "init --profile research never overwrites" 'already exists' au init --profile research
 refuses "up research refuses the placeholder digest" 'not pinned to a real digest' au up research
 sed -i "s/REPLACE_WITH_DIGEST_FROM_digests.md/$H64/" "$RCFG/compose.yaml"
-RC="compose --env-file $RCFG/project.conf -f $RCFG/compose.yaml -f $RCFG/.generated/env-passthrough.yaml -f $RCFG/.generated/t3-connect.yaml -f $RCFG/.generated/research.yaml -f $RCFG/.generated/rstudio.yaml --project-directory $RCFG -p research"
+RC="compose --env-file $RCFG/project.conf -f $RCFG/compose.yaml -f $RCFG/.generated/env-passthrough.yaml -f $RCFG/.generated/t3-connect.yaml -f $RCFG/.generated/research.yaml -f $RCFG/.generated/rstudio.yaml -f $RCFG/.generated/hostname.yaml --project-directory $RCFG -p research"
 : > "$DLOG"; rm -f "$OPLOG"; TOK=""
 AMBIENT=(OP_SERVICE_ACCOUNT_TOKEN=owner-op-token GH_TOKEN=owner-gh-token)
 rc=0; out=$(au up research 2>&1) || rc=$?
@@ -587,6 +592,8 @@ if docker compose version >/dev/null 2>&1; then
     bash -c '[ "$(jq -r ".volumes.t3.name" <<<"$1")" = "t3-$2" ] && jq -e ".services.agent.volumes[] | select(.target==\"/home/agent/.t3\")" <<<"$1" >/dev/null' _ "$J" "$NAME"
   check "rendered: codex-$NAME volume at /home/agent/.codex (the Codex login survives rebuilds)" \
     bash -c '[ "$(jq -r ".volumes[\"codex-config\"].name" <<<"$1")" = "codex-$2" ] && jq -e ".services.agent.volumes[] | select(.target==\"/home/agent/.codex\" and .source==\"codex-config\")" <<<"$1" >/dev/null' _ "$J" "$NAME"
+  check "rendered: hostname is the project name (T3 shows it as the environment)" \
+    test "$(jq -r .services.agent.hostname <<<"$J")" = "$NAME"
   check "rendered: command is the image entrypoint (firewall first)" \
     jq -e '.services.agent.command == ["/usr/local/bin/agent-entrypoint"]' <<<"$J"
   check "rendered: no env_file (secrets only via op run)" test -z "$(jq -r '.services.agent.env_file // empty' <<<"$J")"
@@ -663,7 +670,7 @@ if docker compose version >/dev/null 2>&1; then
   # RStudio OFF must render exactly what the launcher rendered before RStudio existed (no overlay).
   JPRE="$(cd "$T" && env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u T3_PORT -u T3_CONNECT HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" \
           docker compose --env-file "$CFG/project.conf" -f "$CFG/compose.yaml" -f "$CFG/.generated/env-passthrough.yaml" \
-          -f "$CFG/.generated/t3-connect.yaml" --project-directory "$CFG" -p "$NAME" config --format json)"
+          -f "$CFG/.generated/t3-connect.yaml" -f "$CFG/.generated/research.yaml" -f "$CFG/.generated/hostname.yaml" --project-directory "$CFG" -p "$NAME" config --format json)"
   check "rendered (RSTUDIO=0): identical to the config rendered without the RStudio overlay" \
     bash -c 'diff <(jq -S . <<<"$1") <(jq -S . <<<"$2")' _ "$JPRE" "$J"
   check "rendered (RSTUDIO=0): no rstudio volume, no 8787" \
@@ -730,13 +737,13 @@ services:
 OVR
   dc(){ env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u COMPOSE_FILE HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" GH_TOKEN=dummy-in-container \
           docker compose --env-file "$CFG/project.conf" -f "$CFG/compose.yaml" -f "$CFG/.generated/env-passthrough.yaml" \
-          -f "$CFG/.generated/t3-connect.yaml" -f "$CFG/.generated/research.yaml" -f "$CFG/.generated/rstudio.yaml" -f "$T/override.yaml" --project-directory "$CFG" -p "$NAME" "$@"; }
+          -f "$CFG/.generated/t3-connect.yaml" -f "$CFG/.generated/research.yaml" -f "$CFG/.generated/rstudio.yaml" -f "$CFG/.generated/hostname.yaml" -f "$T/override.yaml" --project-directory "$CFG" -p "$NAME" "$@"; }
   # The research container: agent-up's exact arguments, with the owner's ambient secrets in compose's
   # environment (they must NOT reach the container).
   rdc(){ env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u COMPOSE_FILE HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" \
           GH_TOKEN=ambient-gh OP_SERVICE_ACCOUNT_TOKEN=ambient-op \
           docker compose --env-file "$RCFG/project.conf" -f "$RCFG/compose.yaml" -f "$RCFG/.generated/env-passthrough.yaml" \
-          -f "$RCFG/.generated/t3-connect.yaml" -f "$RCFG/.generated/research.yaml" -f "$RCFG/.generated/rstudio.yaml" -f "$T/override.yaml" --project-directory "$RCFG" -p research "$@"; }
+          -f "$RCFG/.generated/t3-connect.yaml" -f "$RCFG/.generated/research.yaml" -f "$RCFG/.generated/rstudio.yaml" -f "$RCFG/.generated/hostname.yaml" -f "$T/override.yaml" --project-directory "$RCFG" -p research "$@"; }
   trap 'dc down -v >/dev/null 2>&1 || true; rdc down -v >/dev/null 2>&1 || true; rm -rf "$T"' EXIT
   for v in require-cache-shared npm-cache-shared; do
     docker volume inspect "$v" >/dev/null 2>&1 || docker volume create "$v" >/dev/null
@@ -814,6 +821,7 @@ OVR
     check "  ...reachable from the host at 127.0.0.1:<T3_PORT>" curl -fsS -o /dev/null --max-time 5 "http://127.0.0.1:$T3P/"
     check "  ...also under the per-project origin <project>.localhost" \
       curl -fsS -o /dev/null --max-time 5 -H "Host: $NAME.localhost:$T3P" "http://127.0.0.1:$T3P/"
+    check "the container's hostname is the project name" test "$(docker exec "$CID" hostname)" = "$NAME"
     check "  ...agent-t3 start is idempotent" bash -c 'docker exec -u agent "$1" agent-t3 start | grep -q "already running"' _ "$CID"
     check "  ...NOT reachable from a sibling container on the same network (firewall: gateway only)" \
       bash -c 'net=$(docker inspect -f "{{range \$k,\$v := .NetworkSettings.Networks}}{{\$k}}{{end}}" "$1"); ip=$(docker inspect -f "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}" "$1"); [ -n "$net" ] && [ -n "$ip" ] || exit 1; rc=0; docker run --rm --network "$net" "$2" curl -sS -o /dev/null --max-time 5 "http://$ip:3773/" || rc=$?; echo "curl rc=$rc (28 = timed out: dropped by the firewall)"; [ "$rc" -eq 28 ]' _ "$CID" "$TEMPLATE_IMAGE"
