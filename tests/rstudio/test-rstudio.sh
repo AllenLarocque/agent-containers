@@ -78,13 +78,13 @@ rm -f /tmp/rprofile-marker
 r=$(code -b "$W/jar" "$U/"); [[ $r == 200* ]] && ok "signed in: / serves the IDE (HTTP 200)" || bad "signed in: / gives $r"
 t0=$(date +%s.%N)
 r=$(CT=90 code -b "$W/jar" -c "$W/jar" -H "X-RS-CSRF-Token: $csrf" -H 'Content-Type: application/json' \
-  --data '{"method":"client_init","params":[],"clientId":"agent-containers-test","clientVersion":""}' "$U/rpc/client_init")
+  --data '{"method":"client_init","params":["/"],"clientId":"agent-containers-test","clientVersion":""}' "$U/rpc/client_init")
 echo "        POST /rpc/client_init: $r"
 for _ in $(seq 1 90); do [ -s /tmp/rprofile-marker ] && break; sleep 1; done
 t1=$(date +%s.%N)
 if [ -s /tmp/rprofile-marker ]; then
   ok "the R session sourced /workspace/.Rprofile"
-  metric "first R session (GET / until .Rprofile ran): $(awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.1f", b-a}') s"
+  metric "first R session (client_init until .Rprofile ran): $(awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.1f", b-a}') s"
   sed 's/^/        /' /tmp/rprofile-marker
   m(){ sed -n "s/^$1 //p" /tmp/rprofile-marker; }
   [ "$(m wd)" = /workspace ] && ok "R starts in /workspace" || bad "R working dir: $(m wd)"
@@ -101,7 +101,10 @@ fi
 rsess=$(pgrep -x rsession | head -n 1)
 if [ -n "$rsess" ]; then
   [ "$(ps -o user= -p "$rsess")" = agent ] && ok "rsession runs as agent" || bad "rsession user: $(ps -o user= -p "$rsess")"
-  tr '\0' '\n' < "/proc/$rsess/environ" | grep -q '^RS_INITIAL_PROJECT=' && bad "RS_INITIAL_PROJECT left in the session env" || ok "RS_INITIAL_PROJECT consumed by rsession"
+  # (rsession consumes RS_INITIAL_PROJECT with unsetenv, which /proc/<pid>/environ does not show.)
+  tr '\0' '\n' < "/proc/$rsess/environ" | grep -qx "RS_INITIAL_PROJECT=$(ls /workspace/*.Rproj)" && ok "rsession-agent set RS_INITIAL_PROJECT to the one .Rproj" || bad "RS_INITIAL_PROJECT not set for the first session"
+  for _ in $(seq 1 20); do [ -d /workspace/.Rproj.user ] && break; sleep 1; done
+  [ -d /workspace/.Rproj.user ] && ok "the session opened the project (.Rproj.user created)" || bad "the session did not open /workspace's .Rproj"
   sleep 3
   metric "rsession RSS (one fresh R session): $(ps -o rss= -p "$rsess" | awk '{printf "%.0f MB", $1/1024}'); rserver RSS: $(ps -o rss= -p "$rs_pid" | awk '{printf "%.0f MB", $1/1024}')"
 else
@@ -109,7 +112,7 @@ else
 fi
 ls -d /var/lib/rstudio-agent/initial-project-done >/dev/null 2>&1 && ok "first-session marker set (later sessions follow RStudio's own project choice)" || bad "no initial-project marker"
 L="$HOME/.local/share/rstudio/agent-rserver.log"
-grep -q 'rsession-agent\] WARN' "$L" 2>/dev/null && bad "rsession-agent warned: $(grep 'rsession-agent' "$L" | tail -n 2)" || ok "rsession-agent read the container environment (no warning)"
+grep -q 'rsession-env\] WARN' "$L" 2>/dev/null && bad "rsession-agent warned: $(grep 'rsession-env' "$L" | tail -n 2)" || ok "rsession-agent read the container environment (no warning)"
 if [ "$fail" -ne 0 ]; then
   echo "---- $L (tail)"; tail -n 30 "$L" 2>/dev/null | sed 's/^/        /'
   for f in "$HOME"/.local/share/rstudio/log/*.log; do echo "---- $f (tail)"; tail -n 15 "$f" | sed 's/^/        /'; done

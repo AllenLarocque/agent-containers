@@ -93,7 +93,7 @@ check "project.env names this project's vault" grep -q "op://agent-$NAME/github-
 check "compose uses spades-gis by default, digest placeholder kept" \
   grep -q "spades-gis@sha256:REPLACE_WITH_DIGEST_FROM_digests.md" "$CFG/compose.yaml"
 check "repo seed CODEOWNERS copied into the project" grep -q "^\* @OWNER" "$P/.github/CODEOWNERS"
-check "repo seed .gitignore copied into the project" test -f "$P/.gitignore"
+check "repo seed .gitignore copied into the project (incl. .Rproj.user/)" grep -qx ".Rproj.user/" "$P/.gitignore"
 check "repo seed gitleaks workflow copied into the project" grep -q "ghcr.io/gitleaks/gitleaks:v8.30.1" "$P/.github/workflows/gitleaks.yml"
 check "no launcher, compose or env file written into the project" \
   bash -c '! ls -A "$1" | grep -Eqx "compose\.ya?ml|docker-compose\.ya?ml|up|\.env|\.devcontainer|project\.(env|conf)|allowlist"' _ "$P"

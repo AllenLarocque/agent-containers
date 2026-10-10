@@ -17,7 +17,7 @@
 set -uo pipefail
 REAL=/usr/lib/rstudio-server/bin/rsession
 STATE=/var/lib/rstudio-agent
-warn(){ printf '[rsession-agent] WARN %s\n' "$*" >&2; }
+warn(){ printf '[rsession-env] WARN %s\n' "$*" >&2; }   # (RStudio itself logs as [rsession-agent])
 
 declare -A have=()
 while IFS= read -r k; do have[$k]=1; done < <(compgen -e)
