@@ -744,7 +744,10 @@ OVR
           GH_TOKEN=ambient-gh OP_SERVICE_ACCOUNT_TOKEN=ambient-op \
           docker compose --env-file "$RCFG/project.conf" -f "$RCFG/compose.yaml" -f "$RCFG/.generated/env-passthrough.yaml" \
           -f "$RCFG/.generated/t3-connect.yaml" -f "$RCFG/.generated/research.yaml" -f "$RCFG/.generated/rstudio.yaml" -f "$RCFG/.generated/hostname.yaml" -f "$T/override.yaml" --project-directory "$RCFG" -p research "$@"; }
-  trap 'dc down -v >/dev/null 2>&1 || true; rdc down -v >/dev/null 2>&1 || true; rm -rf "$T"' EXIT
+  # The agent (uid 1000) writes into the project dir (e.g. RStudio's .Rproj.user): hand $T back to the
+  # runner before removing it, or the EXIT trap's rm fails and turns a passing run into exit 1.
+  reclaim(){ docker run --rm -u root -v "$T:/t" "$TEMPLATE_IMAGE" chown -R "$(id -u):$(id -g)" /t >/dev/null 2>&1 || true; }
+  trap 'dc down -v >/dev/null 2>&1 || true; rdc down -v >/dev/null 2>&1 || true; reclaim; rm -rf "$T"' EXIT
   for v in require-cache-shared npm-cache-shared; do
     docker volume inspect "$v" >/dev/null 2>&1 || docker volume create "$v" >/dev/null
   done
