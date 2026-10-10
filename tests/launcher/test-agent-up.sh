@@ -495,7 +495,7 @@ OVR
     check "  ...relay.t3.codes resolves" \
       bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 relay.t3.codes A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID"
     check "  ...an agent re-run of the firewall keeps it ON (the switch, not the env, decides)" \
-      bash -c 'docker exec -u agent -e T3_CONNECT=0 "$1" sudo /usr/local/bin/init-firewall.sh | grep -q "^T3 Connect: ON"' _ "$CID"
+      bash -c 'out=$(docker exec -u agent -e T3_CONNECT=0 "$1" sudo /usr/local/bin/init-firewall.sh 2>&1) && grep -q "^T3 Connect: ON" <<<"$out"' _ "$CID"
     check "project-allowlisted www.python.org resolves" \
       bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 www.python.org A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID"
   fi
