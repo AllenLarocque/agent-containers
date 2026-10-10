@@ -156,7 +156,9 @@ They contain no secrets by design.
 ### 3.3 `spades-bio` (FROM base)
 - cutadapt, fasttree, mafft, `libglpk-dev`, `libmagick++-dev`.
 - Miniforge at `/opt/conda` with pinned envs: `picrust2` (2.5.2, bioconda) and `sklearn`
-  (Python 3.12, scikit-learn 1.9.0, joblib, numpy, scipy, biopython).
+  (Python 3.12, scikit-learn 1.9.0, joblib, numpy, scipy, biopython). Each env is installed from an
+  explicit lock (`images/bio/conda-locks/<env>.txt`, URLs + md5, linux-64), never a fresh solve; the
+  build fails on drift. Re-lock: `scripts/relock-bio-conda.sh` (`images/bio/README.md`).
 
 ### 3.4 Python for reticulate (policy)
 `Require` manages R packages only. Python environments are either:
