@@ -4,10 +4,13 @@
 # port 22, Docker's resolver) live in test-agent-egress.sh and run as the agent user.
 # Env: EXPECT_UPSTREAM = the container's ORIGINAL resolver (captured from /etc/resolv.conf by the CI
 #      step BEFORE the firewall ran; never read back from the firewall's own state).
+#      EXPECT_T3_CONNECT = 1 when the CI step mounted /etc/firewall/t3-connect with T3_CONNECT=1
+#      (default 0: the rules must be exactly the ones without the feature).
 set -uo pipefail
 fail=0
 ok(){ echo "OK:   $*"; }; bad(){ echo "FAIL: $*"; fail=1; }
 : "${EXPECT_UPSTREAM:?EXPECT_UPSTREAM must be set to the pre-firewall resolver}"
+EXPECT_T3_CONNECT=${EXPECT_T3_CONNECT:-0}
 blocked(){ if curl --connect-timeout 5 -s "$1" >/dev/null 2>&1; then bad "$1 reachable, should be BLOCKED"; else ok "$1 blocked"; fi; }
 allowed(){ if curl --connect-timeout 10 -sSf "$1" >/dev/null 2>&1; then ok "$1 reachable"; else bad "$1 blocked, should be ALLOWED"; fi; }
 blocked https://example.com
@@ -44,9 +47,18 @@ expect_v4=$(sed -e "s|@UP@|$EXPECT_UPSTREAM|g" -e "s|@DUID@|$DUID|g" -e "s|@GW@|
 -A OUTPUT -d @UP@/32 -p udp -m udp --dport 53 -m owner --uid-owner @DUID@ -j ACCEPT
 -A OUTPUT -d @UP@/32 -p tcp -m tcp --dport 53 -m owner --uid-owner @DUID@ -j ACCEPT
 -A OUTPUT -p tcp -m set --match-set allowed-domains dst -m multiport --dports 22,80,443 -j ACCEPT
--A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
+@T3@-A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
 EOF
 )
+# T3 Connect ON adds exactly these two rules (7844, the t3-tunnel set only); OFF adds nothing.
+if [ "$EXPECT_T3_CONNECT" = 1 ]; then
+  t3_rules='-A OUTPUT -p udp -m udp --dport 7844 -m set --match-set t3-tunnel dst -j ACCEPT
+-A OUTPUT -p tcp -m tcp --dport 7844 -m set --match-set t3-tunnel dst -j ACCEPT
+'
+  expect_v4=${expect_v4/@T3@/$t3_rules}
+else
+  expect_v4=${expect_v4/@T3@/}
+fi
 expect_v6=$(cat <<'EOF'
 -P INPUT DROP
 -P FORWARD DROP
@@ -101,4 +113,37 @@ grep -qx "server=/github.com/$EXPECT_UPSTREAM" "$conf" && ok "dnsmasq forwards g
 if setpriv --reuid="$DUID" --regid="$(id -g dnsmasq 2>/dev/null)" --clear-groups dig +short +time=3 +tries=2 @"$EXPECT_UPSTREAM" api.github.com A 2>/dev/null | grep -Eq '^[0-9]+(\.[0-9]+){3}$'; then
   ok "upstream $EXPECT_UPSTREAM answers the dnsmasq uid"
 else bad "upstream $EXPECT_UPSTREAM does not answer the dnsmasq uid"; fi
+
+# --- T3 Connect: a separate ipset, filled only from argotunnel.com lookups (the SRV targets) ---
+conf_has(){ grep -qx -- "$1" "$conf"; }
+if [ "$EXPECT_T3_CONNECT" = 1 ]; then
+  conf_has "server=/argotunnel.com/$EXPECT_UPSTREAM" && ok "dnsmasq forwards argotunnel.com" || bad "no server=/argotunnel.com/ line"
+  conf_has "ipset=/argotunnel.com/t3-tunnel" && ok "argotunnel.com addresses go to t3-tunnel ONLY" || bad "no ipset=/argotunnel.com/t3-tunnel line"
+  conf_has "ipset=/t3.codes/allowed-domains" && ok "t3.codes is allowlisted (22/80/443)" || bad "t3.codes not allowlisted"
+  ipset list -n | grep -qx t3-tunnel && ok "ipset t3-tunnel exists" || bad "no ipset t3-tunnel"
+  tips=()
+  for t in $(dig -r +short +time=3 +tries=2 SRV _v2-origintunneld._tcp.argotunnel.com @127.0.0.1 | awk '{print $4}'); do
+    mapfile -t -O "${#tips[@]}" tips < <(dig -r +short +time=3 +tries=2 "$t" A @127.0.0.1 | grep -E '^[0-9]+(\.[0-9]+){3}$')
+  done
+  [ "${#tips[@]}" -gt 0 ] && ok "SRV targets resolve via dnsmasq: ${tips[*]}" || bad "SRV targets of _v2-origintunneld._tcp.argotunnel.com do not resolve"
+  for ip in "${tips[@]}"; do
+    ipset test t3-tunnel "$ip" 2>/dev/null && ok "$ip is in t3-tunnel" || bad "$ip (SRV target) is NOT in t3-tunnel"
+    ipset test allowed-domains "$ip" 2>/dev/null && bad "$ip (tunnel edge) is in allowed-domains (22/80/443)" || ok "$ip is not in allowed-domains"
+  done
+  # Every member of t3-tunnel must come from an argotunnel.com lookup: nothing else is ever added.
+  others=$(ipset list t3-tunnel | sed -n '/^Members:/,$p' | tail -n +2 | grep -v '^$' | while read -r m; do
+    printf '%s\n' "${tips[@]}" | grep -qx "${m%/32}" || echo "$m"; done)
+  [ -z "$others" ] && ok "t3-tunnel holds only the SRV targets' addresses" || echo "NOTE: t3-tunnel also holds $others (other argotunnel.com lookups, e.g. by the firewall's priming)"
+  # UDP (QUIC) really matches the udp rule: its packet counter moves for one datagram to an edge IP.
+  if [ "${#tips[@]}" -gt 0 ]; then
+    cnt(){ iptables -L OUTPUT -n -v -x | awk '/t3-tunnel/ && /dpt:7844/ && ($4=="udp" || $4=="17") {print $1}'; }
+    before=$(cnt); echo probe > "/dev/udp/${tips[0]}/7844" 2>/dev/null; after=$(cnt)
+    [ -n "$before" ] && [ "${after:-0}" -gt "$before" ] && ok "UDP to ${tips[0]}:7844 is ACCEPTed by the t3-tunnel udp rule ($before -> $after)" \
+      || bad "UDP to ${tips[0]}:7844 did not match the t3-tunnel udp rule ($before -> $after)"
+  fi
+else
+  grep -q argotunnel "$conf" && bad "dnsmasq config mentions argotunnel with T3 Connect off" || ok "no argotunnel.com in dnsmasq (T3 Connect off)"
+  grep -q 't3\.codes' "$conf" && bad "dnsmasq config mentions t3.codes with T3 Connect off" || ok "no t3.codes in dnsmasq (T3 Connect off)"
+  ipset list -n | grep -qx t3-tunnel && bad "ipset t3-tunnel exists with T3 Connect off" || ok "no t3-tunnel ipset (T3 Connect off)"
+fi
 [ "$fail" -eq 0 ] && echo "FIREWALL: ALL PASSED" || { echo "FIREWALL: FAILURES"; exit 1; }

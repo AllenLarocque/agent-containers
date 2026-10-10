@@ -97,7 +97,11 @@ and can send data anywhere must not also hold private data or credentials.
   affect other projects;
 - host tools (git, direnv, shell prompts, a host-side Claude session) must not be run against the
   agent's read-write folders without the precautions in `project-template/README.md`;
-- tier-A values are readable inside the container until credential masking lands.
+- tier-A values are readable inside the container until credential masking lands;
+- *(2026-10-09, owner-approved)* **T3 Connect, per project, opt-in** (§13.1): an enabled project
+  gets a public, auth-gated tunnel hostname and trusts T3's relay (a compromised relay signing key
+  could mint sessions); the T3 account must have 2FA. Blast radius: that project's agent
+  capabilities. The switch is owner config, never agent-writable.
 
 Revisit if builders start consuming untrusted content heavily.
 
@@ -179,7 +183,7 @@ from the project folder.
   compose.yaml                          # generated from the seed, then owner-edited
   project.env                           # op:// references only
   allowlist                             # project domains → /etc/firewall/allowlist.d/50-project.txt:ro
-  project.conf                          # PROJECT_DIR, PROFILE (builder|research; only builder is built, agent-up refuses research until Phase 1b), IMAGE (base|gis|bio)
+  project.conf                          # PROJECT_DIR, PROFILE (builder|research; only builder is built, agent-up refuses research until Phase 1b), IMAGE (base|gis|bio), T3_PORT, T3_CONNECT (0|1, absent = 0; §13.1)
 <project-dir>/                          # the agent's read-write workspace: code, data, outputs, CLAUDE.md
 ```
 
@@ -188,7 +192,7 @@ from the project folder.
 | Command | Does |
 |---|---|
 | `agent-up init <project-dir> [--image gis] [--profile builder]` | creates `~/.config/agent-containers/<project>/` from the seeds; prints the remaining steps (vault, digest) |
-| `agent-up up <project>` | checks the image digest, mounts and `project.env`, then `op run --env-file <cfg>/project.env -- docker compose --env-file <cfg>/project.conf -f <cfg>/compose.yaml -f <cfg>/.generated/env-passthrough.yaml --project-directory <cfg> -p <project> up -d --force-recreate` (the generated overlay lists the `project.env` key names only, never values) |
+| `agent-up up <project>` | checks the image digest, mounts and `project.env`, then `op run --env-file <cfg>/project.env -- docker compose --env-file <cfg>/project.conf -f <cfg>/compose.yaml -f <cfg>/.generated/env-passthrough.yaml -f <cfg>/.generated/t3-connect.yaml --project-directory <cfg> -p <project> up -d --force-recreate` (generated overlays: the `project.env` key names only, never values; and the T3 Connect switch, empty unless `T3_CONNECT=1`, §13.1) |
 | `agent-up config <project>` | prints the rendered compose config; no secrets needed |
 | `agent-up shell <project>` | `docker exec -it -u agent <project>-agent-1 zsh` |
 | `agent-up status \| stop \| down <project>` | compose wrappers |
@@ -411,7 +415,8 @@ Client: the browser first; the desktop app later (its local/WSL environments sta
 **Vetting (licence, account, telemetry checked first):**
 - MIT, open source (`pingdotgg/t3code`).
 - **Pre-1.0:** "very early, expect bugs", so pin an exact version.
-- No account needed for local pairing. T3 Connect (a cloud relay) is optional and **not used**.
+- No account needed for local pairing. T3 Connect (a cloud relay) is optional; *amended
+  2026-10-09:* available **per project, opt-in** (below).
 - Product telemetry (PostHog) is **on by default**: set `T3CODE_TELEMETRY_ENABLED=false`. It
   isn't on any allowlist, so it's blocked anyway.
 
@@ -425,6 +430,25 @@ processes, git and files, and clients only display and steer over authenticated 
 - T3 never routes work between environments, which preserves per-project isolation. Its
   orchestrator MCP (sub-agents, threads) works within one environment only.
 - Git worktrees for parallel threads are created inside the container's checkout.
+
+**T3 Connect, per-project opt-in (decided 2026-10-09, owner-approved).** T3 Connect = T3's relay
+(Clerk identity, `t3.codes`) + a Cloudflare Tunnel: the T3 server downloads `cloudflared` 2026.5.2
+from GitHub releases (sha256-pinned in T3) and runs `cloudflared tunnel --no-autoupdate run` with
+`TUNNEL_TOKEN`; cloudflared dials OUT to the edge found via SRV
+`_v2-origintunneld._tcp.argotunnel.com` on port 7844 (QUIC/UDP, HTTP2/TCP fallback).
+- `T3_CONNECT=0|1` in `project.conf` (owner host config; `init` writes 0; absent = 0). `agent-up up`
+  and `config` refuse any other value; `stop`/`down`/`status` never check it. `T3_CONNECT` and
+  `TUNNEL_*` are reserved in `project.env` (cloudflared reads `TUNNEL_*` as flags).
+- `agent-up` writes `.generated/t3-connect.yaml`: with 1 it mounts `.generated/t3-connect`
+  **read-only** at `/etc/firewall/t3-connect` and sets `TUNNEL_EDGE_IP_VERSION=4`; with 0 it adds
+  nothing. The root firewall reads the **file**, never the environment (sudo resets it and the
+  agent controls its own), so the agent cannot flip the switch, and a re-run keeps it.
+- Firewall, only when on: `t3.codes` joins the allowlist (22/80/443); `argotunnel.com` resolves
+  (SRV included) and its addresses go to a SEPARATE ipset `t3-tunnel`, open on 7844 UDP+TCP only.
+  Off: the rules are byte-identical to before (CI snapshot). IPv6 stays default-deny. The relay
+  client's OTLP trace host is deliberately not allowlisted.
+- Residual risks (public auth-gated hostname, relay trust, 2FA): §2.1 and
+  `project-template/README.md`.
 
 **Reserved in Phase 1:**
 - a volume name `t3-<project>` for `~/.t3` (thread history, event log, worktrees);

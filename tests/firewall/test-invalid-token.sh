@@ -25,4 +25,21 @@ try "port"           'bad.example:443\n'
 # A CR is only a line-ending artefact at the END of a line; mid-line it must not be silently deleted
 # ("foo\\rbar.example" would otherwise become the different, valid domain foobar.example).
 try "mid-line CR"    'foo\rbar.example\n'
+# The T3 Connect switch (spec §13.1): anything but exactly T3_CONNECT=0/1 fails closed-early too.
+try_switch(){ # $1 = label, $2 = switch content (printf format)
+  printf "$2" > /etc/firewall/t3-connect
+  local before after out rc
+  before=$(snap)
+  out=$(/usr/local/bin/init-firewall.sh 2>&1); rc=$?
+  after=$(snap)
+  rm -f /etc/firewall/t3-connect
+  [ "$rc" -ne 0 ] && echo "OK:   [switch $1] exit non-zero ($rc)" || { echo "FAIL: [switch $1] exited 0"; fail=1; }
+  echo "$out" | grep -q "t3-connect must hold exactly" && echo "OK:   [switch $1] validation error names the switch" \
+    || { echo "FAIL: [switch $1] no validation error in output:"; echo "$out" | tail -5; fail=1; }
+  [ "$before" = "$after" ] && echo "OK:   [switch $1] iptables/ip6tables/ipset untouched" || { echo "FAIL: [switch $1] iptables state changed"; fail=1; }
+}
+try_switch "yes"        'T3_CONNECT=yes\n'
+try_switch "bare 1"     '1\n'
+try_switch "two lines"  'T3_CONNECT=1\nT3_CONNECT=1\n'
+try_switch "empty"      ''
 [ "$fail" -eq 0 ] && echo "INVALID-TOKEN: ALL PASSED" || { echo "INVALID-TOKEN: FAILURES"; exit 1; }

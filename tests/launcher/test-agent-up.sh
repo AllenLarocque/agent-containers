@@ -82,6 +82,7 @@ check "project.conf: PROJECT, PROFILE, IMAGE" \
 check "project.conf: SPADES_AI_DIR and AGENT_MEMORY_DIR defaults" \
   bash -c 'grep -qx "SPADES_AI_DIR=$2/GitHub/spades.ai" "$1" && grep -qx "AGENT_MEMORY_DIR=$2/agent-memory" "$1"' _ "$CFG/project.conf" "$H"
 check "project.conf: first project gets T3_PORT=3773" grep -qx "T3_PORT=3773" "$CFG/project.conf"
+check "project.conf: T3_CONNECT=0 (T3 Connect is opt-in)" grep -qx "T3_CONNECT=0" "$CFG/project.conf"
 check "project.env names this project's vault" grep -q "op://agent-$NAME/github-agent/token" "$CFG/project.env"
 check "compose uses spades-gis by default, digest placeholder kept" \
   grep -q "spades-gis@sha256:REPLACE_WITH_DIGEST_FROM_digests.md" "$CFG/compose.yaml"
@@ -200,7 +201,7 @@ AMBIENT=(COMPOSE_FILE=evil.yaml COMPOSE_PROFILES=evil PROJECT_DIR=/evil SPADES_A
 rc=0; out=$(au up "$NAME" 2>&1) || rc=$?
 AMBIENT=()
 check "up succeeds (stub op + stub docker)" test "$rc" -eq 0
-C="compose --env-file $CFG/project.conf -f $CFG/compose.yaml -f $CFG/.generated/env-passthrough.yaml --project-directory $CFG -p $NAME"
+C="compose --env-file $CFG/project.conf -f $CFG/compose.yaml -f $CFG/.generated/env-passthrough.yaml -f $CFG/.generated/t3-connect.yaml --project-directory $CFG -p $NAME"
 check "  ...op run resolves project.env, then runs docker compose" \
   grep -qxF "OP: run --env-file $CFG/project.env -- docker $C up -d --force-recreate" "$OPLOG"
 check "  ...docker compose gets ONLY the config dir's files" grep -qxF "ARGS: $C up -d --force-recreate" "$DLOG"
@@ -212,6 +213,9 @@ check "  ...no secret value on stdout/stderr" bash -c '! grep -q fake-secret-val
 PT="$CFG/.generated/env-passthrough.yaml"
 check "passthrough lists the key NAME" grep -qx "      - GH_TOKEN" "$PT"
 check "  ...and holds no value or reference" bash -c '! grep -Eq "fake-secret|op://|=" "$1"' _ "$PT"
+T3O="$CFG/.generated/t3-connect.yaml"
+check "T3_CONNECT=0: the T3 Connect overlay adds nothing" bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent: {}")" ]' _ "$T3O"
+check "  ...and no firewall switch file exists" test ! -e "$CFG/.generated/t3-connect"
 
 # ---- passthrough coverage
 cp "$CFG/project.env" "$T/penv2.bak"
@@ -265,6 +269,53 @@ refuses "a T3_PORT used by another project is refused" 'T3_PORT=3773 .* also use
 cp "$T/bio2conf.bak" "$CFGROOT/bio2/project.conf"
 cp "$T/pconf-t3.bak" "$CFG/project.conf"
 
+# ---- T3 Connect (owner opt-in): validated by up/config only; a missing key is 0
+cp "$CFG/project.conf" "$T/pconf-t3c.bak"
+for v in 2 yes on " 1"; do
+  sed -i "s/^T3_CONNECT=.*/T3_CONNECT=$v/" "$CFG/project.conf"
+  : > "$DLOG"
+  refuses "up refuses T3_CONNECT='$v'" "T3_CONNECT='$v'.*must be 0 \(off\) or 1 \(on\)" au up "$NAME"
+  check "  ...without reaching docker" test ! -s "$DLOG"
+  refuses "config refuses T3_CONNECT='$v'" "T3_CONNECT='$v'" au config "$NAME"
+  check "stop works with T3_CONNECT='$v' (lifecycle never validates it)" au stop "$NAME"
+  check "down works with T3_CONNECT='$v'" au down "$NAME"
+  check "status works with T3_CONNECT='$v'" au status "$NAME"
+  check "  ...and an invalid value opens nothing (no switch file)" test ! -e "$CFG/.generated/t3-connect"
+done
+sed -i "s/^T3_CONNECT=.*/T3_CONNECT=/" "$CFG/project.conf"
+check "config accepts an empty T3_CONNECT= (off)" au config "$NAME"
+check "  ...no switch file" test ! -e "$CFG/.generated/t3-connect"
+sed -i '/^T3_CONNECT=/d' "$CFG/project.conf"
+: > "$DLOG"
+check "up accepts a config without T3_CONNECT (predates it: off)" au up "$NAME"
+check "  ...overlay adds nothing, no switch file" \
+  bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent: {}")" ] && [ ! -e "$2" ]' _ "$T3O" "$CFG/.generated/t3-connect"
+check "  ...docker compose gets the T3 Connect overlay" grep -qxF "ARGS: $C up -d --force-recreate" "$DLOG"
+check "stop works without T3_CONNECT" au stop "$NAME"
+check "down works without T3_CONNECT" au down "$NAME"
+echo "T3_CONNECT=1" >> "$CFG/project.conf"
+upout="$(au up "$NAME" 2>&1)" && rc=0 || rc=$?
+check "up with T3_CONNECT=1" test "$rc" -eq 0
+check "  ...says T3 Connect is ON and how to link it" grep -q "T3 Connect is ON .*t3 connect --headless" <<<"$upout"
+check "  ...firewall switch file says T3_CONNECT=1" test "$(cat "$CFG/.generated/t3-connect")" = "T3_CONNECT=1"
+check "  ...overlay mounts it read-only at /etc/firewall/t3-connect" \
+  bash -c 'grep -qx "        source: ./.generated/t3-connect" "$1" && grep -qx "        target: /etc/firewall/t3-connect" "$1" && grep -qx "        read_only: true" "$1"' _ "$T3O"
+check "  ...and sets TUNNEL_EDGE_IP_VERSION=4 for cloudflared" grep -qE '^      TUNNEL_EDGE_IP_VERSION: "4"' "$T3O"
+sed -i 's/^T3_CONNECT=.*/T3_CONNECT=0/' "$CFG/project.conf"
+check "back to T3_CONNECT=0: config succeeds" au config "$NAME"
+check "  ...and the switch file is gone" test ! -e "$CFG/.generated/t3-connect"
+cp "$CFG/project.env" "$T/penv3.bak"
+for k in T3_CONNECT TUNNEL_TOKEN TUNNEL_EDGE_IP_VERSION; do
+  echo "$k=op://v/i/f" >> "$CFG/project.env"
+  refuses "up refuses reserved key $k in project.env" "reserved.*$k" au up "$NAME"
+  cp "$T/penv3.bak" "$CFG/project.env"
+done
+cp "$T/pconf-t3c.bak" "$CFG/project.conf"
+AMBIENT=(T3_CONNECT=1)
+au config "$NAME" >/dev/null 2>&1 || true
+AMBIENT=()
+check "an ambient T3_CONNECT=1 in the owner's shell changes nothing (only project.conf counts)" test ! -e "$CFG/.generated/t3-connect"
+
 # ---- rendering with the REAL docker compose (CI; skipped where docker is absent)
 if docker compose version >/dev/null 2>&1; then
   render(){ ( cd "$1" && aureal config "$NAME" --format json ); }   # rendered FROM the given cwd
@@ -298,6 +349,20 @@ if docker compose version >/dev/null 2>&1; then
     jq -e '(.services.agent.cap_add | index("NET_ADMIN") and index("NET_RAW")) and (.services.agent.mem_limit != null)' <<<"$J"
   check "rendered: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1" \
     test "$(jq -r '.services.agent.environment.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC' <<<"$J")" = 1
+  check "rendered: T3_CONNECT=0 sets no cloudflared env" \
+    jq -e '(.services.agent.environment.TUNNEL_EDGE_IP_VERSION == null) and (.services.agent.environment.T3_CONNECT == null)' <<<"$J"
+  sed -i 's/^T3_CONNECT=.*/T3_CONNECT=1/' "$CFG/project.conf"
+  J1="$(render "$T")"
+  sed -i 's/^T3_CONNECT=.*/T3_CONNECT=0/' "$CFG/project.conf"
+  check "rendered (T3_CONNECT=1): the switch file from the config dir, read-only, at /etc/firewall/t3-connect" \
+    bash -c 'jq -e --arg s "$2" "[.services.agent.volumes[] | select(.target==\"/etc/firewall/t3-connect\") | {type, source, read_only}] == [{\"type\":\"bind\",\"source\":\$s,\"read_only\":true}]" <<<"$1"' _ "$J1" "$CFG/.generated/t3-connect"
+  check "rendered (T3_CONNECT=1): exactly two mounts under /etc/firewall (allowlist + switch)" \
+    test "$(jq '[.services.agent.volumes[] | select(.target|startswith("/etc/firewall"))] | length' <<<"$J1")" = 2
+  check "rendered (T3_CONNECT=1): TUNNEL_EDGE_IP_VERSION=4, T3_CONNECT=1 in the env" \
+    jq -e '.services.agent.environment.TUNNEL_EDGE_IP_VERSION == "4" and .services.agent.environment.T3_CONNECT == "1"' <<<"$J1"
+  check "rendered (T3_CONNECT=1): otherwise identical to T3_CONNECT=0" \
+    bash -c 'diff <(jq -S "del(.services.agent.environment.T3_CONNECT, .services.agent.environment.TUNNEL_EDGE_IP_VERSION) | .services.agent.volumes |= map(select(.target != \"/etc/firewall/t3-connect\"))" <<<"$1") <(jq -S . <<<"$2")' _ "$J1" "$J"
+  ( cd "$T" && aureal config "$NAME" >/dev/null 2>&1 ) || true   # regenerate the T3_CONNECT=0 overlay
   ambient_hidden(){ local o; o="$(cd "$T" && aureal config "$NAME" --format json)" || return 1; ! grep -q dummy-render <<<"$o"; }
   AMBIENT=(GH_TOKEN=dummy-render)
   check "rendered: config never prints the owner's ambient value of a passthrough key" ambient_hidden
@@ -321,6 +386,10 @@ fi
 if [ -n "${TEMPLATE_IMAGE:-}" ]; then
   docker image inspect "$TEMPLATE_IMAGE" >/dev/null 2>&1 || { echo "FAIL: TEMPLATE_IMAGE=$TEMPLATE_IMAGE not present"; exit 1; }
   printf 'www.python.org\n' >> "$CFG/allowlist"
+  # T3 Connect ON here: proves the whole chain project.conf -> agent-up overlay -> read-only switch ->
+  # root firewall. (OFF is the absent switch, which the CI firewall steps cover.)
+  sed -i 's/^T3_CONNECT=.*/T3_CONNECT=1/' "$CFG/project.conf"
+  au config "$NAME" >/dev/null 2>&1 || true   # (re)writes .generated/ (stub docker)
   cat > "$T/override.yaml" <<OVR
 services:
   agent:
@@ -329,7 +398,7 @@ services:
 OVR
   dc(){ env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u COMPOSE_FILE HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" GH_TOKEN=dummy-in-container \
           docker compose --env-file "$CFG/project.conf" -f "$CFG/compose.yaml" -f "$CFG/.generated/env-passthrough.yaml" \
-          -f "$T/override.yaml" --project-directory "$CFG" -p "$NAME" "$@"; }
+          -f "$CFG/.generated/t3-connect.yaml" -f "$T/override.yaml" --project-directory "$CFG" -p "$NAME" "$@"; }
   trap 'dc down -v >/dev/null 2>&1 || true; rm -rf "$T"' EXIT
   for v in require-cache-shared npm-cache-shared; do
     docker volume inspect "$v" >/dev/null 2>&1 || docker volume create "$v" >/dev/null
@@ -415,6 +484,18 @@ OVR
       check "$host resolves (Codex: ChatGPT login and backend)" \
         bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 "$2" A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID" "$host"
     done
+    # T3 Connect (T3_CONNECT=1 above): the firewall read the owner's switch, and the agent cannot flip it.
+    check "T3 Connect: the firewall read the switch (log says ON)" \
+      bash -c 'docker logs "$1" 2>&1 | grep -q "^T3 Connect: ON"' _ "$CID"
+    check "  ...port 7844 open to the t3-tunnel set only (udp + tcp)" \
+      bash -c '[ "$(docker exec -u root "$1" iptables -S OUTPUT | grep -c -- "--dport 7844")" = 2 ] && [ "$(docker exec -u root "$1" iptables -S OUTPUT | grep -- "--dport 7844" | grep -vc -- "--match-set t3-tunnel dst")" = 0 ]' _ "$CID"
+    check "  ...the switch is a read-only mount (even root cannot write it)" \
+      bash -c 'out="$(docker exec -u root "$1" sh -c "echo T3_CONNECT=0 > /etc/firewall/t3-connect" 2>&1)"; rc=$?; [ "$rc" -ne 0 ] && printf "%s" "$out" | grep -q "Read-only file system"' _ "$CID"
+    check "  ...cloudflared gets TUNNEL_EDGE_IP_VERSION=4" test "$(docker exec "$CID" printenv TUNNEL_EDGE_IP_VERSION)" = 4
+    check "  ...relay.t3.codes resolves" \
+      bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 relay.t3.codes A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID"
+    check "  ...an agent re-run of the firewall keeps it ON (the switch, not the env, decides)" \
+      bash -c 'out=$(docker exec -u agent -e T3_CONNECT=0 "$1" sudo /usr/local/bin/init-firewall.sh 2>&1) && grep -q "^T3 Connect: ON" <<<"$out"' _ "$CID"
     check "project-allowlisted www.python.org resolves" \
       bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 www.python.org A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID"
   fi

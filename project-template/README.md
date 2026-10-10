@@ -4,7 +4,7 @@ This folder is **not copied into your project by hand.** `bin/agent-up init` use
 
 | Seed | Copied to | Who edits it |
 |---|---|---|
-| `config/compose.yaml`, `config/project.env`, `config/allowlist` (+ `config/allowlist.bio-example` for `--image bio`) | `~/.config/agent-containers/<project>/` | you, the owner. **Never mounted** into the container, except `allowlist` (read-only) |
+| `config/compose.yaml`, `config/project.env`, `config/allowlist` (+ `config/allowlist.bio-example` for `--image bio`) | `~/.config/agent-containers/<project>/` | you, the owner. **Never mounted** into the container, except `allowlist` (read-only) and, with `T3_CONNECT=1`, the generated T3 Connect switch (read-only) |
 | `repo/.github/CODEOWNERS`, `repo/.github/workflows/gitleaks.yml`, `repo/.gitignore` | the project folder (only where absent) | you; commit them |
 
 **Why outside the project:** the project folder is the agent's read-write workspace. Anything
@@ -69,6 +69,54 @@ grep '^T3_PORT=' "$CFG/project.conf"                 # must print one line (else
 
 Then upgrade the image as usual (a digest from `digests.md` that includes Codex) and `agent-up up <project>`.
 
+## T3 Connect (opt-in)
+
+T3 Connect lets the T3 phone app, the desktop app and app.t3.codes reach this project's T3 server
+from anywhere, with push notifications. It is two things: T3's relay (you sign in with a T3
+account) and a Cloudflare Tunnel that the T3 server runs inside the container (`cloudflared`,
+which T3 downloads from GitHub releases on first use and checks against a pinned sha256). It is
+**off by default, per project** (decision 2026-10-09, spec §13.1).
+
+What `T3_CONNECT=1` changes, and nothing else:
+- the firewall allowlists `t3.codes` (relay and login: `app.`, `relay.`, `clerk.`) on ports 22/80/443
+  like any entry;
+- `argotunnel.com` (Cloudflare's tunnel edge) resolves, but its addresses go into a **separate**
+  set that is open on **port 7844 only** (QUIC over UDP, HTTP2 over TCP). No other host gets 7844,
+  and the edge gets no other port. IPv6 stays closed (`TUNNEL_EDGE_IP_VERSION=4` in the container);
+- the relay's tracing host is **not** allowlisted: its traces are dropped.
+
+The switch is yours, not the agent's: it lives in `project.conf` on your host, and `agent-up`
+mounts it read-only into the container, where the root firewall reads it at start. The agent can
+neither turn it on nor off (re-running the firewall reads the same mounted file).
+
+**Enable** (the T3 login persists in the `t3-<project>` volume, so steps 3–4 are once only):
+
+1. Add `T3_CONNECT=1` to `~/.config/agent-containers/<project>/project.conf` (it may already
+   say `T3_CONNECT=0`: change that line).
+2. `agent-up up <project>`. `docker logs <project>-agent-1` shows `T3 Connect: ON`.
+3. `agent-up shell <project>`, then in the container:
+   ```bash
+   t3 connect --headless   # device-code login: open the printed link on your phone or host, enter the code
+   t3 connect publish      # push notifications / Live Activities (off unless you enable them)
+   ```
+   If it offers to install a background service, decline: the container starts the server itself.
+4. `agent-up up <project>` again: the server links at start (it downloads `cloudflared` into the
+   volume the first time). Check with `t3 connect status` in the container.
+
+**Phone / desktop:** sign in to T3 Connect with the same account and choose this project's
+environment. For notifications: Settings → Notifications → **Device Notifications**. Activity
+publishing must be on for the environment (`t3 connect publish` above); the matching switch in the
+apps is *to be confirmed on first use*.
+
+**Disable:** `t3 connect unlink` in the container (keeps the T3 login; `t3 connect logout` also
+clears it), then `T3_CONNECT=0` in `project.conf` and `agent-up up <project>`. Unlink first:
+without it, the server keeps trying to reach the relay, which the firewall now blocks.
+
+**Upgrading an existing project:** nothing to do to keep it off (a `project.conf` without
+`T3_CONNECT` means 0). To opt in, add the line `T3_CONNECT=1` to its `project.conf` and follow
+the steps above; the image must be one that includes T3 Connect support (a digest from
+`digests.md` dated after this change).
+
 ## Lifecycle
 
 | Action | Steps |
@@ -87,6 +135,7 @@ Then upgrade the image as usual (a digest from `digests.md` that includes Codex)
 | `/opt/reference/spades.ai` | `SPADES_AI_DIR` (default `~/GitHub/spades.ai`) | rw |
 | `/opt/memory` | `AGENT_MEMORY_DIR` (default `~/agent-memory`, a git repo) | rw |
 | `/etc/firewall/allowlist.d/50-project.txt` | `~/.config/agent-containers/<project>/allowlist` | **ro** |
+| `/etc/firewall/t3-connect` (only with `T3_CONNECT=1`) | `~/.config/agent-containers/<project>/.generated/t3-connect`, written by `agent-up` from `project.conf` | **ro** |
 | `~/.claude`, `~/.codex`, the project R library | volumes `claude-<project>`, `codex-<project>`, `rlib-<project>` | persist across `up` |
 | Require's cache | volume `require-cache-shared` | shared by all projects |
 | npm's download cache (Claude Code and Codex install from it at each start, pinned + integrity-checked) | volume `npm-cache-shared` | shared by all projects |
@@ -131,8 +180,8 @@ On the host, treat all three as untrusted:
 
 ## Known residual risks
 
-The firewall confines the agent to allowlisted names on ports 22, 80 and 443, and to DNS for
-allowlisted names only. It does not remove these risks:
+The firewall confines the agent to allowlisted names on ports 22, 80 and 443 (plus 7844 to
+Cloudflare's tunnel edge only, where T3 Connect is on), and to DNS for allowlisted names only. It does not remove these risks:
 
 - Read-write shared mounts (spades.ai, ~/agent-memory, the Require cache) are writable by every builder project: a compromised builder could affect the others (accepted for builders, spec §2.1).
 - **Upload-capable allowlisted domains.** Anything that accepts uploads, with credentials the agent
@@ -146,6 +195,14 @@ allowlisted names only. It does not remove these risks:
 - **The pre-firewall window at container start.** The container has open networking until
   `init-firewall.sh` applies its DROP policies. Nothing of the agent's runs yet, and
   `conntrack -F` kills any flow opened before.
+- **T3 Connect, where enabled (`T3_CONNECT=1`):**
+  - each enabled project has a **public tunnel hostname**. Access is gated by T3's
+    authentication, but the endpoint itself is on the internet;
+  - you trust **T3's relay**. Its own docs say a compromised relay signing key could mint
+    sessions, i.e. drive that project's agents;
+  - your **T3 account must have 2FA**: it is now a way into the container.
+  The blast radius is that project's agent capabilities (its workspace, its tier-A secrets, its
+  allowlist), not the host or other projects.
 - **Tier-A secrets are readable inside the container**, and visible to anyone on the host who can
   run `docker inspect`. Keep them scoped and short-lived (spec §5).
 - **First real `agent-up up` on WSL2 / Docker Desktop:** check the firewall log
