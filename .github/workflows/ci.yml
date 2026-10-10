@@ -67,7 +67,11 @@ jobs:
       - name: draft — launcher render tests (no image)
         if: steps.mode.outputs.mode == 'draft'
         run: |
-          bash tests/launcher/test-agent-up.sh
+          set -o pipefail
+          bash tests/launcher/test-agent-up.sh 2>&1 | tee /tmp/launcher.log
+          # The render section silently skips without docker compose; on the runner it must have run.
+          if grep -q 'SKIP: render checks' /tmp/launcher.log; then echo "::error::launcher render checks were skipped"; exit 1; fi
+          echo "::notice title=launcher (render-only)::$(grep -c '^OK' /tmp/launcher.log) OK, $(grep -c '^OK: *rendered' /tmp/launcher.log) of them render checks"
           echo "::notice title=build-test::image build skipped for draft; runs when marked ready"
       - name: Free runner disk (preinstalled SDKs we never use, ~30 GB)
         if: steps.mode.outputs.mode == 'full'
