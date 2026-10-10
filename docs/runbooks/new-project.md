@@ -75,3 +75,8 @@ permissions).
 
 Later changes: edit the files in `~/.config/agent-containers/<project>/`, then `agent-up up <project>`.
 Nothing in the project folder configures the container.
+
+**Web research for this project** (the shared research container, open internet, no secrets): set
+`RESEARCH=1` in the project's `project.conf`, `agent-up up <project>`, then `agent-up up research`.
+First time ever: `agent-up init --profile research`. See
+[project-template/README.md "Research container"](../../project-template/README.md#research-container).

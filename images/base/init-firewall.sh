@@ -36,6 +36,15 @@
 # argotunnel.com resolves too, but its addresses go into a SEPARATE ipset (t3-tunnel) that is open on
 # port 7844 ONLY (cloudflared: QUIC/UDP, HTTP2/TCP fallback). 7844 is never open to any other host.
 # Absent file (or T3_CONNECT=0): the rules are exactly the ones without the feature.
+#
+# RESEARCH PROFILE (owner decision 2026-10-09, spec §2.1): when /etc/firewall/profile says
+# PROFILE=research (agent-up mounts it read-only for the shared research container ONLY), egress is
+# OPEN to PUBLIC IPv4 on any TCP/UDP port and dnsmasq forwards every name (no allowlist rule; the setup
+# steps, GitHub meta fetch included, run exactly as for builders, and their ipsets go unused). Still DENIED: every private, shared, link-local, loopback (except lo itself),
+# benchmarking, multicast and reserved range (RESEARCH_DENY below), the container's gateway (the host)
+# and its own networks. Everything else is unchanged: the same DROP-first ordering, owner-only upstream
+# DNS, the T3 INPUT rule from the gateway only, IPv6 default-deny, idempotent re-run.
+# Absent file (or PROFILE=builder): the builder rules, byte-identical to before (CI snapshot).
 
 # IPv6 is "unavailable" only if the kernel genuinely has no usable IPv6 to leak.
 # $1 = ip6tables error text; $2 = if_inet6 path (default /proc/net/if_inet6; a parameter for the unit test).
@@ -75,6 +84,23 @@ if [ -e "$T3_CONNECT_FILE" ]; then
     *) echo "ERROR: $T3_CONNECT_FILE must hold exactly T3_CONNECT=0 or T3_CONNECT=1"; exit 1 ;;
   esac
 fi
+# Profile switch: same pattern (agent-up writes .generated/profile from PROFILE in project.conf, and
+# mounts it only for the research profile). Absent = builder.
+PROFILE_FILE=/etc/firewall/profile
+PROFILE=builder
+if [ -e "$PROFILE_FILE" ]; then
+  case "$(cat "$PROFILE_FILE" 2>/dev/null)" in
+    PROFILE=builder) ;;
+    PROFILE=research) PROFILE=research ;;
+    *) echo "ERROR: $PROFILE_FILE must hold exactly PROFILE=builder or PROFILE=research"; exit 1 ;;
+  esac
+fi
+# Research: never reachable, whatever the port. 0/8 "this network", RFC1918, 100.64/10 shared/CGNAT
+# (Tailscale), 127/8 loopback (lo itself is accepted earlier), 169.254/16 link-local (cloud metadata),
+# 192.0.0.0/24 IETF protocol assignments, 198.18/15 benchmarking, 224/4 multicast, 240/4 reserved
+# (incl. the 255.255.255.255 broadcast).
+RESEARCH_DENY=(0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24
+               192.168.0.0/16 198.18.0.0/15 224.0.0.0/4 240.0.0.0/4)
 TUNNEL_DOMAIN=argotunnel.com   # cloudflared's edge: SRV _v2-origintunneld._tcp.argotunnel.com -> region*.v2.argotunnel.com
 TUNNEL_PORT=7844
 
@@ -111,7 +137,12 @@ TUNNEL_LISTED=0   # the owner also allowlisted argotunnel.com itself: one ipset=
 for d in "${ALLOWED_DOMAINS[@]}"; do
   if [ "$d" = "$TUNNEL_DOMAIN" ]; then TUNNEL_LISTED=1; fi
 done
-if [ "$T3_CONNECT" = 1 ]; then
+if [ "$PROFILE" = research ]; then
+  echo "Profile: research (open egress to public IPv4 on any port; private, local and reserved ranges denied; DNS not restricted)"
+fi
+if [ "$T3_CONNECT" = 1 ] && [ "$PROFILE" = research ]; then
+  echo "T3 Connect: ON (research: open egress already covers t3.codes and the tunnel edge on $TUNNEL_PORT)"
+elif [ "$T3_CONNECT" = 1 ]; then
   echo "T3 Connect: ON (t3.codes allowlisted; $TUNNEL_DOMAIN on port $TUNNEL_PORT only)"
 else
   echo "T3 Connect: off"
@@ -150,6 +181,15 @@ T3_PORT=3773
 GATEWAY_IP=$(ip -4 route show default 2>/dev/null | awk '{print $3; exit}')
 [[ $GATEWAY_IP =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || { echo "ERROR: no IPv4 default gateway found (got '$GATEWAY_IP')"; exit 1; }
 echo "Gateway (host side) detected as: $GATEWAY_IP"
+# Research: the container's own networks (Docker's, whatever address pool they came from) are denied too.
+OWN_NETS=()
+if [ "$PROFILE" = research ]; then
+  mapfile -t OWN_NETS < <(ip -4 route show scope link 2>/dev/null | awk '{print $1}' | sort -u)
+  for n in "${OWN_NETS[@]}"; do
+    [[ $n =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}(/[0-9]{1,2})?$ ]] || { echo "ERROR: unexpected link route '$n'"; exit 1; }
+  done
+  echo "Research: own network(s) denied: $(printf '%s ' "${OWN_NETS[@]}")+ gateway $GATEWAY_IP"
+fi
 
 # Docker's embedded-DNS NAT rules (127.0.0.11 -> its real port), to restore after the flush.
 DOCKER_DNS_RULES=$(iptables-save -t nat | grep "127\.0\.0\.11" || true)
@@ -326,6 +366,10 @@ mkdir -p /etc/dnsmasq.d
     echo "ipset=/$TUNNEL_DOMAIN/t3-tunnel"
   fi
 } > "$DNSMASQ_CONF.tmp"
+if [ "$PROFILE" = research ]; then
+  # Research: every name resolves (one default server), still only through dnsmasq's uid; no ipsets.
+  printf 'no-resolv\nuser=dnsmasq\nlisten-address=127.0.0.1\nbind-interfaces\nserver=%s\n' "$UPSTREAM_DNS" > "$DNSMASQ_CONF.tmp"
+fi
 chmod 0644 "$DNSMASQ_CONF.tmp"
 mv "$DNSMASQ_CONF.tmp" "$DNSMASQ_CONF"
 dnsmasq --conf-file="$DNSMASQ_CONF"
@@ -333,11 +377,13 @@ dnsmasq --conf-file="$DNSMASQ_CONF"
 # Route all in-container DNS through dnsmasq.
 echo "nameserver 127.0.0.1" > /etc/resolv.conf
 
-# Prime the ipset for the allowlisted domains (also a dnsmasq sanity check).
-for domain in "${ALLOWED_DOMAINS[@]}"; do
-  dig -r +short "$domain" @127.0.0.1 >/dev/null 2>&1 || true
-done
-if [ "$T3_CONNECT" = 1 ]; then   # the edge targets cloudflared will pick (it looks them up itself anyway)
+# Prime the ipset for the allowlisted domains (also a dnsmasq sanity check). Builder only.
+if [ "$PROFILE" = builder ]; then
+  for domain in "${ALLOWED_DOMAINS[@]}"; do
+    dig -r +short "$domain" @127.0.0.1 >/dev/null 2>&1 || true
+  done
+fi
+if [ "$PROFILE" = builder ] && [ "$T3_CONNECT" = 1 ]; then   # the edge targets cloudflared will pick (it looks them up itself anyway)
   for t in $(dig -r +short +time=3 +tries=2 SRV "_v2-origintunneld._tcp.$TUNNEL_DOMAIN" @127.0.0.1 2>/dev/null | awk '{print $4}' || true); do
     dig -r +short "$t" @127.0.0.1 >/dev/null 2>&1 || true
   done
@@ -345,13 +391,22 @@ fi
 
 # T3 Code server: inbound from the host side (gateway) only; replies leave via ESTABLISHED.
 iptables -A INPUT -s "$GATEWAY_IP" -p tcp --dport "$T3_PORT" -j ACCEPT
-# Only allowlisted destinations, only on SSH/HTTP/HTTPS.
-iptables -A OUTPUT -p tcp -m set --match-set allowed-domains dst -m multiport --dports 22,80,443 -j ACCEPT
-# T3 Connect only: cloudflared to Cloudflare's tunnel edge, port 7844 (QUIC/UDP, HTTP2/TCP), and
-# only to the t3-tunnel set: no other allowlisted host gets 7844, and argotunnel gets nothing else.
-if [ "$T3_CONNECT" = 1 ]; then
-  iptables -A OUTPUT -p udp --dport "$TUNNEL_PORT" -m set --match-set t3-tunnel dst -j ACCEPT
-  iptables -A OUTPUT -p tcp --dport "$TUNNEL_PORT" -m set --match-set t3-tunnel dst -j ACCEPT
+if [ "$PROFILE" = builder ]; then
+  # Only allowlisted destinations, only on SSH/HTTP/HTTPS.
+  iptables -A OUTPUT -p tcp -m set --match-set allowed-domains dst -m multiport --dports 22,80,443 -j ACCEPT
+  # T3 Connect only: cloudflared to Cloudflare's tunnel edge, port 7844 (QUIC/UDP, HTTP2/TCP), and
+  # only to the t3-tunnel set: no other allowlisted host gets 7844, and argotunnel gets nothing else.
+  if [ "$T3_CONNECT" = 1 ]; then
+    iptables -A OUTPUT -p udp --dport "$TUNNEL_PORT" -m set --match-set t3-tunnel dst -j ACCEPT
+    iptables -A OUTPUT -p tcp --dport "$TUNNEL_PORT" -m set --match-set t3-tunnel dst -j ACCEPT
+  fi
+else
+  # Research: the denied ranges FIRST, then any public IPv4 destination on any TCP/UDP port.
+  for n in "${RESEARCH_DENY[@]}" "${OWN_NETS[@]}" "$GATEWAY_IP/32"; do
+    iptables -A OUTPUT -d "$n" -j REJECT --reject-with icmp-admin-prohibited
+  done
+  iptables -A OUTPUT -p tcp -j ACCEPT
+  iptables -A OUTPUT -p udp -j ACCEPT
 fi
 # Explicitly REJECT all other outbound traffic for immediate feedback.
 iptables -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
@@ -367,19 +422,38 @@ if iptables -S OUTPUT | grep -q -- '--dport 443 -j ACCEPT'; then
   echo "ERROR: Firewall verification failed - a temporary setup rule (--dport 443 -j ACCEPT) is still present"; exit 1
 fi
 n_tunnel=$(iptables -S OUTPUT | grep -c -- "--dport $TUNNEL_PORT -m set --match-set t3-tunnel dst -j ACCEPT" || true)
-if [ "$T3_CONNECT" = 1 ] && [ "$n_tunnel" != 2 ]; then
+if [ "$PROFILE" = research ]; then
+  # Every denied range must be in place (and before the open ACCEPTs, which come last by construction).
+  for n in "${RESEARCH_DENY[@]}" "${OWN_NETS[@]}" "$GATEWAY_IP/32"; do
+    iptables -C OUTPUT -d "$n" -j REJECT --reject-with icmp-admin-prohibited 2>/dev/null \
+      || { echo "ERROR: Firewall verification failed - research deny rule for $n is missing"; exit 1; }
+  done
+  if [ "$n_tunnel" != 0 ] || iptables -S OUTPUT | grep -q -- '--match-set'; then
+    echo "ERROR: Firewall verification failed - research profile has an ipset rule"; exit 1
+  fi
+  if curl -q --connect-timeout 5 "http://$GATEWAY_IP/" >/dev/null 2>&1; then
+    echo "ERROR: Firewall verification failed - research reached the gateway $GATEWAY_IP"; exit 1
+  fi
+  echo "Firewall verification passed - research: private, local and reserved ranges + gateway denied"
+elif [ "$T3_CONNECT" = 1 ] && [ "$n_tunnel" != 2 ]; then
   echo "ERROR: Firewall verification failed - T3 Connect is on but the $TUNNEL_PORT rules are missing ($n_tunnel of 2)"; exit 1
 fi
 if [ "$T3_CONNECT" = 0 ] && iptables -S OUTPUT | grep -q -- "--dport $TUNNEL_PORT"; then
   echo "ERROR: Firewall verification failed - T3 Connect is off but a $TUNNEL_PORT rule is present"; exit 1
 fi
-if curl -q --connect-timeout 5 https://1.1.1.1/ >/dev/null 2>&1; then
-  echo "ERROR: Firewall verification failed - was able to reach https://1.1.1.1 (literal IP)"; exit 1
+if [ "$PROFILE" = builder ]; then
+  if curl -q --connect-timeout 5 https://1.1.1.1/ >/dev/null 2>&1; then
+    echo "ERROR: Firewall verification failed - was able to reach https://1.1.1.1 (literal IP)"; exit 1
+  fi
+  if dig -r +short +time=3 +tries=1 example.com @127.0.0.1 2>/dev/null | grep -qE '^[0-9.]+$'; then
+    echo "ERROR: Firewall verification failed - dnsmasq resolved non-allowlisted example.com"; exit 1
+  fi
+  echo "Firewall verification passed - literal IP blocked, non-allowlisted names not resolved"
+elif dig -r +short +time=3 +tries=2 example.com @127.0.0.1 2>/dev/null | grep -qE '^[0-9.]+$'; then
+  echo "Firewall verification passed - research: dnsmasq resolves any name (example.com)"
+else   # soft, like CRAN: a transient DNS hiccup must not brick the start
+  echo "WARNING: research profile but dnsmasq did not resolve example.com right now"
 fi
-if dig -r +short +time=3 +tries=1 example.com @127.0.0.1 2>/dev/null | grep -qE '^[0-9.]+$'; then
-  echo "ERROR: Firewall verification failed - dnsmasq resolved non-allowlisted example.com"; exit 1
-fi
-echo "Firewall verification passed - literal IP blocked, non-allowlisted names not resolved"
 
 if [ "$IPV6_STATE" = filtered ]; then
   for ch in INPUT FORWARD OUTPUT; do
@@ -400,7 +474,7 @@ if ! curl -q --connect-timeout 5 https://api.github.com/zen >/dev/null 2>&1; the
 fi
 echo "Firewall verification passed - able to reach https://api.github.com as expected"
 
-if [ "$T3_CONNECT" = 1 ]; then   # soft, like CRAN below: T3 Connect being down must not brick the start
+if [ "$T3_CONNECT" = 1 ] && [ "$PROFILE" = builder ]; then   # soft, like CRAN below: T3 Connect being down must not brick the start
   if [ -n "$(dig -r +short +time=3 +tries=2 SRV "_v2-origintunneld._tcp.$TUNNEL_DOMAIN" @127.0.0.1 2>/dev/null)" ]; then
     echo "Firewall verification passed - T3 Connect tunnel edge discoverable (SRV via dnsmasq)"
   else

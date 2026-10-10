@@ -186,8 +186,11 @@ jobs:
         run: |
           printf 'www.python.org' > /tmp/40-extra.txt
           printf 'www.r-project.org\r\ncran.r-project.org  # inline comment\n\n# comment only\nwww.mozilla.org' > /tmp/50-project.txt
+          # An EXPLICIT PROFILE=builder switch must give exactly the builder snapshot (test-firewall.sh).
+          printf 'PROFILE=builder\n' > /tmp/profile-builder
           docker network create fwnet
           docker run -d --name fwn --network fwnet --cap-add NET_ADMIN --cap-add NET_RAW \
+            -v /tmp/profile-builder:/etc/firewall/profile:ro \
             -v /tmp/40-extra.txt:/etc/firewall/allowlist.d/40-extra.txt:ro \
             -v /tmp/50-project.txt:/etc/firewall/allowlist.d/50-project.txt:ro \
             -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
@@ -232,6 +235,28 @@ jobs:
           fi
           docker rm -f fwt3
           docker network rm t3net
+          exit $rc
+      - name: Firewall research profile (compose-like network, idempotent re-run, open public egress)
+        if: always() && steps.mode.outputs.mode == 'full'
+        run: |
+          set -o pipefail
+          # The owner's switch, mounted read-only exactly as agent-up's research overlay does.
+          printf 'PROFILE=research\n' > /tmp/profile-research
+          # A public host on an odd port (Cloudflare's tunnel edge, 7844), proven reachable from the runner.
+          EDGE_IP=$(getent ahostsv4 region1.v2.argotunnel.com | awk 'NR==1{print $1}')
+          timeout 8 bash -c "</dev/tcp/$EDGE_IP/7844" && echo "runner reaches $EDGE_IP:7844"
+          docker network create resnet
+          docker run -d --name fwres --network resnet --cap-add NET_ADMIN --cap-add NET_RAW \
+            -v /tmp/profile-research:/etc/firewall/profile:ro \
+            -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
+          UP=$(docker exec fwres awk '/^nameserver/{print $2; exit}' /etc/resolv.conf); echo "original resolver: $UP"
+          docker exec fwres sudo /usr/local/bin/init-firewall.sh | tee /tmp/fwres.log
+          docker exec fwres sudo /usr/local/bin/init-firewall.sh
+          rc=0
+          grep -q '^Profile: research' /tmp/fwres.log || { echo "::error title=research firewall::no 'Profile: research' in the log"; rc=1; }
+          docker exec -u root -e EXPECT_UPSTREAM="$UP" -e EDGE_IP="$EDGE_IP" -e ANNOTATE=1 fwres bash /tests/firewall/test-research.sh || rc=1
+          docker rm -f fwres
+          docker network rm resnet
           exit $rc
       - name: Firewall rejects invalid allowlist entry without touching iptables
         if: steps.mode.outputs.mode == 'full'

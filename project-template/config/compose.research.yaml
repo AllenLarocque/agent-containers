@@ -1,0 +1,42 @@
+# agent-containers: the SHARED RESEARCH container's compose file (PROFILE=research; spec §2.1, Phase 1b).
+# `agent-up init --profile research` copies it to ~/.config/agent-containers/research/compose.yaml.
+# Owner-edited; started only by `agent-up up research`. Interpolation variables come from project.conf.
+# Deliberately ABSENT compared with a builder: the project folder, spades.ai, shared memory, the shared
+# Require/npm caches, the project allowlist and every secret (no project.env, no `op run`).
+# The generated .generated/research.yaml adds: the read-only firewall switch (PROFILE=research: open
+# public egress), the read-only agent instructions, and the research exchange under /research
+# (<project>/briefs read-only, <project>/reports + <project>/downloads read-write).
+name: ${PROJECT:?set PROJECT in project.conf}
+services:
+  agent:
+    image: ghcr.io/allenlarocque/spades-gis@sha256:REPLACE_WITH_DIGEST_FROM_digests.md
+    user: "1000:1000"
+    working_dir: /research
+    init: true
+    cap_add: [NET_ADMIN, NET_RAW]          # firewall
+    mem_limit: 16g                         # state it explicitly; memory gates must read the cgroup limit
+    environment:
+      CLAUDE_CONFIG_DIR: /home/agent/.claude
+      # Spec §12 decision B. ANY value disables (even "0"): delete the line to re-enable.
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+      T3_PROJECT_DIR: /research            # T3 Code's project is the research exchange
+    volumes:
+      - claude-config:/home/agent/.claude   # Claude subscription login (spec §12), own volume
+      - codex-config:/home/agent/.codex     # Codex: ChatGPT login, own volume
+      - npm-cache:/home/agent/.npm          # OWN npm cache: never shared with builders (threat 4)
+      - rlib:/home/agent/.local/share/R     # own R library, for inspecting data in R
+      - t3:/home/agent/.t3                # T3 Code: threads, pairings, server log
+    # Firewall first (research mode, from the read-only switch), then agent-init, then the T3 server.
+    command: ["/usr/local/bin/agent-entrypoint"]
+    ports: ["127.0.0.1:${T3_PORT:?set T3_PORT in project.conf}:3773"]
+volumes:
+  claude-config:
+    name: claude-${PROJECT}
+  codex-config:
+    name: codex-${PROJECT}
+  npm-cache:
+    name: npm-cache-${PROJECT}
+  rlib:
+    name: rlib-${PROJECT}
+  t3:
+    name: t3-${PROJECT}
