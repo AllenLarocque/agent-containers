@@ -1,0 +1,20 @@
+# Weekly version-bump PRs for the pinned agent CLIs (images/base/agent-clis/*).
+# Both CLIs release almost daily; one grouped weekly PR keeps up without the noise.
+# cooldown: a release must be 2 days old before it is proposed, so a bad or
+# compromised release has time to be pulled first. The owner merges as usual.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directories:
+      - /images/base/agent-clis/claude-code
+      - /images/base/agent-clis/codex
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 2
+    groups:
+      agent-clis:
+        patterns: ["*"]
+    commit-message:
+      prefix: chore
+    labels: []
