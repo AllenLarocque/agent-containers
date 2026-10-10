@@ -1,10 +1,12 @@
 name: ci
 on:
   pull_request:
+    # ready_for_review: a draft skips the image build (below), so marking it ready must run the full build.
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 permissions:
   contents: read
-# A newer push to the same PR cancels the run in progress.
+# A newer push to the same PR cancels the run in progress (and so does marking a draft ready).
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -12,6 +14,16 @@ jobs:
   # ONE build per run: the publish script itself (build, push to a local registry:2, smoke-test every
   # image BY DIGEST, promote latest, render digests.md) with layers cached in the GitHub Actions cache.
   # The remaining tests then use those exact images, pulled back as spades-*:ci.
+  #
+  # Fast paths (scripts/ci-classify.sh; full whenever in doubt). build-test is a REQUIRED check, so it
+  # always runs and always concludes; only its steps are gated:
+  #   digests  publish's digests PR (chore/digests-*, digests.md only): verify each digest on ghcr.io
+  #            instead of rebuilding; publish already built and smoke-tested exactly those digests.
+  #   docs     only *.md / docs/** changed (never digests.md, images/**, tests/**): nothing to build.
+  #   draft    a draft PR: render-only launcher tests; the full build runs on ready_for_review.
+  # The classifier is a step, not a separate job: a job this one `needs:` would make build-test
+  # SKIPPED if it failed (a skipped required check counts as passing), and would delay the creation
+  # of this check run, leaving a draft run's success as the latest build-test on the same SHA.
   build-test:
     runs-on: ubuntu-24.04
     services:
@@ -22,18 +34,57 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0          # build-publish.sh dates layers by the last commit touching each image dir
+      - name: changes (full | digests | docs | draft)
+        id: mode
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || format('origin/{0}', github.event.repository.default_branch) }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+          DRAFT: ${{ github.event.pull_request.draft || false }}
+        run: |
+          set -o pipefail
+          mode=$(scripts/ci-classify.sh "$EVENT" "$BASE" "$HEAD" "$BRANCH" "$DRAFT")
+          case $mode in full|digests|docs|draft) ;; *) echo "::error::unknown mode '$mode'"; exit 1 ;; esac
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "::notice title=ci mode::$mode"
+      - name: digests — verify every digest in digests.md on ghcr.io (no rebuild)
+        if: steps.mode.outputs.mode == 'digests'
+        env:
+          BASE: ${{ steps.mode.outputs.base }}
+        run: |
+          set -o pipefail
+          scripts/ci-verify-digests.sh digests.md <(git show "$BASE:digests.md") 2>&1 | tee /tmp/verify.log || {
+            rc=$?
+            msg=$(sed 's/%/%25/g; s/\r//g' /tmp/verify.log | awk '{printf "%s%%0A", $0}')
+            echo "::error title=digests.md verification failed::$msg"
+            exit "$rc"
+          }
+      - name: docs — nothing to build
+        if: steps.mode.outputs.mode == 'docs'
+        run: echo "::notice title=build-test::docs-only change; no image build"
+      - name: draft — launcher render tests (no image)
+        if: steps.mode.outputs.mode == 'draft'
+        run: |
+          bash tests/launcher/test-agent-up.sh
+          echo "::notice title=build-test::image build skipped for draft; runs when marked ready"
       - name: Free runner disk (preinstalled SDKs we never use, ~30 GB)
+        if: steps.mode.outputs.mode == 'full'
         run: |
           # Without this the runner filled up pulling spades-bio back for its smoke test (2026-10-07, PR #5).
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
           df -h /
       # buildx runs in a docker-container builder with network=host so it reaches localhost:5000.
       - uses: docker/setup-buildx-action@v3
+        if: steps.mode.outputs.mode == 'full'
         with:
           driver-opts: network=host
       # Exposes the Actions cache credentials to `docker buildx` run from a script (type=gha cache).
       - uses: crazy-max/ghaction-github-runtime@v3
+        if: steps.mode.outputs.mode == 'full'
       - name: Build (cached) + push to local registry, smoke by digest, render digests.md
+        if: steps.mode.outputs.mode == 'full'
         env:
           BUILD_CACHE: gha
         run: |
@@ -49,6 +100,7 @@ jobs:
           }
           echo "::notice title=build-publish seconds::$(( $(date +%s) - start ))"
       - name: Verify digests.md
+        if: steps.mode.outputs.mode == 'full'
         run: |
           cat /tmp/digests.md
           grep -Pq '^\| spades-base \| 2000\.01\.01-dryrun \| \x60sha256:[0-9a-f]{64}\x60 \|$' /tmp/digests.md
@@ -58,13 +110,14 @@ jobs:
           # header must match the committed skeleton
           diff <(head -7 digests.md) <(head -7 /tmp/digests.md)
       - name: Use the pushed images as spades-*:ci for the remaining tests
+        if: steps.mode.outputs.mode == 'full'
         run: |
           for img in base gis bio; do
             docker pull -q "localhost:5000/allenlarocque/spades-$img:latest"
             docker tag "localhost:5000/allenlarocque/spades-$img:latest" "spades-$img:ci"
           done
       - name: Image size report (annotation)
-        if: always()
+        if: always() && steps.mode.outputs.mode == 'full'
         run: |
           r=$( {
             echo "== images"; docker image ls --format '{{.Repository}}:{{.Tag}}  {{.Size}}' | grep -E '^spades-(base|gis|bio):ci'
@@ -81,6 +134,7 @@ jobs:
           } 2>&1 | sed 's/%/%25/g; s/\r//g' | awk '{printf "%s%%0A", $0}')
           echo "::notice title=image sizes::$r"
       - name: Fresh named volumes are writable by agent (every volume in the compose template)
+        if: steps.mode.outputs.mode == 'full'
         run: |
           # A fresh named volume inherits the ownership of the image dir it mounts on. The list is read from
           # the compose template itself, so a new volume cannot be added without being checked here.
@@ -94,10 +148,10 @@ jobs:
           # and the Codex config into the codex-config volume.
           docker run --rm -v fresh-claude:/home/agent/.claude -v fresh-codex:/home/agent/.codex spades-base:ci bash -c '/usr/local/bin/agent-init.sh 2>&1 | tee /tmp/init.log; ! grep -q WARN /tmp/init.log && test -s /home/agent/.claude/settings.json && test -s /home/agent/.codex/config.toml'
       - name: Firewall IPv6 classifier unit test (no NET_ADMIN, sources the shipped script)
-        if: always()
+        if: always() && steps.mode.outputs.mode == 'full'
         run: docker run --rm -v "$PWD/tests:/tests:ro" spades-base:ci bash /tests/firewall/test-v6-classifier.sh
       - name: Firewall test (default bridge; base + project allowlist merge + parsing; root + agent)
-        if: always()
+        if: always() && steps.mode.outputs.mode == 'full'
         run: |
           # 40-extra: last line has NO trailing newline (boundary with 50-project.txt)
           printf 'www.python.org' > /tmp/40-extra.txt
@@ -123,7 +177,7 @@ jobs:
           docker rm -f fw
           exit $rc
       - name: Firewall on a compose-like network (Docker DNS 127.0.0.11) + idempotent re-run
-        if: always()
+        if: always() && steps.mode.outputs.mode == 'full'
         run: |
           printf 'www.python.org' > /tmp/40-extra.txt
           printf 'www.r-project.org\r\ncran.r-project.org  # inline comment\n\n# comment only\nwww.mozilla.org' > /tmp/50-project.txt
@@ -145,7 +199,7 @@ jobs:
           docker network rm fwnet
           exit $rc
       - name: Firewall with T3 Connect ON (compose-like network, idempotent re-run, real cloudflared)
-        if: always()
+        if: always() && steps.mode.outputs.mode == 'full'
         run: |
           # The owner's switch, mounted read-only exactly as agent-up's generated overlay does.
           printf 'T3_CONNECT=1\n' > /tmp/t3-connect
@@ -175,13 +229,14 @@ jobs:
           docker network rm t3net
           exit $rc
       - name: Firewall rejects invalid allowlist entry without touching iptables
+        if: steps.mode.outputs.mode == 'full'
         run: |
           docker run -d --name fwbad --cap-add NET_ADMIN --cap-add NET_RAW \
             -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
           docker exec -u root fwbad bash /tests/firewall/test-invalid-token.sh
           docker rm -f fwbad
       - name: Firewall IPv6 default-deny on an IPv6-enabled Docker network
-        if: always()
+        if: always() && steps.mode.outputs.mode == 'full'
         run: |
           docker network create --ipv6 --subnet fd00:dead:beef::/48 v6net
           docker run -d --name fw6 --network v6net --cap-add NET_ADMIN --cap-add NET_RAW \
@@ -191,14 +246,14 @@ jobs:
           docker rm -f fw6
           docker network rm v6net
       - name: Firewall fails closed when setup breaks mid-way (dead resolver)
-        if: always()
+        if: always() && steps.mode.outputs.mode == 'full'
         run: |
           docker run -d --name fwdead --dns 192.0.2.1 --cap-add NET_ADMIN --cap-add NET_RAW \
             -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
           docker exec -u root fwdead bash /tests/firewall/test-fail-closed.sh
           docker rm -f fwdead
       - name: Entrypoint with a failing firewall exits and starts nothing (no agent-init, no T3)
-        if: always()
+        if: always() && steps.mode.outputs.mode == 'full'
         run: |
           # Dead resolver -> init-firewall.sh fails -> agent-entrypoint must exit non-zero BEFORE
           # agent-init or the T3 server run. The image's default CMD is the entrypoint.
@@ -212,21 +267,21 @@ jobs:
           fi
           docker rm -f epfail
       - name: Firewall fails closed when setup breaks LATE (dnsmasq cannot bind, after the meta fetch)
-        if: always()
+        if: always() && steps.mode.outputs.mode == 'full'
         run: |
           docker run -d --name fwlate --cap-add NET_ADMIN --cap-add NET_RAW \
             -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
           docker exec -u root fwlate bash /tests/firewall/test-late-failure.sh
           docker rm -f fwlate
       - name: Firewall EXIT trap removes the temporary rules when the meta fetch fails
-        if: always()
+        if: always() && steps.mode.outputs.mode == 'full'
         run: |
           docker run -d --name fwtrap --cap-add NET_ADMIN --cap-add NET_RAW \
             -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
           docker exec -u root fwtrap bash /tests/firewall/test-trap-cleanup.sh
           docker rm -f fwtrap
       - name: Firewall with a long (200-domain) allowlist
-        if: always()
+        if: always() && steps.mode.outputs.mode == 'full'
         run: |
           for i in $(seq -w 0 199); do echo "host$i.long-allowlist-test-padding-label.example.org"; done > /tmp/70-long.txt
           docker run -d --name fwlong --cap-add NET_ADMIN --cap-add NET_RAW \
@@ -238,6 +293,7 @@ jobs:
           docker rm -f fwlong
           exit $rc
       - name: Bio allowlist example passes firewall validation
+        if: steps.mode.outputs.mode == 'full'
         run: |
           # A malformed example would break every real bio project that copies it.
           docker run -d --name fwbio --cap-add NET_ADMIN --cap-add NET_RAW \
@@ -247,9 +303,10 @@ jobs:
           grep -q 'Allowlist: .* 50-project.txt' /tmp/fwbio.log
           docker rm -f fwbio
       - name: Launcher test (agent-up; render + behavioural against the built base image)
-        if: always()
+        if: always() && steps.mode.outputs.mode == 'full'
         run: TEMPLATE_IMAGE=spades-base:ci bash tests/launcher/test-agent-up.sh
       - name: Acceptance (setupProject behind firewall, plain Rscript)
+        if: steps.mode.outputs.mode == 'full'
         run: |
           # CI-ONLY: agent (UID 1000) must be able to write .Rprofile and the project library in the
           # bind mount. Do NOT copy this chown into local scripts (it would hand your files to UID 1000).
@@ -264,7 +321,7 @@ jobs:
           # (via the .Rprofile it wrote), not the site library.
           docker exec -u agent -w /workspace acc Rscript -e 'library(SpaDES.core); print(.libPaths()); p <- find.package("SpaDES.core"); cat("SpaDES.core from:", p, "\n"); stopifnot(startsWith(p, "/home/agent/.local/share/R/workspace/packages")); cat("second run OK\n")'
       - name: Acceptance cleanup
-        if: always()
+        if: always() && steps.mode.outputs.mode == 'full'
         run: docker rm -f acc || true
 
   lint:
@@ -276,6 +333,9 @@ jobs:
         run: |
           shellcheck --version
           shellcheck -S warning images/base/*.sh tests/*/*.sh scripts/*.sh bin/agent-up
+      - name: CI classifier unit test (which change sets may skip the image build)
+        if: always()
+        run: bash tests/ci/test-classify.sh
       - name: actionlint
         if: always()
         run: |
