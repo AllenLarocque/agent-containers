@@ -16,3 +16,4 @@ Projects don't build images: each one references an image **by digest** from its
 manage containers with `bin/agent-up` (see `project-template/README.md`).
 
 Status: **Phase 1 in progress** (PR #3). See `docs/specs/2026-10-03-agent-containers-design.md`.
+
