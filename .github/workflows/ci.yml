@@ -61,6 +61,7 @@ jobs:
             echo "::error title=digests.md verification failed::$msg"
             exit "$rc"
           }
+          echo "::notice title=build-test::digests.md verified on ghcr.io (no rebuild)%0A$(grep '^OK' /tmp/verify.log | awk '{printf "%s%%0A", $0}')"
       - name: docs — nothing to build
         if: steps.mode.outputs.mode == 'docs'
         run: echo "::notice title=build-test::docs-only change; no image build"
