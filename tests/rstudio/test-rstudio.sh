@@ -63,8 +63,8 @@ signin(){ # $1 user, $2 password -> "<http code> <redirect>"; cookies in $W/jar
   CT=30 code -b "$W/jar" -c "$W/jar" --data-urlencode "rs-csrf-token=$csrf" --data-urlencode "v=$v" \
     --data-urlencode "persist=0" --data-urlencode "appUri=" "$U/auth-do-sign-in"
 }
-# A session cookie other than the CSRF one (curl writes HttpOnly cookies as "#HttpOnly_<host> ...").
-signed_in(){ awk '($1 !~ /^#/ || $1 ~ /^#HttpOnly_/) && NF >= 7 && $6 != "rs-csrf-token" {f=1} END{exit !f}' "$W/jar"; }
+# Signed in = the jar's cookies get the IDE instead of a redirect to the sign-in page.
+signed_in(){ [[ $(code -b "$W/jar" "$U/") == 200* ]]; }
 r=$(signin agent wrong-password-0000); [[ $r == *auth-sign-in*error* ]] && ! signed_in && ok "wrong password refused ($r)" || bad "wrong password: $r"
 sleep 6   # auth-sign-in-throttle-seconds
 r=$(signin root "$PW"); [[ $r == *auth-sign-in*error* ]] && ! signed_in && ok "right password, wrong user (root) refused" || bad "user root: $r"
@@ -72,11 +72,14 @@ sleep 6
 r=$(signin agent "$PW")
 if [[ $r == 302\ * ]] && [[ $r != *auth-sign-in* ]] && signed_in; then ok "agent + the owner's password signs in ($r)"; else bad "sign-in failed: $r"; fi
 
-# --- the IDE: rserver launches an R session through rsession-agent
+# --- the IDE page, then client_init (what the page's JS sends first): rserver launches an R session
+# through rsession-agent on client_init, not on the page load.
 rm -f /tmp/rprofile-marker
+r=$(code -b "$W/jar" "$U/"); [[ $r == 200* ]] && ok "signed in: / serves the IDE (HTTP 200)" || bad "signed in: / gives $r"
 t0=$(date +%s.%N)
-r=$(CT=90 code -b "$W/jar" "$U/"); echo "        GET / signed in: $r"
-[[ $r == 200* ]] && ok "signed in: / serves the IDE (HTTP 200)" || bad "signed in: / gives $r"
+r=$(CT=90 code -b "$W/jar" -c "$W/jar" -H "X-RS-CSRF-Token: $csrf" -H 'Content-Type: application/json' \
+  --data '{"method":"client_init","params":[],"clientId":"agent-containers-test","clientVersion":""}' "$U/rpc/client_init")
+echo "        POST /rpc/client_init: $r"
 for _ in $(seq 1 90); do [ -s /tmp/rprofile-marker ] && break; sleep 1; done
 t1=$(date +%s.%N)
 if [ -s /tmp/rprofile-marker ]; then
