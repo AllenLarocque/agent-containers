@@ -13,8 +13,10 @@ die(){ printf 'agent-up: %s\n' "$*" >&2; exit 1; }
 usage(){
   cat >&2 <<'USAGE'
 usage:
-  agent-up init <project-dir> [--name NAME] [--image base|gis|bio] [--profile builder]
+  agent-up init <project-dir> [--name NAME] [--image base|gis|bio]   a builder project
+  agent-up init --profile research [--image base|gis|bio]           the ONE shared research container
   agent-up up <project>                  resolve secrets with `op run`, (re)create the container
+                                         (research: no secrets, no `op run`)
   agent-up config <project> [ARGS...]    print the rendered compose config (no secrets needed)
   agent-up shell <project>               zsh in the container as `agent`
   agent-up pair <project>                print a one-time T3 Code pairing link (valid 10 min)
@@ -42,17 +44,18 @@ cmd_init(){
       *) [ -z "$dir" ] || usage; dir="$1"; shift ;;
     esac
   done
-  [ -n "$dir" ] || usage
-  [ -d "$dir" ] || die "project directory not found: $dir"
-  dir="$(cd "$dir" && pwd -P)"
   case "$image" in base|gis|bio) ;; *) die "--image must be base, gis or bio (got: $image)" ;; esac
   case "$profile" in
     builder) ;;
-    research) die "--profile research is not built yet (spec §2: Phase 1b)" ;;
-    *) die "--profile must be builder (got: $profile)" ;;
+    research) init_research "$dir" "$name" "$image"; return ;;
+    *) die "--profile must be builder or research (got: $profile)" ;;
   esac
+  [ -n "$dir" ] || usage
+  [ -d "$dir" ] || die "project directory not found: $dir"
+  dir="$(cd "$dir" && pwd -P)"
   name="$(normalise "${name:-$(basename "$dir")}")"
   [ -n "$name" ] || die "could not derive a project name from '$dir'; pass --name"
+  [ "$name" != research ] || die "'research' is reserved for the shared research container; pass --name"
   local cfg="$CFG_ROOT/$name"
   { [ ! -e "$cfg" ] && [ ! -L "$cfg" ]; } || die "config already exists: $cfg (edit it there; init never overwrites)"
 
@@ -82,6 +85,11 @@ T3_PORT=$(next_t3_port)
 # T3 Connect (phone/desktop access through T3's relay + a Cloudflare tunnel): 0 = off, 1 = on.
 # Opt-in; read project-template/README.md "T3 Connect (opt-in)" first.
 T3_CONNECT=0
+# Research exchange with the shared research container: 0 = off, 1 = on. On mounts
+# RESEARCH_DIR/<project>/briefs read-write and its reports + downloads READ-ONLY at /research/
+# (project-template/README.md "Research container").
+RESEARCH=0
+RESEARCH_DIR=$HOME/agent-research
 CONFEOF
   chmod 600 "$tmp/compose.yaml" "$tmp/project.env" "$tmp/allowlist" "$tmp/project.conf"
   chmod 700 "$tmp"
@@ -128,22 +136,77 @@ Next (docs/runbooks/new-project.md):
 FINALEOF
 }
 
+init_research(){ # $1 dir (must be empty), $2 --name (must be empty or research), $3 image
+  [ -z "$1" ] || die "--profile research takes no project directory: the research container mounts no project"
+  [ -z "$2" ] || [ "$(normalise "$2")" = research ] || die "the research container is always named 'research'"
+  local name=research image="$3" cfg="$CFG_ROOT/research" rd="$HOME/agent-research"
+  { [ ! -e "$cfg" ] && [ ! -L "$cfg" ]; } || die "config already exists: $cfg (edit it there; init never overwrites)"
+  local old_umask; old_umask=$(umask)
+  umask 077
+  mkdir -p "$CFG_ROOT"; chmod 700 "$CFG_ROOT"
+  local tmp; tmp="$(mktemp -d "$CFG_ROOT/.init.XXXXXX")"
+  trap 'rm -rf "$tmp"' EXIT
+  sed "s|/spades-gis@sha256:|/spades-$image@sha256:|" "$SEEDS/config/compose.research.yaml" > "$tmp/compose.yaml"
+  cat > "$tmp/project.conf" <<CONFEOF
+# Owner-maintained settings for agent-up; also compose interpolation variables (--env-file).
+# KEY=VALUE, no quotes. The SHARED research container (spec §2.1): open public egress, no secrets,
+# no project folder. It sees RESEARCH_DIR/<project>/ for every project subfolder there.
+PROJECT=$name
+PROFILE=research
+IMAGE=$image
+# The research exchange root on the host (not inside any project, config or agent-containers clone).
+RESEARCH_DIR=$rd
+# Host port for this container's T3 Code server (127.0.0.1 only); unique per project.
+T3_PORT=$(next_t3_port)
+# T3 Connect (phone/desktop access through T3's relay + a Cloudflare tunnel): 0 = off, 1 = on.
+T3_CONNECT=0
+CONFEOF
+  chmod 600 "$tmp/compose.yaml" "$tmp/project.conf"
+  chmod 700 "$tmp"
+  mv -T "$tmp" "$cfg"
+  umask "$old_umask"
+  trap - EXIT
+  if [ ! -d "$rd" ]; then
+    mkdir -p "$rd" && echo "agent-up: created the research exchange $rd"
+  fi
+  cat <<FINALEOF
+agent-up: created $cfg (the shared research container: no secrets, no 1Password vault)
+Next (project-template/README.md "Research container"):
+  1. set the image digest in $cfg/compose.yaml (the spades-$image row of agent-containers/digests.md)
+  2. set RESEARCH=1 in each builder project's project.conf that should use it
+  3. agent-up up research; then log in once: agent-up shell research -> claude, codex login --device-auth
+  4. agent-up pair research (T3 Code)
+FINALEOF
+}
+
 cfg_dir(){ # $1 project -> its config dir (must exist)
   local p; p="$(normalise "$1")"
   [ -n "$p" ] || die "empty project name"
   [ -d "$CFG_ROOT/$p" ] || die "no config for '$p' in $CFG_ROOT (run: agent-up init <project-dir>)"
   printf '%s' "$CFG_ROOT/$p"
 }
+profile(){ conf_get "$1/project.conf" PROFILE; }   # $1 config dir
 check_files(){
-  local f cfgname proj prof img
-  for f in compose.yaml project.env allowlist project.conf; do
+  local f cfgname proj prof img files=(compose.yaml project.env allowlist project.conf)
+  [ -f "$1/project.conf" ] || die "missing $1/project.conf (re-create it from agent-containers/project-template/config)"
+  prof="$(profile "$1")"
+  case "$prof" in
+    builder) ;;
+    research) files=(compose.yaml project.conf) ;;   # no secrets, no allowlist: nothing else is used
+    *) die "PROFILE=$prof in $1/project.conf: must be builder or research" ;;
+  esac
+  for f in "${files[@]}"; do
     [ -f "$1/$f" ] || die "missing $1/$f (re-create it from agent-containers/project-template/config)"
   done
   cfgname="$(basename "$1")"
   proj="$(conf_get "$1/project.conf" PROJECT)"
   [ "$proj" = "$cfgname" ] || die "PROJECT in $1/project.conf ($proj) must equal the config dir name ($cfgname)"
-  prof="$(conf_get "$1/project.conf" PROFILE)"
-  [ "$prof" = builder ] || die "PROFILE=$prof in $1/project.conf: only builder is built (research is spec §2 Phase 1b)"
+  if [ "$prof" = research ] && [ "$proj" != research ]; then
+    die "PROFILE=research in $1/project.conf: only the shared research container (agent-up init --profile research) uses it"
+  fi
+  if [ "$prof" = builder ] && [ "$proj" = research ]; then
+    die "the project name 'research' is reserved for the shared research container"
+  fi
   img="$(conf_get "$1/project.conf" IMAGE)"
   case "$img" in base|gis|bio) ;; *) die "IMAGE=$img in $1/project.conf: must be base, gis or bio" ;; esac
 }
@@ -167,6 +230,98 @@ check_t3_connect(){ # only up and config: stop/down/status must work whatever th
     *) die "T3_CONNECT='$(t3_connect "$1")' in $1/project.conf: must be 0 (off) or 1 (on)" ;;
   esac
 }
+research_on(){ # $1 config dir: a builder with exactly RESEARCH=1 (stop/down never validate: anything else is off)
+  [ "$(profile "$1")" = builder ] && [ "$(conf_get "$1/project.conf" RESEARCH)" = 1 ]
+}
+research_dir(){ # $1 config dir -> RESEARCH_DIR as written; absent = ~/agent-research
+  local v; v="$(conf_get "$1/project.conf" RESEARCH_DIR)"; printf '%s' "${v:-$HOME/agent-research}"
+}
+check_research(){ # only up and config: stop/down/status must work whatever the values
+  local v; v="$(conf_get "$1/project.conf" RESEARCH)"
+  if [ "$(profile "$1")" = builder ]; then
+    case "${v:-0}" in
+      0|1) ;;
+      *) die "RESEARCH='$v' in $1/project.conf: must be 0 (off) or 1 (on)" ;;
+    esac
+  fi
+  if [ "$(profile "$1")" = research ] || research_on "$1"; then
+    [[ $(research_dir "$1") == /* ]] || die "RESEARCH_DIR='$(research_dir "$1")' in $1/project.conf: must be an absolute path"
+  fi
+}
+check_research_env(){ # the research container holds NO secrets: a project.env, if present, defines nothing
+  local f="$1/project.env" bad
+  [ -e "$f" ] || return 0
+  bad="$(grep -nEv '^[[:space:]]*(#|$)' "$f" | cut -d: -f1 | paste -sd, - || true)"
+  [ -z "$bad" ] || die "$f: the research container holds no secrets, so it may define nothing (line number(s): $bad, values not shown). Delete the file."
+}
+exchange_dirs(){ # $1 research root, $2 project: create <project>/{briefs,reports,downloads}, never through a symlink
+  local d
+  for d in "$1/$2" "$1/$2/briefs" "$1/$2/reports" "$1/$2/downloads"; do
+    [ ! -L "$d" ] || die "$d is a symlink: the research exchange folders must be real folders"
+    if [ ! -d "$d" ]; then
+      mkdir "$d" || die "could not create $d"
+      echo "agent-up: created $d"
+    fi
+  done
+}
+exchange_projects(){ # $1 research root -> the complete project subfolders, one per line
+  local d p
+  for d in "$1"/*/; do
+    d="${d%/}"; p="${d##*/}"
+    [ -d "$d" ] && [ ! -L "$d" ] || continue
+    if [[ ! $p =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then echo "agent-up: research: skipped '$d' (not a project name)" >&2; continue; fi
+    if [ ! -d "$d/briefs" ] || [ ! -d "$d/reports" ] || [ ! -d "$d/downloads" ] \
+       || [ -L "$d/briefs" ] || [ -L "$d/reports" ] || [ -L "$d/downloads" ]; then
+      echo "agent-up: research: skipped '$d' (needs real briefs/, reports/ and downloads/ folders)" >&2; continue
+    fi
+    printf '%s\n' "$p"
+  done
+}
+make_exchange(){ # up only: the research root and this config's project subfolders
+  local rd other
+  if [ "$(profile "$1")" = research ]; then
+    rd="$(research_dir "$1")"; mkdir -p "$rd"
+    # every builder that opted in (and shares this root), so the order of `up`s does not matter
+    for other in "$CFG_ROOT"/*/project.conf; do
+      [ -f "$other" ] && research_on "$(dirname "$other")" || continue
+      [ "$(research_dir "$(dirname "$other")")" = "$rd" ] || continue
+      exchange_dirs "$rd" "$(basename "$(dirname "$other")")"
+    done
+  elif research_on "$1"; then
+    rd="$(research_dir "$1")"; mkdir -p "$rd"
+    exchange_dirs "$rd" "$(basename "$1")"
+  fi
+}
+check_research_overlaps(){ # every research root (writable by the research container) vs everything an agent must not reach
+  local rds=() prot=() other od k src rd what path clone rootreal
+  clone="$(cd "$HERE/.." && pwd -P)"; rootreal="$(cd "$CFG_ROOT" && pwd -P)"
+  if [ "$(profile "$1")" = research ] || research_on "$1"; then rds+=("$(research_dir "$1")"); fi
+  for other in "$CFG_ROOT"/*/project.conf; do
+    [ -f "$other" ] || continue
+    od="$(dirname "$other")"
+    if [ "$(profile "$od")" = research ]; then rds+=("$(research_dir "$od")"); fi
+  done
+  [ "${#rds[@]}" -gt 0 ] || return 0
+  prot=("the config root|$rootreal" "the agent-containers clone|$clone")
+  for other in "$CFG_ROOT"/*/project.conf; do
+    [ -f "$other" ] || continue
+    od="$(dirname "$other")"
+    [ "$(profile "$od")" = builder ] || continue
+    for k in PROJECT_DIR SPADES_AI_DIR AGENT_MEMORY_DIR; do
+      src="$(conf_get "$other" "$k")"
+      [ -n "$src" ] && [ -d "$src" ] || continue
+      prot+=("$k of project $(basename "$od")|$(cd "$src" && pwd -P)")
+    done
+  done
+  for rd in "${rds[@]}"; do
+    [ -d "$rd" ] || continue
+    rd="$(cd "$rd" && pwd -P)"
+    for what in "${prot[@]}"; do
+      path="${what#*|}"; what="${what%%|*}"
+      ! overlaps "$rd" "$path" || die "RESEARCH_DIR ($rd) overlaps $what ($path): the research container could write into it, or an agent could reach the exchange. Use a separate folder (default ~/agent-research)."
+    done
+  done
+}
 t3_host(){ printf '%s.localhost' "$(printf '%s' "$1" | tr '_' '-')"; } # per-project browser origin (cookies are per host, not per port)
 check_digest(){
   grep -Eq '^[[:space:]]*image:[[:space:]]*[^[:space:]]+@sha256:[0-9a-f]{64}[[:space:]]*$' "$1" \
@@ -174,7 +329,7 @@ check_digest(){
 }
 check_project_env(){ # op:// references only; never echo a line (it could hold a pasted secret)
   local bad reserved
-  reserved="$(grep -nE '^[[:space:]]*(PROJECT|PROJECT_DIR|PROFILE|IMAGE|SPADES_AI_DIR|AGENT_MEMORY_DIR|T3_PORT|T3_CONNECT|PATH|HOME|COMPOSE|(COMPOSE|DOCKER|OP|TUNNEL)_[A-Za-z0-9_]*)=' "$1" | sed 's/^\([0-9]*\):[[:space:]]*\([A-Za-z0-9_]*\)=.*/line \1: \2/' | paste -sd, - || true)"
+  reserved="$(grep -nE '^[[:space:]]*(PROJECT|PROJECT_DIR|PROFILE|IMAGE|SPADES_AI_DIR|AGENT_MEMORY_DIR|T3_PORT|T3_CONNECT|RESEARCH|PATH|HOME|COMPOSE|(COMPOSE|DOCKER|OP|TUNNEL|RESEARCH)_[A-Za-z0-9_]*)=' "$1" | sed 's/^\([0-9]*\):[[:space:]]*\([A-Za-z0-9_]*\)=.*/line \1: \2/' | paste -sd, - || true)"
   [ -z "$reserved" ] || die "$1 uses reserved key name(s) that would override compose or the launcher ($reserved); rename them"
   bad="$(grep -nEv '^[[:space:]]*(#|$)' "$1" | grep -Ev '^[0-9]+:[A-Za-z_][A-Za-z0-9_]*=op://[^[:space:]]+$' | cut -d: -f1 | paste -sd, - || true)"
   [ -z "$bad" ] || die "$1 may hold only KEY=op://... references; offending line number(s): $bad (values not shown)"
@@ -190,6 +345,7 @@ check_mounts(){ # every rw bind source exists and neither contains, equals nor s
   local key src what path clone rootreal
   clone="$(cd "$HERE/.." && pwd -P)"
   rootreal="$(cd "$CFG_ROOT" && pwd -P)"
+  [ "$(profile "$1")" = builder ] || return 0   # research: no project, spades.ai or memory (RESEARCH_DIR: check_research_overlaps)
   for key in PROJECT_DIR SPADES_AI_DIR AGENT_MEMORY_DIR; do
     src="$(conf_get "$1/project.conf" "$key")"
     [ -n "$src" ] || die "$key is not set in $1/project.conf"
@@ -204,7 +360,8 @@ check_mounts(){ # every rw bind source exists and neither contains, equals nor s
 }
 write_passthrough(){ # container env NAMES from project.env; values never touch disk
   local keys k out="$1/.generated/env-passthrough.yaml"
-  keys="$(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$1/project.env" | sort -u)"
+  keys=""   # research: never any (check_research_env refuses a non-empty project.env too)
+  [ "$(profile "$1")" = research ] || keys="$(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$1/project.env" | sort -u)"
   mkdir -p "$1/.generated"; chmod 700 "$1/.generated"
   {
     echo "# GENERATED by agent-up from the key NAMES in project.env. Values are never written. Do not edit."
@@ -242,11 +399,68 @@ write_t3_connect(){ # T3_CONNECT=1: a read-only switch file for the firewall + c
   # Only an exact, validated 1 opens anything; any other value (stop/down do not validate) is off.
   if [ "$(t3_connect "$1")" = 1 ]; then echo "T3_CONNECT=1" > "$flag"; else rm -f "$flag"; fi
 }
+yaml_str(){ # a double-quoted YAML scalar for compose: \ and " escaped, $ doubled (never interpolated)
+  local v="$1"; v="${v//\\/\\\\}"; v="${v//\"/\\\"}"; v="${v//\$/\$\$}"; printf '"%s"' "$v"
+}
+bind_yaml(){ # $1 source, $2 target, $3 ro|rw
+  echo "      - type: bind"
+  echo "        source: $(yaml_str "$1")"
+  echo "        target: $(yaml_str "$2")"
+  if [ "$3" = ro ]; then echo "        read_only: true"; fi
+  echo "        bind: {create_host_path: false}"
+}
+write_research(){ # the research profile's switch + instructions + exchange; a builder's RESEARCH=1 mounts; else nothing
+  local g="$1/.generated" rd p name; name="$(basename "$1")"
+  mkdir -p "$g"; chmod 700 "$g"
+  rd="$(research_dir "$1")"; if [ -d "$rd" ]; then rd="$(cd "$rd" && pwd -P)"; fi
+  {
+    echo "# GENERATED by agent-up from PROFILE, RESEARCH and RESEARCH_DIR in project.conf. Do not edit."
+    echo "services:"
+    if [ "$(profile "$1")" = research ]; then
+      echo "  agent:"
+      echo "    volumes:"
+      echo "      # read by the root firewall at start (open public egress); the agent cannot change it"
+      bind_yaml ./.generated/profile /etc/firewall/profile ro
+      echo "      # the owner's instructions: Claude Code's managed CLAUDE.md, and Codex's global AGENTS.md"
+      bind_yaml ./.generated/agent-instructions.md /etc/claude-code/CLAUDE.md ro
+      bind_yaml ./.generated/agent-instructions.md /home/agent/.codex/AGENTS.md ro
+      echo "      # the research exchange: one set per project subfolder of RESEARCH_DIR ($rd)"
+      if [ -d "$rd" ]; then
+        while IFS= read -r p; do
+          [ -n "$p" ] || continue
+          bind_yaml "$rd/$p/briefs" "/research/$p/briefs" ro
+          bind_yaml "$rd/$p/reports" "/research/$p/reports" rw
+          bind_yaml "$rd/$p/downloads" "/research/$p/downloads" rw
+        done < <(exchange_projects "$rd")
+      fi
+    elif research_on "$1"; then
+      echo "  agent:"
+      echo "    volumes:"
+      echo "      # the owner's instructions (reports and downloads are untrusted data), read-only"
+      bind_yaml ./.generated/agent-instructions.md /etc/claude-code/CLAUDE.md ro
+      bind_yaml ./.generated/agent-instructions.md /home/agent/.codex/AGENTS.md ro
+      echo "      # the research exchange: briefs out (rw); reports and downloads in, READ-ONLY (untrusted)"
+      bind_yaml "$rd/$name/briefs" /research/briefs rw
+      bind_yaml "$rd/$name/reports" /research/reports ro
+      bind_yaml "$rd/$name/downloads" /research/downloads ro
+    else
+      echo "  agent: {}"
+    fi
+  } > "$g/research.yaml"
+  if [ "$(profile "$1")" = research ]; then echo "PROFILE=research" > "$g/profile"; else rm -f "$g/profile"; fi
+  if [ "$(profile "$1")" = research ]; then
+    cp "$SEEDS/instructions/research.md" "$g/agent-instructions.md"; chmod 644 "$g/agent-instructions.md"
+  elif research_on "$1"; then
+    cp "$SEEDS/instructions/builder-research.md" "$g/agent-instructions.md"; chmod 644 "$g/agent-instructions.md"
+  else
+    rm -f "$g/agent-instructions.md"
+  fi
+}
 compose_cmd(){ # sets COMPOSE for config dir $1
   COMPOSE=(docker compose --env-file "$1/project.conf" -f "$1/compose.yaml" -f "$1/.generated/env-passthrough.yaml"
-           -f "$1/.generated/t3-connect.yaml" --project-directory "$1" -p "$(basename "$1")")
+           -f "$1/.generated/t3-connect.yaml" -f "$1/.generated/research.yaml" --project-directory "$1" -p "$(basename "$1")")
 }
-prepare(){ check_files "$1"; write_passthrough "$1"; write_t3_connect "$1"; compose_cmd "$1"; }
+prepare(){ check_files "$1"; write_passthrough "$1"; write_t3_connect "$1"; write_research "$1"; compose_cmd "$1"; }
 
 cmd_up(){
   [ $# -eq 1 ] || usage
@@ -254,16 +468,37 @@ cmd_up(){
   check_files "$cfg"
   check_t3_port "$cfg"
   check_t3_connect "$cfg"
+  check_research "$cfg"
   check_digest "$cfg/compose.yaml"
-  check_project_env "$cfg/project.env"
+  if [ "$(profile "$cfg")" = research ]; then check_research_env "$cfg"; else check_project_env "$cfg/project.env"; fi
   check_mounts "$cfg"
-  [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] || die "OP_SERVICE_ACCOUNT_TOKEN is not set for this project (docs/runbooks/1password-project-vault.md)"
-  prepare "$cfg"
-  local v
-  for v in require-cache-shared npm-cache-shared; do
-    docker volume inspect "$v" >/dev/null 2>&1 || docker volume create "$v" >/dev/null
-  done
-  op run --env-file "$cfg/project.env" -- "${COMPOSE[@]}" up -d --force-recreate
+  if [ "$(profile "$cfg")" = research ] || research_on "$cfg"; then mkdir -p "$(research_dir "$cfg")"; fi
+  check_research_overlaps "$cfg"   # BEFORE any project subfolder is created
+  if [ "$(profile "$cfg")" = research ]; then
+    make_exchange "$cfg"
+    prepare "$cfg"
+    # No secrets at all: no `op run`, and not even the owner's service-account token in compose's environment.
+    env -u OP_SERVICE_ACCOUNT_TOKEN "${COMPOSE[@]}" up -d --force-recreate
+    echo "agent-up: '$name' running (research: open public egress, no secrets). Shell: agent-up shell $name"
+    echo "agent-up: research projects: $(exchange_projects "$(research_dir "$cfg")" 2>/dev/null | paste -sd' ' - || true)"
+  else
+    [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] || die "OP_SERVICE_ACCOUNT_TOKEN is not set for this project (docs/runbooks/1password-project-vault.md)"
+    make_exchange "$cfg"
+    prepare "$cfg"
+    local v
+    for v in require-cache-shared npm-cache-shared; do
+      docker volume inspect "$v" >/dev/null 2>&1 || docker volume create "$v" >/dev/null
+    done
+    op run --env-file "$cfg/project.env" -- "${COMPOSE[@]}" up -d --force-recreate
+    if research_on "$cfg"; then
+      echo "agent-up: research exchange ON: $(research_dir "$cfg")/$name (briefs rw; reports + downloads read-only, at /research)"
+      if [ -f "$CFG_ROOT/research/project.conf" ] && [ "$(research_dir "$CFG_ROOT/research")" != "$(research_dir "$cfg")" ]; then
+        echo "agent-up: WARNING: the research container uses RESEARCH_DIR=$(research_dir "$CFG_ROOT/research"), not $(research_dir "$cfg"): it will not see this project"
+      else
+        echo "agent-up: (a new project folder reaches the research container at its next: agent-up up research)"
+      fi
+    fi
+  fi
   echo "agent-up: '$name' running. Attach: agent-up shell $name, or VS Code: Dev Containers: Attach to Running Container... -> ${name}-agent-1"
   echo "agent-up: T3 Code at http://$(t3_host "$name"):$(conf_get "$cfg/project.conf" T3_PORT) (first time: agent-up pair $name)"
   if [ "$(t3_connect "$cfg")" = 1 ]; then
@@ -273,19 +508,21 @@ cmd_up(){
 cmd_config(){
   [ $# -ge 1 ] || usage
   local cfg; cfg="$(cfg_dir "$1")"; shift
-  check_project_env "$cfg/project.env"
   check_files "$cfg"
+  if [ "$(profile "$cfg")" = research ]; then check_research_env "$cfg"; else check_project_env "$cfg/project.env"; fi
   check_t3_connect "$cfg"
+  check_research "$cfg"
   prepare "$cfg"
   # Never print the owner's ambient value of a passthrough key: it is only meaningful under `op run`.
   local k
-  while IFS= read -r k; do [ -z "$k" ] || unset "$k"; done < <(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$cfg/project.env")
+  [ ! -f "$cfg/project.env" ] || while IFS= read -r k; do [ -z "$k" ] || unset "$k"; done < <(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$cfg/project.env")
   "${COMPOSE[@]}" config "$@"
 }
 cmd_shell(){
   [ $# -eq 1 ] || usage
-  local cfg; cfg="$(cfg_dir "$1")"
-  docker exec -it -u agent -w /workspace "$(basename "$cfg")-agent-1" zsh
+  local cfg wd=/workspace; cfg="$(cfg_dir "$1")"
+  if [ "$(profile "$cfg" 2>/dev/null || true)" = research ]; then wd=/research; fi
+  docker exec -it -u agent -w "$wd" "$(basename "$cfg")-agent-1" zsh
 }
 cmd_pair(){
   [ $# -eq 1 ] || usage
@@ -320,12 +557,21 @@ cmd_status(){
       echo "$name: MISSING or container not running (install log: docker logs $c | grep install-$tool)"
     fi
   done
+  local cfg rd d; cfg="$(cfg_dir "$1")"
+  if [ "$(profile "$cfg")" = research ]; then
+    rd="$(research_dir "$cfg")"
+    echo "Research downloads (on the host, $rd):"
+    for d in "$rd"/*/downloads; do
+      [ -d "$d" ] && [ ! -L "$d" ] || continue
+      du -sh "$d" 2>/dev/null || echo "?	$d"
+    done
+  fi
 }
 
 # Only the owner's config defines the sandbox: ambient compose settings and interpolation variables
 # must not override it (a shell variable beats --env-file in compose).
 unset COMPOSE_FILE COMPOSE_PROFILES COMPOSE_PATH_SEPARATOR COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES \
-      PROJECT PROJECT_DIR PROFILE IMAGE SPADES_AI_DIR AGENT_MEMORY_DIR T3_PORT T3_CONNECT
+      PROJECT PROJECT_DIR PROFILE IMAGE SPADES_AI_DIR AGENT_MEMORY_DIR T3_PORT T3_CONNECT RESEARCH RESEARCH_DIR
 
 [ $# -ge 1 ] || usage
 cmd="$1"; shift

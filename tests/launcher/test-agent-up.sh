@@ -43,6 +43,7 @@ cat > "$T/dstub/docker" <<'STUB'
 #!/usr/bin/env bash
 { echo "ARGS: $*"
   echo "ENV: COMPOSE_FILE=${COMPOSE_FILE-<unset>} COMPOSE_PROFILES=${COMPOSE_PROFILES-<unset>} PROJECT_DIR=${PROJECT_DIR-<unset>} SPADES_AI_DIR=${SPADES_AI_DIR-<unset>} GH_TOKEN=${GH_TOKEN-<unset>}"
+  echo "OPTOK: ${OP_SERVICE_ACCOUNT_TOKEN-<unset>}"
 } >> "$DLOG"
 case "$*" in
   *"agent-t3 pair"*) echo "token=fakeTok_123" ;;
@@ -66,7 +67,7 @@ NAME=demo-proj; CFG="$CFGROOT/$NAME"
 check "agent-up parses" bash -n "$AU"
 refuses "no arguments prints usage" 'usage:' au
 refuses "init refuses a missing project dir" 'project directory not found' au init "$T/nope"
-refuses "init refuses --profile research (Phase 1b)" 'Phase 1b' au init "$P" --profile research
+refuses "init --profile research refuses a project directory" 'takes no project directory' au init "$P" --profile research
 refuses "init refuses an unknown image" 'base, gis or bio' au init "$P" --image foo
 check "init succeeds" env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/dstub:$T/bin:$PATH" bash -c "umask 022; exec '$AU' init '$P'"
 check "agent-memory dir created with mode 755 (not restricted by umask)" test "$(stat -c %a "$H/agent-memory")" = 755
@@ -83,6 +84,9 @@ check "project.conf: SPADES_AI_DIR and AGENT_MEMORY_DIR defaults" \
   bash -c 'grep -qx "SPADES_AI_DIR=$2/GitHub/spades.ai" "$1" && grep -qx "AGENT_MEMORY_DIR=$2/agent-memory" "$1"' _ "$CFG/project.conf" "$H"
 check "project.conf: first project gets T3_PORT=3773" grep -qx "T3_PORT=3773" "$CFG/project.conf"
 check "project.conf: T3_CONNECT=0 (T3 Connect is opt-in)" grep -qx "T3_CONNECT=0" "$CFG/project.conf"
+check "project.conf: RESEARCH=0 (opt-in), RESEARCH_DIR=~/agent-research" \
+  bash -c 'grep -qx "RESEARCH=0" "$1" && grep -qx "RESEARCH_DIR=$2/agent-research" "$1"' _ "$CFG/project.conf" "$H"
+check "a builder init does not create the research exchange" test ! -e "$H/agent-research"
 check "project.env names this project's vault" grep -q "op://agent-$NAME/github-agent/token" "$CFG/project.env"
 check "compose uses spades-gis by default, digest placeholder kept" \
   grep -q "spades-gis@sha256:REPLACE_WITH_DIGEST_FROM_digests.md" "$CFG/compose.yaml"
@@ -112,7 +116,9 @@ check "  ...output says skipped" grep -q "skipped" <<<"$out2"
 check "seed .gitignore copied with normal mode (644)" test "$(stat -c %a "$P/.gitignore")" = 644
 noleft(){ local f; for f in "$CFGROOT"/.init.*; do [ -e "$f" ] && return 1; done; return 0; }
 refuses "refusal: missing dir (again)" 'project directory not found' au init "$T/nope"
-refuses "refusal: research (again)" 'Phase 1b' au init "$P" --profile research --name zz
+refuses "refusal: research with a project dir (again)" 'takes no project directory' au init "$P" --profile research --name zz
+refuses "refusal: a builder named research" "'research' is reserved" au init "$P" --name research
+refuses "refusal: an unknown profile" 'builder or research' au init "$P" --profile foo --name zz
 refuses "refusal: unknown image (again)" 'base, gis or bio' au init "$P" --image foo --name zz
 check "no .init.* leftovers after refusals and successes" noleft
 check "no config dir for refused inits" test ! -e "$CFGROOT/zz"
@@ -150,7 +156,7 @@ cp "$CFG/project.env" "$T/penv.bak"; echo 'PROJECT_DIR=op://v/i/f' >> "$CFG/proj
 refuses "up refuses a reserved key name in project.env" 'reserved' au up "$NAME"
 cp "$T/penv.bak" "$CFG/project.env"
 cp "$CFG/project.conf" "$T/pconf.bak"; sed -i "s|^PROFILE=.*|PROFILE=research|" "$CFG/project.conf"
-refuses "up refuses PROFILE=research (only builder is built)" 'only builder is built' au up "$NAME"
+refuses "up refuses PROFILE=research on a project (only the shared research container)" 'only the shared research container' au up "$NAME"
 cp "$T/pconf.bak" "$CFG/project.conf"
 sed -i "s|^IMAGE=.*|IMAGE=foo|" "$CFG/project.conf"
 refuses "up refuses an unknown IMAGE" 'IMAGE=foo.*base, gis or bio' au up "$NAME"
@@ -201,7 +207,7 @@ AMBIENT=(COMPOSE_FILE=evil.yaml COMPOSE_PROFILES=evil PROJECT_DIR=/evil SPADES_A
 rc=0; out=$(au up "$NAME" 2>&1) || rc=$?
 AMBIENT=()
 check "up succeeds (stub op + stub docker)" test "$rc" -eq 0
-C="compose --env-file $CFG/project.conf -f $CFG/compose.yaml -f $CFG/.generated/env-passthrough.yaml -f $CFG/.generated/t3-connect.yaml --project-directory $CFG -p $NAME"
+C="compose --env-file $CFG/project.conf -f $CFG/compose.yaml -f $CFG/.generated/env-passthrough.yaml -f $CFG/.generated/t3-connect.yaml -f $CFG/.generated/research.yaml --project-directory $CFG -p $NAME"
 check "  ...op run resolves project.env, then runs docker compose" \
   grep -qxF "OP: run --env-file $CFG/project.env -- docker $C up -d --force-recreate" "$OPLOG"
 check "  ...docker compose gets ONLY the config dir's files" grep -qxF "ARGS: $C up -d --force-recreate" "$DLOG"
@@ -216,6 +222,9 @@ check "  ...and holds no value or reference" bash -c '! grep -Eq "fake-secret|op
 T3O="$CFG/.generated/t3-connect.yaml"
 check "T3_CONNECT=0: the T3 Connect overlay adds nothing" bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent: {}")" ]' _ "$T3O"
 check "  ...and no firewall switch file exists" test ! -e "$CFG/.generated/t3-connect"
+RO="$CFG/.generated/research.yaml"
+check "RESEARCH=0: the research overlay adds nothing" bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent: {}")" ]' _ "$RO"
+check "  ...no profile switch, no instructions file" bash -c '[ ! -e "$1/profile" ] && [ ! -e "$1/agent-instructions.md" ]' _ "$CFG/.generated"
 
 # ---- passthrough coverage
 cp "$CFG/project.env" "$T/penv2.bak"
@@ -316,6 +325,136 @@ au config "$NAME" >/dev/null 2>&1 || true
 AMBIENT=()
 check "an ambient T3_CONNECT=1 in the owner's shell changes nothing (only project.conf counts)" test ! -e "$CFG/.generated/t3-connect"
 
+# ---- research profile: the ONE shared research container (spec §2.1, Phase 1b)
+RCFG="$CFGROOT/research"; RD="$H/agent-research"
+refuses "init --profile research refuses another name" "always named 'research'" au init --profile research --name foo
+check "init --profile research (no project dir)" au init --profile research
+check "  ...config dir 'research', mode 700" test "$(stat -c %a "$RCFG")" = 700
+check "  ...holds compose.yaml + project.conf ONLY (no project.env: no secrets; no allowlist)" \
+  test "$(ls -A "$RCFG" | sort | paste -sd' ' -)" = "compose.yaml project.conf"
+check "  ...project.conf: PROFILE=research, IMAGE=gis, RESEARCH_DIR, T3_PORT, T3_CONNECT=0" \
+  bash -c 'grep -qx PROJECT=research "$1" && grep -qx PROFILE=research "$1" && grep -qx IMAGE=gis "$1" && grep -qx "RESEARCH_DIR=$2/agent-research" "$1" && grep -qE "^T3_PORT=[0-9]+$" "$1" && grep -qx T3_CONNECT=0 "$1"' _ "$RCFG/project.conf" "$H"
+check "  ...and NO project folder, spades.ai or memory settings" bash -c '! grep -Eq "^(PROJECT_DIR|SPADES_AI_DIR|AGENT_MEMORY_DIR)=" "$1"' _ "$RCFG/project.conf"
+check "  ...its T3_PORT is unique" bash -c '[ "$(grep -h "^T3_PORT=" "$1"/*/project.conf | sort | uniq -d)" = "" ]' _ "$CFGROOT"
+check "  ...compose: the research seed (spades-gis, 16g, cwd /research, own volumes)" \
+  bash -c 'grep -q "spades-gis@sha256:REPLACE_WITH_DIGEST_FROM_digests.md" "$1" && grep -qE "^    mem_limit: 16g" "$1" && grep -qE "^    working_dir: /research" "$1" && ! sed "s/#.*//" "$1" | grep -Eq "[^_]PROJECT_DIR|SPADES_AI_DIR|AGENT_MEMORY_DIR|require-cache|npm-cache-shared|allowlist|/workspace"' _ "$RCFG/compose.yaml"
+check "  ...created the research exchange root" test -d "$RD"
+refuses "init --profile research never overwrites" 'already exists' au init --profile research
+refuses "up research refuses the placeholder digest" 'not pinned to a real digest' au up research
+sed -i "s/REPLACE_WITH_DIGEST_FROM_digests.md/$H64/" "$RCFG/compose.yaml"
+RC="compose --env-file $RCFG/project.conf -f $RCFG/compose.yaml -f $RCFG/.generated/env-passthrough.yaml -f $RCFG/.generated/t3-connect.yaml -f $RCFG/.generated/research.yaml --project-directory $RCFG -p research"
+: > "$DLOG"; rm -f "$OPLOG"; TOK=""
+AMBIENT=(OP_SERVICE_ACCOUNT_TOKEN=owner-op-token GH_TOKEN=owner-gh-token)
+rc=0; out=$(au up research 2>&1) || rc=$?
+AMBIENT=()
+check "up research succeeds with NO 1Password (no project.env)" test "$rc" -eq 0
+check "  ...never runs op" test ! -e "$OPLOG"
+check "  ...runs docker compose directly, with the research overlay" grep -qxF "ARGS: $RC up -d --force-recreate" "$DLOG"
+check "  ...the owner's OP_SERVICE_ACCOUNT_TOKEN is not in compose's environment" bash -c 'grep -qx "OPTOK: <unset>" "$1" && ! grep -q owner-op-token "$1"' _ "$DLOG"
+check "  ...no shared cache volumes are touched" bash -c '! grep -q "volume inspect" "$1"' _ "$DLOG"
+check "  ...passthrough is empty (no secret names)" grep -qx "    environment: \[\]" "$RCFG/.generated/env-passthrough.yaml"
+check "  ...profile switch says PROFILE=research" test "$(cat "$RCFG/.generated/profile")" = PROFILE=research
+check "  ...research instructions written (readable: mode 644)" \
+  bash -c 'cmp -s "$1" "$2" && [ "$(stat -c %a "$1")" = 644 ]' _ "$RCFG/.generated/agent-instructions.md" "$ROOT/project-template/instructions/research.md"
+check "  ...switch read-only at /etc/firewall/profile; instructions read-only at Claude's managed CLAUDE.md + Codex's AGENTS.md" \
+  bash -c 'f="$1"; for t in /etc/firewall/profile /etc/claude-code/CLAUDE.md /home/agent/.codex/AGENTS.md; do grep -A1 "target: \"$t\"" "$f" | grep -q "read_only: true" || { echo "not ro: $t"; exit 1; }; done' _ "$RCFG/.generated/research.yaml"
+check "  ...no project subfolders yet: no /research mounts" bash -c '! grep -q "target: \"/research/" "$1"' _ "$RCFG/.generated/research.yaml"
+: > "$DLOG"
+check "shell research opens /research" au shell research
+check "  ...docker exec -w /research" grep -qxF "ARGS: exec -it -u agent -w /research research-agent-1 zsh" "$DLOG"
+check "stop research without 1Password" au stop research
+check "down research without 1Password" au down research
+# research holds no secrets: project.env may exist only empty (comments)
+printf '# nothing\n\n' > "$RCFG/project.env"
+check "up research accepts a comments-only project.env" au up research
+echo 'GH_TOKEN=op://agent-research/github-agent/token' >> "$RCFG/project.env"
+refuses "up research refuses ANY key in project.env" 'holds no secrets.*line number' au up research
+refuses "config research refuses ANY key in project.env" 'holds no secrets' au config research
+msg=$(au up research 2>&1 || true)
+check "  ...without echoing the value" bash -c '! grep -q "op://" <<<"$1"' _ "$msg"
+rm -f "$RCFG/project.env"
+
+# builder opt-in: RESEARCH=1
+cp "$CFG/project.conf" "$T/pconf-res.bak"
+sed -i 's/^RESEARCH=.*/RESEARCH=1/' "$CFG/project.conf"
+TOK=tok; : > "$DLOG"
+upout="$(au up "$NAME" 2>&1)" && rc=0 || rc=$?
+check "builder up with RESEARCH=1" test "$rc" -eq 0
+check "  ...created $NAME's briefs/, reports/, downloads/" bash -c 'for d in briefs reports downloads; do [ -d "$1/$2/$d" ] || exit 1; done' _ "$RD" "$NAME"
+check "  ...says so, and how the research container picks it up" grep -q "agent-up up research" <<<"$upout"
+check "  ...briefs read-write at /research/briefs" \
+  bash -c 'grep -A3 "source: \"$2/$3/briefs\"" "$1" | grep -q "target: \"/research/briefs\"" && ! grep -A2 "source: \"$2/$3/briefs\"" "$1" | grep -q read_only' _ "$RO" "$RD" "$NAME"
+for d in reports downloads; do
+  check "  ...$d READ-ONLY at /research/$d" \
+    bash -c 'grep -A2 "source: \"$2/$3/$4\"" "$1" | grep -q "target: \"/research/$4\"" && grep -A2 "source: \"$2/$3/$4\"" "$1" | grep -q "read_only: true"' _ "$RO" "$RD" "$NAME" "$d"
+done
+check "  ...builder instructions (untrusted data) at Claude's managed CLAUDE.md, read-only" \
+  bash -c 'cmp -s "$1/agent-instructions.md" "$2" && grep -A1 "target: \"/etc/claude-code/CLAUDE.md\"" "$1/research.yaml" | grep -q "read_only: true"' _ "$CFG/.generated" "$ROOT/project-template/instructions/builder-research.md"
+check "  ...no profile switch for a builder (its firewall stays the allowlist)" test ! -e "$CFG/.generated/profile"
+check "  ...still uses op run (a builder's secrets are unchanged)" grep -q "^OP: run --env-file $CFG/project.env" "$OPLOG"
+# a second builder opts in but is NOT started: the research container's up creates its folders anyway
+cp "$CFGROOT/bio2/project.conf" "$T/bio2-res.bak"; echo "RESEARCH=1" >> "$CFGROOT/bio2/project.conf"
+mkdir -p "$RD/Bad Name/briefs" "$T/elsewhere"; ln -s "$T/elsewhere" "$RD/linked"
+mkdir -p "$RD/partial/briefs"
+: > "$DLOG"; TOK=""
+upr="$(au up research 2>&1)" && rc=0 || rc=$?
+check "up research with two opted-in projects" test "$rc" -eq 0
+check "  ...created bio2's folders (builder not started: order of ups does not matter)" test -d "$RD/bio2/downloads"
+check "  ...lists both projects" grep -q "research projects: bio2 $NAME" <<<"$upr"
+RRO="$RCFG/.generated/research.yaml"
+for p in bio2 "$NAME"; do
+  check "  ...$p: briefs READ-ONLY, reports + downloads read-write under /research/$p" \
+    bash -c 'grep -A2 "source: \"$2/$3/briefs\"" "$1" | grep -q "target: \"/research/$3/briefs\"" && grep -A2 "source: \"$2/$3/briefs\"" "$1" | grep -q "read_only: true" && for d in reports downloads; do grep -A2 "source: \"$2/$3/$d\"" "$1" | grep -q "target: \"/research/$3/$d\"" && ! grep -A2 "source: \"$2/$3/$d\"" "$1" | grep -q read_only || exit 1; done' _ "$RRO" "$RD" "$p"
+done
+check "  ...skips a symlinked folder, a non-project name and an incomplete folder" \
+  bash -c '! grep -Eq "linked|Bad Name|partial|elsewhere" "$1" && grep -q "skipped" <<<"$2"' _ "$RRO" "$upr"
+check "  ...exactly 2 projects x 3 exchange mounts + switch + 2 instruction mounts" test "$(grep -c "^      - type: bind" "$RRO")" = 9
+rm -rf "$RD/Bad Name" "$RD/partial"; rm -f "$RD/linked"
+echo "x" > "$RD/$NAME/downloads/big.tif"
+stout="$(au status research 2>&1)" || true
+check "status research prints du -sh of each downloads folder" \
+  bash -c 'grep -qE "^[0-9.]+[KMGT]?[[:space:]]+$2/bio2/downloads$" <<<"$1" && grep -qE "^[0-9.]+[KMGT]?[[:space:]]+$2/$3/downloads$" <<<"$1"' _ "$stout" "$RD" "$NAME"
+# RESEARCH: validated by up/config only; a missing key is 0
+for v in 2 yes " 1"; do
+  sed -i "s/^RESEARCH=.*/RESEARCH=$v/" "$CFG/project.conf"
+  refuses "up refuses RESEARCH='$v'" "RESEARCH='$v'.*must be 0 \(off\) or 1 \(on\)" au up "$NAME"
+  check "stop works with RESEARCH='$v'" au stop "$NAME"
+  check "  ...and an invalid value mounts nothing" bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\\n  agent: {}")" ]' _ "$RO"
+done
+sed -i "s/^RESEARCH=.*/RESEARCH=1/" "$CFG/project.conf"
+sed -i "s|^RESEARCH_DIR=.*|RESEARCH_DIR=agent-research|" "$CFG/project.conf"
+refuses "up refuses a relative RESEARCH_DIR" "RESEARCH_DIR='agent-research'.*absolute" au up "$NAME"
+cp "$T/pconf-res.bak" "$CFG/project.conf"; sed -i 's/^RESEARCH=.*/RESEARCH=1/' "$CFG/project.conf"
+cp "$CFG/project.env" "$T/penv-res.bak"
+for k in RESEARCH RESEARCH_DIR; do
+  echo "$k=op://v/i/f" >> "$CFG/project.env"
+  refuses "up refuses reserved key $k in project.env" "reserved.*$k" au up "$NAME"
+  cp "$T/penv-res.bak" "$CFG/project.env"
+done
+# overlaps: every RESEARCH_DIR is writable by the research container
+cp "$RCFG/project.conf" "$T/rconf.bak"
+ov(){ sed -i "s|^RESEARCH_DIR=.*|RESEARCH_DIR=$2|" "$RCFG/project.conf"; refuses "up research refuses RESEARCH_DIR = $1" "$3" au up research; cp "$T/rconf.bak" "$RCFG/project.conf"; }
+mkdir -p "$H/GitHub/spades.ai/sub"
+ov "the config root" "$CFGROOT" 'overlaps the config root'
+ov "a project's config dir (inside the config root)" "$CFG" 'overlaps the config root'
+ov "the agent-containers clone" "$ROOT" 'overlaps the agent-containers clone'
+ov "a builder's project clone" "$P" "overlaps PROJECT_DIR of project $NAME"
+ov "a folder containing every project (HOME)" "$H" 'overlaps (the config root|PROJECT_DIR)'
+ov "a folder inside spades.ai" "$H/GitHub/spades.ai/sub" 'overlaps SPADES_AI_DIR of project'
+ov "the shared agent memory" "$H/agent-memory" 'overlaps AGENT_MEMORY_DIR of project'
+TOK=tok
+sed -i "s|^RESEARCH_DIR=.*|RESEARCH_DIR=$H|" "$CFG/project.conf"
+refuses "builder up refuses its own RESEARCH_DIR overlapping its project" 'RESEARCH_DIR .* overlaps' au up "$NAME"
+cp "$T/pconf-res.bak" "$CFG/project.conf"
+# a builder whose clone sits INSIDE the research root is refused even with RESEARCH=0
+mkdir -p "$RD/clone-inside"; sed -i "s|^PROJECT_DIR=.*|PROJECT_DIR=$RD/clone-inside|" "$CFG/project.conf"
+refuses "builder up refuses a project clone inside the research container's RESEARCH_DIR (RESEARCH=0)" "overlaps PROJECT_DIR of project $NAME" au up "$NAME"
+cp "$T/pconf-res.bak" "$CFG/project.conf"; rmdir "$RD/clone-inside"
+cp "$T/pconf-res.bak" "$CFG/project.conf"; cp "$T/bio2-res.bak" "$CFGROOT/bio2/project.conf"
+check "builder back to RESEARCH=0: config succeeds" au config "$NAME"
+check "  ...and its overlay, instructions are gone" bash -c '[ "$(grep -v "^#" "$1/research.yaml")" = "$(printf "services:\\n  agent: {}")" ] && [ ! -e "$1/agent-instructions.md" ]' _ "$CFG/.generated"
+TOK=""
+
 # ---- rendering with the REAL docker compose (CI; skipped where docker is absent)
 if docker compose version >/dev/null 2>&1; then
   render(){ ( cd "$1" && aureal config "$NAME" --format json ); }   # rendered FROM the given cwd
@@ -362,6 +501,58 @@ if docker compose version >/dev/null 2>&1; then
     jq -e '.services.agent.environment.TUNNEL_EDGE_IP_VERSION == "4" and .services.agent.environment.T3_CONNECT == "1"' <<<"$J1"
   check "rendered (T3_CONNECT=1): otherwise identical to T3_CONNECT=0" \
     bash -c 'diff <(jq -S "del(.services.agent.environment.T3_CONNECT, .services.agent.environment.TUNNEL_EDGE_IP_VERSION) | .services.agent.volumes |= map(select(.target != \"/etc/firewall/t3-connect\"))" <<<"$1") <(jq -S . <<<"$2")' _ "$J1" "$J"
+  # Research exchange, builder opt-in: exactly three /research mounts + the two instruction files, nothing else changes.
+  sed -i 's/^RESEARCH=.*/RESEARCH=1/' "$CFG/project.conf"
+  JR="$(render "$T")"
+  sed -i 's/^RESEARCH=.*/RESEARCH=0/' "$CFG/project.conf"
+  RDR="$(cd "$H/agent-research" && pwd -P)"
+  mr(){ jq -c --arg t "$2" '[.services.agent.volumes[] | select(.target==$t) | {type, source, ro: (.read_only // false)}]' <<<"$1"; }
+  check "rendered (RESEARCH=1): /research/briefs read-WRITE from RESEARCH_DIR/<project>/briefs" \
+    test "$(mr "$JR" /research/briefs)" = "[{\"type\":\"bind\",\"source\":\"$RDR/$NAME/briefs\",\"ro\":false}]"
+  for d in reports downloads; do
+    check "rendered (RESEARCH=1): /research/$d READ-ONLY from RESEARCH_DIR/<project>/$d" \
+      test "$(mr "$JR" "/research/$d")" = "[{\"type\":\"bind\",\"source\":\"$RDR/$NAME/$d\",\"ro\":true}]"
+  done
+  for t in /etc/claude-code/CLAUDE.md /home/agent/.codex/AGENTS.md; do
+    check "rendered (RESEARCH=1): instructions read-only at $t" \
+      test "$(mr "$JR" "$t")" = "[{\"type\":\"bind\",\"source\":\"$CFG/.generated/agent-instructions.md\",\"ro\":true}]"
+  done
+  check "rendered (RESEARCH=1): no profile switch (the builder firewall is unchanged)" \
+    test "$(jq '[.services.agent.volumes[] | select(.target=="/etc/firewall/profile")] | length' <<<"$JR")" = 0
+  check "rendered (RESEARCH=1): otherwise identical to RESEARCH=0" \
+    bash -c 'diff <(jq -S ".services.agent.volumes |= map(select((.target|startswith(\"/research/\")|not) and .target != \"/etc/claude-code/CLAUDE.md\" and .target != \"/home/agent/.codex/AGENTS.md\"))" <<<"$1") <(jq -S . <<<"$2")' _ "$JR" "$J"
+  # The shared research container.
+  JS="$(cd "$T" && aureal config research --format json)"
+  RCFGR="$CFGROOT/research"
+  check "rendered research: project name 'research', cwd /research, mem_limit 16g" \
+    jq -e '.name == "research" and .services.agent.working_dir == "/research" and ((.services.agent.mem_limit|tostring) == "17179869184")' <<<"$JS"
+  check "rendered research: image pinned by digest" bash -c 'jq -r .services.agent.image <<<"$1" | grep -Eq "spades-gis@sha256:[0-9a-f]{64}$"' _ "$JS"
+  check "rendered research: NO project, spades.ai, memory, Require cache or project allowlist mount" \
+    jq -e '[.services.agent.volumes[].target | select(. == "/workspace" or . == "/opt/memory" or . == "/opt/reference/spades.ai" or . == "/home/agent/.cache/R/Require" or startswith("/etc/firewall/allowlist.d"))] == []' <<<"$JS"
+  check "rendered research: environment holds no secret (exactly the 3 seed variables)" \
+    jq -e '(.services.agent.environment | keys) == ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC","CLAUDE_CONFIG_DIR","T3_PROJECT_DIR"] and .services.agent.environment.T3_PROJECT_DIR == "/research"' <<<"$JS"
+  check "rendered research: profile switch read-only at /etc/firewall/profile (the only /etc/firewall mount)" \
+    bash -c '[ "$(jq -c "[.services.agent.volumes[] | select(.target|startswith(\"/etc/firewall\")) | {target, source, ro: (.read_only // false)}]" <<<"$1")" = "[{\"target\":\"/etc/firewall/profile\",\"source\":\"$2/.generated/profile\",\"ro\":true}]" ]' _ "$JS" "$RCFGR"
+  for t in /etc/claude-code/CLAUDE.md /home/agent/.codex/AGENTS.md; do
+    check "rendered research: instructions read-only at $t" \
+      test "$(mr "$JS" "$t")" = "[{\"type\":\"bind\",\"source\":\"$RCFGR/.generated/agent-instructions.md\",\"ro\":true}]"
+  done
+  for p in bio2 "$NAME"; do
+    check "rendered research: /research/$p/briefs READ-ONLY" test "$(mr "$JS" "/research/$p/briefs")" = "[{\"type\":\"bind\",\"source\":\"$RDR/$p/briefs\",\"ro\":true}]"
+    for d in reports downloads; do
+      check "rendered research: /research/$p/$d read-write" test "$(mr "$JS" "/research/$p/$d")" = "[{\"type\":\"bind\",\"source\":\"$RDR/$p/$d\",\"ro\":false}]"
+    done
+  done
+  check "rendered research: every read-write bind is inside RESEARCH_DIR" \
+    bash -c 'jq -r ".services.agent.volumes[] | select(.type==\"bind\" and ((.read_only // false)|not)) | .source" <<<"$1" | while IFS= read -r s; do case "$s" in "$2"/*) ;; *) echo "rw outside: $s"; exit 1;; esac; done' _ "$JS" "$RDR"
+  check "rendered research: its OWN volumes (claude/codex/npm-cache/rlib/t3-research), nothing shared or external" \
+    jq -e '[.volumes[] | {name, external: (.external // false)}] | sort_by(.name) == [{"name":"claude-research","external":false},{"name":"codex-research","external":false},{"name":"npm-cache-research","external":false},{"name":"rlib-research","external":false},{"name":"t3-research","external":false}]' <<<"$JS"
+  check "rendered research: T3 on the host's 127.0.0.1 only" \
+    jq -e '[.services.agent.ports[] | {host_ip, target}] == [{"host_ip":"127.0.0.1","target":3773}]' <<<"$JS"
+  research_hidden(){ local o; o="$(cd "$T" && aureal config research --format json)" || return 1; ! grep -q dummy-render <<<"$o"; }
+  AMBIENT=(GH_TOKEN=dummy-render OP_SERVICE_ACCOUNT_TOKEN=dummy-render)
+  check "rendered research: ambient GH_TOKEN / OP_SERVICE_ACCOUNT_TOKEN never appear" research_hidden
+  AMBIENT=()
   ( cd "$T" && aureal config "$NAME" >/dev/null 2>&1 ) || true   # regenerate the T3_CONNECT=0 overlay
   ambient_hidden(){ local o; o="$(cd "$T" && aureal config "$NAME" --format json)" || return 1; ! grep -q dummy-render <<<"$o"; }
   AMBIENT=(GH_TOKEN=dummy-render)
@@ -380,6 +571,10 @@ else
   echo "SKIP: render checks (docker compose not available here; CI runs them)"
 fi
 
+# In CI, a container's state and log tail as ONE annotation (job logs are not readable remotely).
+diag(){ [ -n "${GITHUB_ACTIONS:-}" ] || return 0
+  local m; m=$( { docker inspect -f 'state={{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}}' "$1"; docker logs "$1" 2>&1 | grep -vE '^\[install-|^Adding GitHub range' | tail -n 40; } 2>&1 | sed 's/%/%25/g; s/\r//g' | awk '{printf "%s%%0A", $0}')
+  echo "::notice title=$2 container::$m"; }
 # ---- behavioural: the rendered sandbox against the CI-built image (TEMPLATE_IMAGE=spades-base:ci).
 # `agent-up up` needs a registry digest, so this uses the SAME compose arguments agent-up uses
 # (pinned above) plus one override that swaps in the local image and skips agent-init.
@@ -389,6 +584,8 @@ if [ -n "${TEMPLATE_IMAGE:-}" ]; then
   # T3 Connect ON here: proves the whole chain project.conf -> agent-up overlay -> read-only switch ->
   # root firewall. (OFF is the absent switch, which the CI firewall steps cover.)
   sed -i 's/^T3_CONNECT=.*/T3_CONNECT=1/' "$CFG/project.conf"
+  # Research exchange ON too (its folders exist from the research section above).
+  sed -i 's/^RESEARCH=.*/RESEARCH=1/' "$CFG/project.conf"
   au config "$NAME" >/dev/null 2>&1 || true   # (re)writes .generated/ (stub docker)
   cat > "$T/override.yaml" <<OVR
 services:
@@ -398,14 +595,21 @@ services:
 OVR
   dc(){ env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u COMPOSE_FILE HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" GH_TOKEN=dummy-in-container \
           docker compose --env-file "$CFG/project.conf" -f "$CFG/compose.yaml" -f "$CFG/.generated/env-passthrough.yaml" \
-          -f "$CFG/.generated/t3-connect.yaml" -f "$T/override.yaml" --project-directory "$CFG" -p "$NAME" "$@"; }
-  trap 'dc down -v >/dev/null 2>&1 || true; rm -rf "$T"' EXIT
+          -f "$CFG/.generated/t3-connect.yaml" -f "$CFG/.generated/research.yaml" -f "$T/override.yaml" --project-directory "$CFG" -p "$NAME" "$@"; }
+  # The research container: agent-up's exact arguments, with the owner's ambient secrets in compose's
+  # environment (they must NOT reach the container).
+  rdc(){ env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u COMPOSE_FILE HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" \
+          GH_TOKEN=ambient-gh OP_SERVICE_ACCOUNT_TOKEN=ambient-op \
+          docker compose --env-file "$RCFG/project.conf" -f "$RCFG/compose.yaml" -f "$RCFG/.generated/env-passthrough.yaml" \
+          -f "$RCFG/.generated/t3-connect.yaml" -f "$RCFG/.generated/research.yaml" -f "$T/override.yaml" --project-directory "$RCFG" -p research "$@"; }
+  trap 'dc down -v >/dev/null 2>&1 || true; rdc down -v >/dev/null 2>&1 || true; rm -rf "$T"' EXIT
   for v in require-cache-shared npm-cache-shared; do
     docker volume inspect "$v" >/dev/null 2>&1 || docker volume create "$v" >/dev/null
   done
   # CI runner UID != 1000. In real use these are the agent's own (UID 1000) directories.
   touch "$P/.from-host"   # sentinel: proves /workspace is the host project dir, not the image's empty dir
-  chmod -R a+rwX "$P" "$H/GitHub/spades.ai" "$H/agent-memory"
+  chmod -R a+rwX "$P" "$H/GitHub/spades.ai" "$H/agent-memory" "$H/agent-research"
+  echo "# a finding" > "$H/agent-research/$NAME/reports/host-report.md"
   check "sandbox starts" dc up -d
   CID="$(dc ps -q agent || true)"
   if [ -z "$CID" ]; then
@@ -416,6 +620,7 @@ OVR
     T3P=$(sed -n 's/^T3_PORT=//p' "$CFG/project.conf")
     for _ in $(seq 1 240); do curl -fsS -o /dev/null --max-time 3 "http://127.0.0.1:$T3P/" 2>/dev/null && break; sleep 2; done
     check "firewall initialised by the entrypoint" bash -c 'docker logs "$1" 2>&1 | grep -q "Firewall verification passed - CRAN reachable"' _ "$CID"
+    diag "$CID" builder
     check "  ...and BEFORE agent-init and T3 started (log order)" \
       bash -c 'docker logs "$1" 2>&1 | grep -nE "Firewall verification passed - CRAN|\[agent-init\]|\[agent-t3\]" | head -n 1 | grep -q "Firewall verification"' _ "$CID"
     # The file is mode 600 owned by the CI runner (not UID 1000), so only root can read it.
@@ -498,8 +703,65 @@ OVR
       bash -c 'out=$(docker exec -u agent -e T3_CONNECT=0 "$1" sudo /usr/local/bin/init-firewall.sh 2>&1) && grep -q "^T3 Connect: ON" <<<"$out"' _ "$CID"
     check "project-allowlisted www.python.org resolves" \
       bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 www.python.org A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID"
+    # Research exchange (RESEARCH=1): briefs out read-write; reports and downloads in, read-only.
+    check "RESEARCH=1: the agent can write /research/briefs" docker exec -u agent "$CID" sh -c 'echo brief > /research/briefs/b.md'
+    check "  ...it lands in the host's RESEARCH_DIR/<project>/briefs" test -f "$H/agent-research/$NAME/briefs/b.md"
+    check "  ...the agent reads the research reports" docker exec -u agent "$CID" grep -q "a finding" /research/reports/host-report.md
+    for d in reports downloads; do
+      check "  .../research/$d is a read-only mount (even root cannot write it)" \
+        bash -c 'out="$(docker exec -u root "$1" sh -c "echo x > /research/$2/x" 2>&1)"; rc=$?; [ "$rc" -ne 0 ] && printf "%s" "$out" | grep -q "Read-only file system"' _ "$CID" "$d"
+    done
+    check "  ...the owner's instructions at Claude's managed CLAUDE.md (untrusted data), read-only" \
+      bash -c 'docker exec -u agent "$1" grep -q "UNTRUSTED DATA" /etc/claude-code/CLAUDE.md && ! docker exec -u root "$1" sh -c "echo x >> /etc/claude-code/CLAUDE.md" 2>/dev/null' _ "$CID"
+    check "  ...the same for Codex (AGENTS.md in CODEX_HOME)" docker exec -u agent "$CID" grep -q "UNTRUSTED DATA" /home/agent/.codex/AGENTS.md
+    check "  ...the builder firewall is unchanged (no profile switch: allowlist only)" \
+      bash -c '! docker exec "$1" test -e /etc/firewall/profile && ! docker logs "$1" 2>&1 | grep -q "^Profile: research"' _ "$CID"
   fi
   dc down -v >/dev/null 2>&1 || true
+
+  # ---- the shared research container (PROFILE=research), real entrypoint
+  au config research >/dev/null 2>&1 || true   # (re)writes its .generated/ (stub docker)
+  check "research container starts" rdc up -d
+  RID="$(rdc ps -q agent || true)"
+  if [ -z "$RID" ]; then
+    check "research container id" false
+  else
+    RP=$(sed -n 's/^T3_PORT=//p' "$RCFG/project.conf")
+    for _ in $(seq 1 240); do curl -fsS -o /dev/null --max-time 3 "http://127.0.0.1:$RP/" 2>/dev/null && break; sleep 2; done
+    diag "$RID" research
+    check "research: firewall in research mode (read from the switch)" \
+      bash -c 'docker logs "$1" 2>&1 | grep -q "^Profile: research" && docker logs "$1" 2>&1 | grep -q "Firewall verification passed - research"' _ "$RID"
+    check "research: NO GH_TOKEN and no OP_* in the container (ambient owner secrets did not leak)" \
+      bash -c 'e="$(docker exec "$1" env)"; ! grep -Eq "^(GH_TOKEN|GITHUB_TOKEN|OP_[A-Z_]*)=" <<<"$e" && ! grep -q ambient- <<<"$e"' _ "$RID"
+    check "research: no project, spades.ai or memory mount" \
+      bash -c '! docker inspect -f "{{range .Mounts}}{{.Destination}} {{end}}" "$1" | grep -Eq "(^| )(/workspace|/opt/memory|/opt/reference/spades.ai)( |$)"' _ "$RID"
+    check "research: /research holds exactly the exchange projects" \
+      test "$(docker exec -u agent "$RID" ls /research | paste -sd' ' -)" = "bio2 $NAME"
+    check "  ...briefs are READ-ONLY for the research agent (even root)" \
+      bash -c 'out="$(docker exec -u root "$1" sh -c "echo x > /research/$2/briefs/x" 2>&1)"; rc=$?; [ "$rc" -ne 0 ] && printf "%s" "$out" | grep -q "Read-only file system"' _ "$RID" "$NAME"
+    check "  ...it reads the builder's brief" docker exec -u agent "$RID" grep -q brief "/research/$NAME/briefs/b.md"
+    for d in reports downloads; do
+      check "  ...it writes /research/$NAME/$d" docker exec -u agent "$RID" sh -c "echo r > /research/$NAME/$d/from-research.txt"
+    done
+    check "  ...and cannot create a new project folder" bash -c '! docker exec -u agent "$1" mkdir /research/newproj 2>/dev/null' _ "$RID"
+    check "research: its instructions at Claude's managed CLAUDE.md, read-only" \
+      bash -c 'docker exec -u agent "$1" grep -q "shared RESEARCH agent" /etc/claude-code/CLAUDE.md && ! docker exec -u root "$1" sh -c "echo x >> /etc/claude-code/CLAUDE.md" 2>/dev/null' _ "$RID"
+    check "research: the profile switch is a read-only mount (even root cannot write it)" \
+      bash -c 'out="$(docker exec -u root "$1" sh -c "echo PROFILE=builder > /etc/firewall/profile" 2>&1)"; rc=$?; [ "$rc" -ne 0 ] && printf "%s" "$out" | grep -q "Read-only file system"' _ "$RID"
+    check "research: an agent re-run of the firewall stays research (the switch, not the env, decides)" \
+      bash -c 'out=$(docker exec -u agent -e PROFILE=builder "$1" sudo /usr/local/bin/init-firewall.sh 2>&1) && grep -q "^Profile: research" <<<"$out"' _ "$RID"
+    check "research: open egress (non-allowlisted https://example.com)" docker exec -u agent "$RID" curl -q -fsS -o /dev/null --max-time 20 https://example.com/
+    check "research: the gateway (host) is rejected" \
+      bash -c 'gw=$(docker exec "$1" ip -4 route show default | awk "{print \$3; exit}"); e=$(docker exec -u agent "$1" bash -c "timeout 8 bash -c \"</dev/tcp/$gw/3773\"" 2>&1); [ $? -ne 0 ] && grep -Eq "No route to host|Operation not permitted" <<<"$e"' _ "$RID"
+    check "research: T3 started with /research as its project" \
+      bash -c 'docker logs "$1" 2>&1 | grep -q "\[agent-t3\] server up" && docker exec "$1" pgrep -af "t3 serve" | grep -q -- "--auto-bootstrap-project-from-cwd /research"' _ "$RID"
+    check "  ...reachable from the host at 127.0.0.1:<its T3_PORT>" curl -fsS -o /dev/null --max-time 5 "http://127.0.0.1:$RP/"
+    check "research: Claude Code and Codex installed (own npm cache)" \
+      bash -c 'docker logs "$1" 2>&1 | grep -q "\[install-claude-code\] installed: claude" && docker logs "$1" 2>&1 | grep -q "\[install-codex\] installed: codex"' _ "$RID"
+    check "research: no GitHub write identity (agent-init saw no GH_TOKEN)" \
+      bash -c 'docker logs "$1" 2>&1 | grep -q "no GH_TOKEN" && [ -z "$(docker exec -u agent "$1" git config --global user.email 2>/dev/null)" ]' _ "$RID"
+  fi
+  rdc down -v >/dev/null 2>&1 || true
 else
   echo "SKIP: behavioural sandbox checks (set TEMPLATE_IMAGE to a built image; CI does)"
 fi

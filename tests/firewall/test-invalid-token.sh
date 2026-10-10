@@ -42,4 +42,21 @@ try_switch "yes"        'T3_CONNECT=yes\n'
 try_switch "bare 1"     '1\n'
 try_switch "two lines"  'T3_CONNECT=1\nT3_CONNECT=1\n'
 try_switch "empty"      ''
+# The profile switch (spec §2.1, research profile): anything but exactly PROFILE=builder/research too.
+try_profile(){ # $1 = label, $2 = switch content (printf format)
+  printf "$2" > /etc/firewall/profile
+  local before after out rc
+  before=$(snap)
+  out=$(/usr/local/bin/init-firewall.sh 2>&1); rc=$?
+  after=$(snap)
+  rm -f /etc/firewall/profile
+  [ "$rc" -ne 0 ] && echo "OK:   [profile $1] exit non-zero ($rc)" || { echo "FAIL: [profile $1] exited 0"; fail=1; }
+  echo "$out" | grep -q "profile must hold exactly" && echo "OK:   [profile $1] validation error names the switch" \
+    || { echo "FAIL: [profile $1] no validation error in output:"; echo "$out" | tail -5; fail=1; }
+  [ "$before" = "$after" ] && echo "OK:   [profile $1] iptables/ip6tables/ipset untouched" || { echo "FAIL: [profile $1] iptables state changed"; fail=1; }
+}
+try_profile "bare research" 'research\n'
+try_profile "open"          'PROFILE=open\n'
+try_profile "two lines"     'PROFILE=research\nPROFILE=research\n'
+try_profile "empty"         ''
 [ "$fail" -eq 0 ] && echo "INVALID-TOKEN: ALL PASSED" || { echo "INVALID-TOKEN: FAILURES"; exit 1; }

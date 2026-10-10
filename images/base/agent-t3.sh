@@ -8,6 +8,7 @@ set -uo pipefail
 log(){ printf '[agent-t3] %s\n' "$*"; }
 BASE="${T3_BASE_DIR:-$HOME/.t3}"
 PORT=3773
+PROJECT_DIR="${T3_PROJECT_DIR:-/workspace}"   # T3's project: builders /workspace; the research container sets /research
 
 case "${1:-}" in
   start)
@@ -17,7 +18,7 @@ case "${1:-}" in
     fi
     # Telemetry off (also set in the image ENV); the PostHog host is not allowlisted anyway.
     T3CODE_TELEMETRY_ENABLED=false setsid nohup t3 serve --host 0.0.0.0 --port "$PORT" --base-dir "$BASE" \
-      --auto-bootstrap-project-from-cwd /workspace >>"$BASE/serve.log" 2>&1 </dev/null &
+      --auto-bootstrap-project-from-cwd "$PROJECT_DIR" >>"$BASE/serve.log" 2>&1 </dev/null &
     for _ in $(seq 1 30); do
       curl -fsS -o /dev/null --max-time 2 "http://127.0.0.1:$PORT/" 2>/dev/null && { log "server up on :$PORT (log: $BASE/serve.log)"; exit 0; }
       sleep 1

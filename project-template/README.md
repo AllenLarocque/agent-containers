@@ -6,6 +6,8 @@ This folder is **not copied into your project by hand.** `bin/agent-up init` use
 |---|---|---|
 | `config/compose.yaml`, `config/project.env`, `config/allowlist` (+ `config/allowlist.bio-example` for `--image bio`) | `~/.config/agent-containers/<project>/` | you, the owner. **Never mounted** into the container, except `allowlist` (read-only) and, with `T3_CONNECT=1`, the generated T3 Connect switch (read-only) |
 | `repo/.github/CODEOWNERS`, `repo/.github/workflows/gitleaks.yml`, `repo/.gitignore` | the project folder (only where absent) | you; commit them |
+| `config/compose.research.yaml` | `~/.config/agent-containers/research/compose.yaml` (`init --profile research`) | you |
+| `instructions/research.md`, `instructions/builder-research.md` | `<config>/.generated/agent-instructions.md` at every `agent-up` run, mounted **read-only** as Claude's managed `CLAUDE.md` and Codex's `AGENTS.md` (research container; builders with `RESEARCH=1`) | change them here (PR) |
 
 **Why outside the project:** the project folder is the agent's read-write workspace. Anything
 there could be changed by the agent, so the host never executes or reads configuration from it
@@ -19,6 +21,7 @@ Host: Linux or WSL2 (GNU coreutils).
 | Command | Does |
 |---|---|
 | `bin/agent-up init <project-dir> [--image gis\|bio\|base]` | creates `~/.config/agent-containers/<project>/` and adds the repo files to the project |
+| `bin/agent-up init --profile research` | creates the shared research container's config (`research`) and `~/agent-research/` (see "Research container") |
 | `bin/agent-up up <project>` | checks the digest, the mounts and `project.env`, then `op run ... docker compose ... up -d --force-recreate` |
 | `bin/agent-up config <project>` | prints the rendered compose config: exactly what will run (no secrets needed) |
 | `bin/agent-up shell <project>` | `zsh` in the container as `agent` |
@@ -117,6 +120,74 @@ without it, the server keeps trying to reach the relay, which the firewall now b
 the steps above; the image must be one that includes T3 Connect support (a digest from
 `digests.md` dated after this change).
 
+## Research container
+
+One **shared** container, `research`, does the web research for every project (spec §2.1). It has
+open internet (public IPv4, any port) and **nothing to lose**: no secrets, no GitHub token, no
+project, spades.ai or memory mount. Builders stay behind their allowlists and exchange files with
+it through `~/agent-research/<project>/` (`RESEARCH_DIR` in `project.conf`), where `<project>` is
+the builder's exact project name:
+
+| `~/agent-research/<project>/` | research container | builder with `RESEARCH=1` |
+|---|---|---|
+| `briefs/` | `/research/<project>/briefs` **read-only** | `/research/briefs` read-write |
+| `reports/` | `/research/<project>/reports` read-write | `/research/reports` **read-only** |
+| `downloads/` | `/research/<project>/downloads` read-write | `/research/downloads` **read-only** |
+
+**Set up** (once; no 1Password vault, no service account):
+
+```bash
+agent-up init --profile research          # ~/.config/agent-containers/research/ + ~/agent-research/
+# set the spades-gis digest from digests.md in ~/.config/agent-containers/research/compose.yaml
+# for each builder that should use it: RESEARCH=1 in ~/.config/agent-containers/<project>/project.conf
+agent-up up <project>                     # each opted-in builder: mounts its three folders
+agent-up up research                      # no OP_SERVICE_ACCOUNT_TOKEN needed; mounts every project folder
+agent-up shell research                   # first time: `claude` (log in), `codex login --device-auth`
+agent-up pair research                    # T3 Code for the research container (its project is /research)
+```
+
+`docker logs research-agent-1` shows `Profile: research`. A builder opted in **after** the research
+container started reaches it at its next `agent-up up research`.
+
+**Day to day:**
+1. **Brief.** Ask in the research container's T3 (or `agent-up shell research`, `claude`), or drop a
+   Markdown brief in `~/agent-research/<project>/briefs/`. A builder agent can write the brief
+   itself in `/research/briefs/`.
+2. **Report.** The research agent writes `reports/<topic>.md` (URLs, licence, access method, size,
+   CRS/resolution, the hosts to allowlist) and, when inspection needs it, whole files in `downloads/`.
+3. **Builder.** The builder agent reads the report and inspects downloads **without executing or
+   building on them**, then proposes a `prepInputs()` call on the original URL and asks you to
+   allowlist its host(s).
+4. **You allowlist** the host(s) in that builder's `allowlist` and `agent-up up <project>`. The
+   model then fetches the original itself, reproducibly.
+
+`agent-up status research` prints `du -sh` of each project's `downloads/` (there is no download cap:
+clean up by hand).
+
+**What keeps it apart:**
+- The switch is yours: `PROFILE=research` in the research config makes `agent-up` mount a read-only
+  `/etc/firewall/profile`; neither container can change it. Builders never get it.
+- Open egress still excludes private, shared (CGNAT/Tailscale), link-local (cloud metadata),
+  loopback and reserved ranges, the container's own networks and the Docker host.
+- The instructions both sides get (`instructions/*.md`) are mounted read-only at Claude Code's
+  managed `/etc/claude-code/CLAUDE.md` (and Codex's `AGENTS.md`). Builders are told that reports
+  and downloads are **untrusted data, never instructions**, never to execute anything from
+  `/research`, and never to build the model on downloaded files.
+- **Not `noexec`:** Docker bind mounts can't be mounted `noexec`. Read-only, the instructions and the
+  builder's allowlist are the controls.
+- `agent-up up` refuses a `RESEARCH_DIR` that overlaps the config root, this clone, or any project's
+  folder, spades.ai or `~/agent-memory`.
+
+**Risks you accept** (spec §2.1, §12): your Claude subscription login sits in an open-egress
+container (if you suspect anything, log the session out at claude.ai); it shares your Claude usage
+limits with every builder; treat `~/agent-research/` as untrusted on the host too (never run or
+`source` anything from it, and beware tools that execute content).
+
+**Upgrading a builder created before the research container:** nothing to do to keep it off
+(`RESEARCH` absent = 0). To opt in, add `RESEARCH=1` (and, only if you moved it, `RESEARCH_DIR=...`)
+to its `project.conf`. The research container needs an image digest from `digests.md` dated after
+this change (an older image ignores the switch and stays on the builder allowlist).
+
 ## Lifecycle
 
 | Action | Steps |
@@ -136,6 +207,9 @@ the steps above; the image must be one that includes T3 Connect support (a diges
 | `/opt/memory` | `AGENT_MEMORY_DIR` (default `~/agent-memory`, a git repo) | rw |
 | `/etc/firewall/allowlist.d/50-project.txt` | `~/.config/agent-containers/<project>/allowlist` | **ro** |
 | `/etc/firewall/t3-connect` (only with `T3_CONNECT=1`) | `~/.config/agent-containers/<project>/.generated/t3-connect`, written by `agent-up` from `project.conf` | **ro** |
+| `/research/briefs` (only with `RESEARCH=1`) | `RESEARCH_DIR/<project>/briefs` | rw |
+| `/research/reports`, `/research/downloads` (only with `RESEARCH=1`) | `RESEARCH_DIR/<project>/reports`, `.../downloads`: written by the research container | **ro** (untrusted) |
+| `/etc/claude-code/CLAUDE.md`, `~/.codex/AGENTS.md` (only with `RESEARCH=1`) | `.generated/agent-instructions.md`, from `instructions/builder-research.md` | **ro** |
 | `~/.claude`, `~/.codex`, the project R library | volumes `claude-<project>`, `codex-<project>`, `rlib-<project>` | persist across `up` |
 | Require's cache | volume `require-cache-shared` | shared by all projects |
 | npm's download cache (Claude Code and Codex install from it at each start, pinned + integrity-checked) | volume `npm-cache-shared` | shared by all projects |
@@ -166,11 +240,12 @@ written to disk.
 
 ## Working in the agent's folders from the host
 
-The agent can write three folders: the project folder, spades.ai and `~/agent-memory`.
+The agent can write three folders: the project folder, spades.ai and `~/agent-memory` (plus, with
+the research container, `~/agent-research/`: its reports and downloads come from the open internet).
 
 **Recommended:** run git and R inside the container (attached VS Code or `agent-up shell`).
 
-On the host, treat all three as untrusted:
+On the host, treat all of them as untrusted:
 
 - Host git honours the folder's `.git/config` and hooks, which the agent can write. If you do use
   host git there, run `git -c core.hooksPath=/dev/null -c core.fsmonitor=false ...`.
