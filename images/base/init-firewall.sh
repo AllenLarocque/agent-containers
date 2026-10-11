@@ -82,7 +82,7 @@ DNSMASQ_CONF=/etc/dnsmasq.d/allowlist.conf
 # T3 Connect switch. agent-up mounts it READ-ONLY from the owner's config dir (.generated/t3-connect,
 # from T3_CONNECT in project.conf); /etc/firewall is root-owned, so the agent can neither edit nor
 # create it. Deliberately NOT an environment variable: sudo resets the environment, and the agent
-# controls its own. Anything but the two exact values aborts here, before any change.
+# controls its own. Anything but the three exact values aborts here, before any change.
 T3_CONNECT_FILE=/etc/firewall/t3-connect
 T3_CONNECT=0
 if [ -e "$T3_CONNECT_FILE" ]; then
@@ -472,7 +472,7 @@ elif [ "$T3_CONNECT" = 1 ] && [ "$n_tunnel" != 2 ]; then
   echo "ERROR: Firewall verification failed - T3 Connect is on but the $TUNNEL_PORT rules are missing ($n_tunnel of 2)"; exit 1
 fi
 if { [ "$T3_CONNECT" = 0 ] || [ "$T3_CONNECT" = publish ]; } && iptables -S OUTPUT | grep -q -- "--dport $TUNNEL_PORT"; then
-  echo "ERROR: Firewall verification failed - T3 Connect is off but a $TUNNEL_PORT rule is present"; exit 1
+  echo "ERROR: Firewall verification failed - T3 Connect is off or publish-only but a $TUNNEL_PORT rule is present"; exit 1
 fi
 n_rstudio=$(iptables -S INPUT | grep -c -- "--dport $RSTUDIO_PORT -j ACCEPT" || true)
 if [ "$RSTUDIO" = 1 ] && [ "$n_rstudio" != 1 ]; then

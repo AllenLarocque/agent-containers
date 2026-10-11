@@ -394,9 +394,12 @@ tailscale_host(){ # the shared TAILSCALE_HOST from $CFG_ROOT/agent-up.conf: vali
 }
 ts_port_raw(){ # $1 config dir -> override or the formula, unvalidated (empty if neither is computable)
   local v t; v="$(conf_get "$1/project.conf" TAILSCALE_HTTPS_PORT)"
-  if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
+  if [ -n "$v" ]; then # decimal, so 08442 equals 8442 (and 08 is no octal error)
+    if [[ $v =~ ^[0-9]{1,9}$ ]]; then printf '%s' "$((10#$v))"; else printf '%s' "$v"; fi
+    return 0
+  fi
   t="$(conf_get "$1/project.conf" T3_PORT)"
-  [[ $t =~ ^[0-9]+$ ]] && printf '%s' "$((8443 + t - 3774))" || true
+  [[ $t =~ ^[0-9]{1,9}$ ]] && printf '%s' "$((8443 + 10#$t - 3774))" || true
 }
 ts_port(){ # $1 config dir -> the Tailscale Serve HTTPS port, validated 1-65535
   local v; v="$(ts_port_raw "$1")"

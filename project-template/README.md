@@ -4,7 +4,7 @@ This folder is **not copied into your project by hand.** `bin/agent-up init` use
 
 | Seed | Copied to | Who edits it |
 |---|---|---|
-| `config/compose.yaml`, `config/project.env`, `config/allowlist` (+ `config/allowlist.bio-example` for `--image bio`) | `~/.config/agent-containers/<project>/` | you, the owner. **Never mounted** into the container, except `allowlist` (read-only) and, with `T3_CONNECT=1` / `RSTUDIO=1`, the generated switches and RStudio password (read-only) |
+| `config/compose.yaml`, `config/project.env`, `config/allowlist` (+ `config/allowlist.bio-example` for `--image bio`) | `~/.config/agent-containers/<project>/` | you, the owner. **Never mounted** into the container, except `allowlist` (read-only) and, with `T3_CONNECT=1` or `publish` / `RSTUDIO=1`, the generated switches and RStudio password (read-only) |
 | `repo/.github/CODEOWNERS`, `repo/.github/workflows/gitleaks.yml`, `repo/.gitignore` | the project folder (only where absent) | you; commit them |
 | `config/compose.research.yaml` | `~/.config/agent-containers/research/compose.yaml` (`init --profile research`) | you |
 | `instructions/research.md`, `instructions/builder-research.md` | `<config>/.generated/agent-instructions.md` at every `agent-up` run, mounted **read-only** as Claude's managed `CLAUDE.md` and Codex's `AGENTS.md` (research container; builders with `RESEARCH=1`) | change them here (PR) |
@@ -93,8 +93,8 @@ tunnel, at most 3 per T3 account) and `publish` (publish-only: notifications thr
 no tunnel; you connect over Tailscale instead). **`publish` is the recommended mode**: no tunnel
 limit and no public hostname. `publish` opens `t3.codes` only (no Cloudflare edge, no port 7844).
 
-**An image older than this PR refuses `T3_CONNECT=publish` and the container fails closed.** Pin a
-digest from digests.md built after this PR's publish run first; until then `T3_CONNECT=1` plus a
+**An image published before `T3_CONNECT=publish` support (2026-10-11) refuses it and the container fails closed.** Pin a
+digest from digests.md built after that date first; until then `T3_CONNECT=1` plus a
 publish-only link also works.
 
 **Publish-only first time:** `agent-up shell <project>`, then `t3 connect --headless`,
@@ -234,7 +234,7 @@ agent-up pair research                    # T3 Code for the research container (
 | Where | After `agent-up up` | Visible on the host |
 |---|---|---|
 | `/research/_general` (general research, T3's default project and the shell's start folder) | survives | yes, `~/agent-research/_general` |
-| `/research/<project>/reports` and `/downloads` | survives restart | yes, `~/agent-research/<project>/...` |
+| `/research/<project>/reports` and `/downloads` | survives | yes, `~/agent-research/<project>/...` |
 | `/research/<project>/briefs` | survives (read-only for research) | yes |
 | `~/.t3/...` incl. T3 scratch threads | survives (`t3-research` volume) | no (only inside Docker) |
 | anything else (`/home/agent/...`, `/tmp`, other `/research/...` paths) | wiped on every `agent-up up` | no |
@@ -361,7 +361,7 @@ The image must include RStudio Server (a digest from `digests.md` dated after th
 | `/opt/reference/spades.ai` | `SPADES_AI_DIR` (default `~/GitHub/spades.ai`) | rw |
 | `/opt/memory` | `AGENT_MEMORY_DIR` (default `~/agent-memory`, a git repo) | rw |
 | `/etc/firewall/allowlist.d/50-project.txt` | `~/.config/agent-containers/<project>/allowlist` | **ro** |
-| `/etc/firewall/t3-connect` (only with `T3_CONNECT=1`) | `~/.config/agent-containers/<project>/.generated/t3-connect`, written by `agent-up` from `project.conf` | **ro** |
+| `/etc/firewall/t3-connect` (only with `T3_CONNECT=1` or `publish`) | `~/.config/agent-containers/<project>/.generated/t3-connect`, written by `agent-up` from `project.conf` | **ro** |
 | `/research/briefs` (only with `RESEARCH=1`) | `RESEARCH_DIR/<project>/briefs` | rw |
 | `/research/reports`, `/research/downloads` (only with `RESEARCH=1`) | `RESEARCH_DIR/<project>/reports`, `.../downloads`: written by the research container | **ro** (untrusted) |
 | `/etc/claude-code/CLAUDE.md`, `~/.codex/AGENTS.md` (only with `RESEARCH=1`) | `.generated/agent-instructions.md`, from `instructions/builder-research.md` | **ro** |
@@ -413,7 +413,7 @@ On the host, treat all of them as untrusted:
 ## Known residual risks
 
 The firewall confines the agent to allowlisted names on ports 22, 80 and 443 (plus 7844 to
-Cloudflare's tunnel edge only, where T3 Connect is on), and to DNS for allowlisted names only. It does not remove these risks:
+Cloudflare's tunnel edge only, where `T3_CONNECT=1`), and to DNS for allowlisted names only. It does not remove these risks:
 
 - Read-write shared mounts (spades.ai, ~/agent-memory, the Require cache) are writable by every builder project: a compromised builder could affect the others (accepted for builders, spec §2.1).
 - **Upload-capable allowlisted domains.** Anything that accepts uploads, with credentials the agent
@@ -435,6 +435,10 @@ Cloudflare's tunnel edge only, where T3 Connect is on), and to DNS for allowlist
   - your **T3 account must have 2FA**: it is now a way into the container.
   The blast radius is that project's agent capabilities (its workspace, its tier-A secrets, its
   allowlist), not the host or other projects.
+- **`T3_CONNECT=publish`:** agent activity goes out through T3's relay (`t3.codes`), but there is no
+  inbound tunnel and no public hostname.
+- **Tailscale Serve (the recommended path):** each T3 server becomes reachable from every device on
+  your tailnet, gated only by T3 pairing. Keep the tailnet device list tight, and never use Funnel.
 - **RStudio Server, where enabled (`RSTUDIO=1`):** it runs as the agent, so the password protects it
   from other local users and browser pages, **not from the agent**: the agent can read the password
   file and could replace the server on port 8787 with its own. Treat what you see there as you treat

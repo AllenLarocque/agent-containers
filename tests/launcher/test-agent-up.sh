@@ -318,6 +318,17 @@ echo "TAILSCALE_HTTPS_PORT=8442" >> "$CFGROOT/bio2/project.conf"
 refuses "up refuses a TAILSCALE_HTTPS_PORT used by another project" 'TAILSCALE_HTTPS_PORT.*also used by demo-proj' au up bio2
 refuses "pair refuses a TAILSCALE_HTTPS_PORT used by another project" 'TAILSCALE_HTTPS_PORT.*also used by demo-proj' au pair bio2
 cp "$T/bio2conf.bak" "$CFGROOT/bio2/project.conf"
+echo "TAILSCALE_HTTPS_PORT=08442" >> "$CFGROOT/bio2/project.conf"
+refuses "up refuses a zero-padded TAILSCALE_HTTPS_PORT (08442) that collides with 8442" 'TAILSCALE_HTTPS_PORT=8442.*also used by demo-proj' au up bio2
+cp "$T/bio2conf.bak" "$CFGROOT/bio2/project.conf"
+echo "TAILSCALE_HTTPS_PORT=08450" >> "$CFG/project.conf"
+upout="$(au up "$NAME" 2>&1)" || true
+check "zero-padded 08450 is printed as 8450" grep -qF "tailscale serve --bg --https=8450 3773" <<<"$upout"
+cp "$T/pconf-t3.bak" "$CFG/project.conf"
+sed -i 's/^T3_PORT=.*/T3_PORT=08/' "$CFGROOT/bio2/project.conf"
+upout="$(au up "$NAME" 2>&1)" || true
+check "a neighbour with T3_PORT=08 causes no octal error" bash -c '! grep -q "value too great\|syntax error" <<<"$1"' _ "$upout"
+cp "$T/bio2conf.bak" "$CFGROOT/bio2/project.conf"
 for h in "https://x.ts.net" "a b" "x.ts.net/p" "UPPER.ts.net" "nodots"; do
   echo "TAILSCALE_HOST=$h" > "$AUC"
   : > "$DLOG"

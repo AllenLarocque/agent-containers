@@ -250,7 +250,7 @@ from the project folder.
   compose.yaml                          # generated from the seed, then owner-edited
   project.env                           # op:// references only
   allowlist                             # project domains → /etc/firewall/allowlist.d/50-project.txt:ro
-  project.conf                          # PROJECT_DIR, PROFILE (builder|research; research = the one shared research container, §2.1), IMAGE (base|gis|bio), T3_PORT, T3_CONNECT (0|1, absent = 0; §13.1), RESEARCH (0|1, absent = 0) + RESEARCH_DIR (§2.1), RSTUDIO (0|1, absent = 0; builders only) + RSTUDIO_PORT (§13.3)
+  project.conf                          # PROJECT_DIR, PROFILE (builder|research; research = the one shared research container, §2.1), IMAGE (base|gis|bio), T3_PORT, T3_CONNECT (0|1|publish, absent = 0; §13.1; `publish` added 2026-10-11), RESEARCH (0|1, absent = 0) + RESEARCH_DIR (§2.1), RSTUDIO (0|1, absent = 0; builders only) + RSTUDIO_PORT (§13.3)
 <project-dir>/                          # the agent's read-write workspace: code, data, outputs, CLAUDE.md
 ```
 
@@ -260,7 +260,7 @@ from the project folder.
 |---|---|
 | `agent-up init <project-dir> [--image gis] [--profile builder]` | creates `~/.config/agent-containers/<project>/` from the seeds; prints the remaining steps (vault, digest) |
 | `agent-up init --profile research` | creates `~/.config/agent-containers/research/` (compose + `project.conf` only: no secrets) and `~/agent-research/` (§2.1) |
-| `agent-up up <project>` | checks the image digest, mounts and `project.env`, then `op run --env-file <cfg>/project.env -- docker compose --env-file <cfg>/project.conf -f <cfg>/compose.yaml -f <cfg>/.generated/env-passthrough.yaml -f <cfg>/.generated/t3-connect.yaml -f <cfg>/.generated/research.yaml -f <cfg>/.generated/rstudio.yaml -f <cfg>/.generated/hostname.yaml --project-directory <cfg> -p <project> up -d --force-recreate` (generated overlays: the `project.env` key names only, never values; and the T3 Connect switch, empty unless `T3_CONNECT=1`, §13.1; the research mounts, §2.1; RStudio Server, empty unless `RSTUDIO=1`, §13.3; the hostname, §13.1) |
+| `agent-up up <project>` | checks the image digest, mounts and `project.env`, then `op run --env-file <cfg>/project.env -- docker compose --env-file <cfg>/project.conf -f <cfg>/compose.yaml -f <cfg>/.generated/env-passthrough.yaml -f <cfg>/.generated/t3-connect.yaml -f <cfg>/.generated/research.yaml -f <cfg>/.generated/rstudio.yaml -f <cfg>/.generated/hostname.yaml --project-directory <cfg> -p <project> up -d --force-recreate` (generated overlays: the `project.env` key names only, never values; and the T3 Connect switch, empty unless `T3_CONNECT=1` or `publish`, §13.1; the research mounts, §2.1; RStudio Server, empty unless `RSTUDIO=1`, §13.3; the hostname, §13.1) |
 | `agent-up config <project>` | prints the rendered compose config; no secrets needed |
 | `agent-up shell <project>` | `docker exec -it -u agent <project>-agent-1 zsh` |
 | `agent-up status \| stop \| down <project>` | compose wrappers |
@@ -520,7 +520,7 @@ processes, git and files, and clients only display and steer over authenticated 
 from GitHub releases (sha256-pinned in T3) and runs `cloudflared tunnel --no-autoupdate run` with
 `TUNNEL_TOKEN`; cloudflared dials OUT to the edge found via SRV
 `_v2-origintunneld._tcp.argotunnel.com` on port 7844 (QUIC/UDP, HTTP2/TCP fallback).
-- `T3_CONNECT=0|1` in `project.conf` (owner host config; `init` writes 0; absent = 0). `agent-up up`
+- `T3_CONNECT=0|1|publish` in `project.conf` (amended 2026-10-11: `publish` mounts the switch like 1 but opens `t3.codes` only, no port 7844) (owner host config; `init` writes 0; absent = 0). `agent-up up`
   and `config` refuse any other value; `stop`/`down`/`status` never check it. `T3_CONNECT` and
   `TUNNEL_*` are reserved in `project.env` (cloudflared reads `TUNNEL_*` as flags).
 - `agent-up` writes `.generated/t3-connect.yaml`: with 1 it mounts `.generated/t3-connect`
