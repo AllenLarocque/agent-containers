@@ -11,7 +11,7 @@ services:
   agent:
     image: ghcr.io/allenlarocque/spades-gis@sha256:REPLACE_WITH_DIGEST_FROM_digests.md
     user: "1000:1000"
-    working_dir: /research
+    working_dir: /research          # agent-up's overlay sets /research/_general (persistent) and wins
     init: true
     cap_add: [NET_ADMIN, NET_RAW]          # firewall
     mem_limit: 16g                         # state it explicitly; memory gates must read the cgroup limit
@@ -19,7 +19,7 @@ services:
       CLAUDE_CONFIG_DIR: /home/agent/.claude
       # Spec §12 decision B. ANY value disables (even "0"): delete the line to re-enable.
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
-      T3_PROJECT_DIR: /research            # T3 Code's project is the research exchange
+      T3_PROJECT_DIR: /research            # overridden by agent-up's overlay: /research/_general (only that and /research/<project> persist)
     volumes:
       - claude-config:/home/agent/.claude   # Claude subscription login (spec §12), own volume
       - codex-config:/home/agent/.codex     # Codex: ChatGPT login, own volume

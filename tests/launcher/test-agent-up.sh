@@ -46,7 +46,11 @@ cat > "$T/dstub/docker" <<'STUB'
   echo "OPTOK: ${OP_SERVICE_ACCOUNT_TOKEN-<unset>}"
 } >> "$DLOG"
 case "$*" in
-  *"agent-t3 pair"*) echo "token=fakeTok_123" ;;
+  "inspect -f {{.State.Running}} "*) if [ -f "$(dirname "$DLOG")/RUNNING" ] && [ "$(cat "$(dirname "$DLOG")/RUNNING")" = 0 ]; then echo false; else echo true; fi ;;
+  *"agent-t3 pair"*)
+    sd="$(dirname "$DLOG")"; n=$(( $(cat "$sd/pair.count" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$sd/pair.count"
+    if [ -f "$sd/PAIR_FAILS" ] && [ "$n" -le "$(cat "$sd/PAIR_FAILS")" ]; then exit 1; fi
+    echo "token=fakeTok_123" ;;
   "exec -u agent "*" claude --version") echo "9.9.9 (Claude Code)" ;;
   "exec -u agent "*" codex --version") echo "codex-cli 8.8.8" ;;
 esac
@@ -284,14 +288,92 @@ cp "$T/pconf-t3.bak" "$CFG/project.conf"
 cp "$CFGROOT/bio2/project.conf" "$T/bio2conf.bak"; sed -i 's/^T3_PORT=.*/T3_PORT=3773/' "$CFGROOT/bio2/project.conf"
 refuses "a T3_PORT used by another project is refused" 'T3_PORT=3773 .* also used by bio2' au pair "$NAME"
 cp "$T/bio2conf.bak" "$CFGROOT/bio2/project.conf"
+
+# ---- Tailscale addresses (shared $CFG_ROOT/agent-up.conf + per-project TAILSCALE_HTTPS_PORT)
+AUC="$CFGROOT/agent-up.conf"
+pairout="$(au pair "$NAME" 2>&1)" || true
+check "pair: desktop app address on this PC" grep -qxF "  desktop app on this PC: http://localhost:3773" <<<"$pairout"
+check "  ...phone address uses a placeholder host and the computed port" grep -qxF "  phone (Tailscale on):   https://<tailnet-host>:8442" <<<"$pairout"
+check "  ...pairing code on its own line" grep -qxF "  pairing code: fakeTok_123" <<<"$pairout"
+check "  ...hint to set TAILSCALE_HOST" grep -qF "set TAILSCALE_HOST in $AUC" <<<"$pairout"
+check "  ...the browser-link lines stay" grep -qxF "  http://demo-proj.localhost:3773/pair#token=fakeTok_123" <<<"$pairout"
+echo "TAILSCALE_HOST=box.tail1.ts.net" > "$AUC"
+pairout="$(au pair "$NAME" 2>&1)" || true
+check "pair with TAILSCALE_HOST: phone address" grep -qxF "  phone (Tailscale on):   https://box.tail1.ts.net:8442" <<<"$pairout"
+check "  ...no hint any more" bash -c '! grep -q "set TAILSCALE_HOST" <<<"$1"' _ "$pairout"
+upout="$(au up "$NAME" 2>&1)" || true
+check "up prints the Tailscale Serve command" grep -qxF "agent-up: Tailscale (once, Windows PowerShell): tailscale serve --bg --https=8442 3773" <<<"$upout"
+echo "TAILSCALE_HTTPS_PORT=443" >> "$CFG/project.conf"
+pairout="$(au pair "$NAME" 2>&1)" || true
+check "TAILSCALE_HTTPS_PORT=443: phone address has no :443" grep -qxF "  phone (Tailscale on):   https://box.tail1.ts.net" <<<"$pairout"
+upout="$(au up "$NAME" 2>&1)" || true
+check "  ...and up prints --https=443" grep -qF "tailscale serve --bg --https=443 3773" <<<"$upout"
 cp "$T/pconf-t3.bak" "$CFG/project.conf"
+pairout="$(au pair bio2 2>&1)" || true
+check "a T3_PORT=3774 project gets 8443 (bio2)" grep -qxF "  phone (Tailscale on):   https://box.tail1.ts.net:8443" <<<"$pairout"
+pairout="$(au pair symproj1 2>&1)" || true
+check "a T3_PORT=3775 project gets 8444 (symproj1)" grep -qxF "  phone (Tailscale on):   https://box.tail1.ts.net:8444" <<<"$pairout"
+cp "$T/bio2conf.bak" "$CFGROOT/bio2/project.conf"
+echo "TAILSCALE_HTTPS_PORT=8442" >> "$CFGROOT/bio2/project.conf"
+refuses "up refuses a TAILSCALE_HTTPS_PORT used by another project" 'TAILSCALE_HTTPS_PORT.*also used by demo-proj' au up bio2
+refuses "pair refuses a TAILSCALE_HTTPS_PORT used by another project" 'TAILSCALE_HTTPS_PORT.*also used by demo-proj' au pair bio2
+cp "$T/bio2conf.bak" "$CFGROOT/bio2/project.conf"
+echo "TAILSCALE_HTTPS_PORT=08442" >> "$CFGROOT/bio2/project.conf"
+refuses "up refuses a zero-padded TAILSCALE_HTTPS_PORT (08442) that collides with 8442" 'TAILSCALE_HTTPS_PORT=8442.*also used by demo-proj' au up bio2
+cp "$T/bio2conf.bak" "$CFGROOT/bio2/project.conf"
+echo "TAILSCALE_HTTPS_PORT=08450" >> "$CFG/project.conf"
+upout="$(au up "$NAME" 2>&1)" || true
+check "zero-padded 08450 is printed as 8450" grep -qF "tailscale serve --bg --https=8450 3773" <<<"$upout"
+cp "$T/pconf-t3.bak" "$CFG/project.conf"
+sed -i 's/^T3_PORT=.*/T3_PORT=08/' "$CFGROOT/bio2/project.conf"
+upout="$(au up "$NAME" 2>&1)" || true
+check "a neighbour with T3_PORT=08 causes no octal error" bash -c '! grep -q "value too great\|syntax error" <<<"$1"' _ "$upout"
+cp "$T/bio2conf.bak" "$CFGROOT/bio2/project.conf"
+for h in "https://x.ts.net" "a b" "x.ts.net/p" "UPPER.ts.net" "nodots"; do
+  echo "TAILSCALE_HOST=$h" > "$AUC"
+  : > "$DLOG"
+  rc=0; out="$(au up "$NAME" 2>&1)" || rc=$?
+  check "up refuses TAILSCALE_HOST='$h'" bash -c '[ "$1" -ne 0 ] && grep -q "TAILSCALE_HOST=" <<<"$2" && ! grep -q "tailscale serve" <<<"$2"' _ "$rc" "$out"
+  refuses "pair refuses TAILSCALE_HOST='$h'" 'TAILSCALE_HOST=' au pair "$NAME"
+  check "stop works with TAILSCALE_HOST='$h'" au stop "$NAME"
+done
+rm -f "$AUC"
+for v in 0 70000 abc; do
+  echo "TAILSCALE_HTTPS_PORT=$v" >> "$CFG/project.conf"
+  refuses "up refuses TAILSCALE_HTTPS_PORT=$v" "TAILSCALE_HTTPS_PORT='$v'.*1-65535" au up "$NAME"
+  check "stop works with TAILSCALE_HTTPS_PORT=$v" au stop "$NAME"
+  check "down works with TAILSCALE_HTTPS_PORT=$v" au down "$NAME"
+  check "status works with TAILSCALE_HTTPS_PORT=$v" au status "$NAME"
+  cp "$T/pconf-t3.bak" "$CFG/project.conf"
+done
+cp "$CFG/project.env" "$T/penv-ts.bak"
+for k in TAILSCALE_HTTPS_PORT TAILSCALE_HOST; do
+  echo "$k=op://x/y" >> "$CFG/project.env"
+  refuses "up refuses reserved key $k in project.env" "reserved.*$k" au up "$NAME"
+  cp "$T/penv-ts.bak" "$CFG/project.env"
+done
+cp "$T/pconf-t3.bak" "$CFG/project.conf"
+# ---- pair waits for the T3 server
+echo 2 > "$T/PAIR_FAILS"; rm -f "$T/pair.count"; : > "$DLOG"
+pairout="$(AMBIENT=(AGENT_UP_PAIR_WAIT=10); au pair "$NAME" 2>&1)" || true
+check "pair retries until the T3 server answers (prints the token)" grep -qF "pair#token=fakeTok_123" <<<"$pairout"
+check "  ...after 3 pair attempts" test "$(grep -c 'agent-t3 pair' "$DLOG")" = 3
+check "  ...says it is waiting" grep -qF "waiting for the T3 server in '$NAME'" <<<"$pairout"
+echo 99 > "$T/PAIR_FAILS"; rm -f "$T/pair.count"
+AMBIENT=(AGENT_UP_PAIR_WAIT=3)
+refuses "pair gives up when the T3 server never answers" "T3 server in '$NAME' did not answer within 3 s" au pair "$NAME"
+rm -f "$T/PAIR_FAILS" "$T/pair.count"
+echo 0 > "$T/RUNNING"; : > "$DLOG"
+refuses "pair refuses at once when the container is not running" "is '$NAME' running\\? agent-up status $NAME" au pair "$NAME"
+check "  ...and makes no agent-t3 pair call" bash -c '! grep -q "agent-t3 pair" "$1"' _ "$DLOG"
+rm -f "$T/RUNNING"; AMBIENT=()
 
 # ---- T3 Connect (owner opt-in): validated by up/config only; a missing key is 0
 cp "$CFG/project.conf" "$T/pconf-t3c.bak"
-for v in 2 yes on " 1"; do
+for v in 2 yes on Publish " 1"; do
   sed -i "s/^T3_CONNECT=.*/T3_CONNECT=$v/" "$CFG/project.conf"
   : > "$DLOG"
-  refuses "up refuses T3_CONNECT='$v'" "T3_CONNECT='$v'.*must be 0 \(off\) or 1 \(on\)" au up "$NAME"
+  refuses "up refuses T3_CONNECT='$v'" "T3_CONNECT='$v'.*must be 0 \(off\), 1 \(managed tunnel\) or publish \(publish-only\)" au up "$NAME"
   check "  ...without reaching docker" test ! -s "$DLOG"
   refuses "config refuses T3_CONNECT='$v'" "T3_CONNECT='$v'" au config "$NAME"
   check "stop works with T3_CONNECT='$v' (lifecycle never validates it)" au stop "$NAME"
@@ -318,6 +400,14 @@ check "  ...firewall switch file says T3_CONNECT=1" test "$(cat "$CFG/.generated
 check "  ...overlay mounts it read-only at /etc/firewall/t3-connect" \
   bash -c 'grep -qx "        source: ./.generated/t3-connect" "$1" && grep -qx "        target: /etc/firewall/t3-connect" "$1" && grep -qx "        read_only: true" "$1"' _ "$T3O"
 check "  ...and sets TUNNEL_EDGE_IP_VERSION=4 for cloudflared" grep -qE '^      TUNNEL_EDGE_IP_VERSION: "4"' "$T3O"
+sed -i 's/^T3_CONNECT=.*/T3_CONNECT=publish/' "$CFG/project.conf"
+upout="$(au up "$NAME" 2>&1)" && rc=0 || rc=$?
+check "up with T3_CONNECT=publish" test "$rc" -eq 0
+check "  ...says publish-only and how to link it" grep -q "T3 Connect: publish-only .*t3 connect link --publish-only" <<<"$upout"
+check "  ...firewall switch file says exactly T3_CONNECT=publish" test "$(cat "$CFG/.generated/t3-connect")" = "T3_CONNECT=publish"
+check "  ...overlay mounts it read-only, env T3_CONNECT=publish" \
+  bash -c 'grep -qx "        target: /etc/firewall/t3-connect" "$1" && grep -qx "        read_only: true" "$1" && grep -qE "^      T3_CONNECT: \"publish\"" "$1"' _ "$T3O"
+check "  ...and no TUNNEL_EDGE_IP_VERSION (no tunnel)" bash -c '! grep -q TUNNEL_EDGE_IP_VERSION "$1"' _ "$T3O"
 sed -i 's/^T3_CONNECT=.*/T3_CONNECT=0/' "$CFG/project.conf"
 check "back to T3_CONNECT=0: config succeeds" au config "$NAME"
 check "  ...and the switch file is gone" test ! -e "$CFG/.generated/t3-connect"
@@ -460,7 +550,17 @@ check "  ...research instructions written (readable: mode 644)" \
   bash -c 'cmp -s "$1" "$2" && [ "$(stat -c %a "$1")" = 644 ]' _ "$RCFG/.generated/agent-instructions.md" "$ROOT/project-template/instructions/research.md"
 check "  ...switch read-only at /etc/firewall/profile; instructions read-only at Claude's managed CLAUDE.md + Codex's AGENTS.md" \
   bash -c 'f="$1"; for t in /etc/firewall/profile /etc/claude-code/CLAUDE.md /home/agent/.codex/AGENTS.md; do grep -A1 "target: \"$t\"" "$f" | grep -q "read_only: true" || { echo "not ro: $t"; exit 1; }; done' _ "$RCFG/.generated/research.yaml"
-check "  ...no project subfolders yet: no /research mounts" bash -c '! grep -q "target: \"/research/" "$1"' _ "$RCFG/.generated/research.yaml"
+check "  ...no project subfolders yet: only the /research/_general mount" bash -c '! grep "target: \"/research/" "$1" | grep -qv "target: \"/research/_general\""' _ "$RCFG/.generated/research.yaml"
+check "  ...created RD/_general, said so" bash -c 'test -d "$1/_general" && ! test -L "$1/_general" && grep -qxF "agent-up: created $1/_general" <<<"$2"' _ "$RD" "$out"
+check "  ...no 'skipped' message for _general; not in the research projects line" bash -c '! grep -q "skipped .*_general" <<<"$1" && ! grep "research projects:" <<<"$1" | grep -q _general' _ "$out"
+check "  ..._general read-write at /research/_general (no read_only)" \
+  bash -c 'grep -A2 "source: \"$2/_general\"" "$1" | grep -q "target: \"/research/_general\"" && ! grep -A2 "source: \"$2/_general\"" "$1" | grep -q read_only' _ "$RCFG/.generated/research.yaml" "$RD"
+check "  ...overlay sets working_dir and T3_PROJECT_DIR to /research/_general" \
+  bash -c 'grep -qE "^    working_dir: /research/_general( |$)" "$1" && grep -qE "^      T3_PROJECT_DIR: /research/_general( |$)" "$1"' _ "$RCFG/.generated/research.yaml"
+check "  ...a builder's overlay has no _general" bash -c '! grep -rq _general "$1"' _ "$CFG/.generated"
+mv "$RD/_general" "$T/_general.real"; ln -s "$T/_general.real" "$RD/_general"
+refuses "up research refuses a symlinked _general" '_general is a symlink' au up research
+rm "$RD/_general"; mv "$T/_general.real" "$RD/_general"
 check "  ...no RStudio Server for the research container (overlay adds nothing, no switch, no password)" \
   bash -c '[ "$(grep -v "^#" "$1/rstudio.yaml")" = "$(printf "services:\n  agent: {}")" ] && [ ! -e "$1/rstudio" ] && [ ! -e "$1/rstudio-password" ]' _ "$RCFG/.generated"
 cp "$RCFG/project.conf" "$T/rconf-rs.bak"
@@ -471,13 +571,18 @@ check "  ...stop research still works with RSTUDIO=1 in its config (renders RStu
 check "  ...and its overlay stays empty" bash -c '[ ! -e "$1/rstudio" ] && [ ! -e "$1/rstudio-password" ]' _ "$RCFG/.generated"
 cp "$T/rconf-rs.bak" "$RCFG/project.conf"
 : > "$DLOG"
-check "shell research opens /research" au shell research
-check "  ...docker exec -w /research" grep -qxF "ARGS: exec -it -u agent -w /research research-agent-1 zsh" "$DLOG"
+check "shell research opens /research/_general" au shell research
+check "  ...docker exec -w /research/_general" grep -qxF "ARGS: exec -it -u agent -w /research/_general research-agent-1 zsh" "$DLOG"
 check "stop research without 1Password" au stop research
 check "down research without 1Password" au down research
 # research holds no secrets: project.env may exist only empty (comments)
 printf '# nothing\n\n' > "$RCFG/project.env"
 check "up research accepts a comments-only project.env" au up research
+sed -i 's/^T3_CONNECT=.*/T3_CONNECT=publish/' "$RCFG/project.conf"
+check "up research with T3_CONNECT=publish" au up research
+check "  ...research switch file says T3_CONNECT=publish" test "$(cat "$RCFG/.generated/t3-connect")" = "T3_CONNECT=publish"
+sed -i 's/^T3_CONNECT=.*/T3_CONNECT=0/' "$RCFG/project.conf"
+au config research >/dev/null 2>&1 || true
 echo 'GH_TOKEN=op://agent-research/github-agent/token' >> "$RCFG/project.env"
 refuses "up research refuses ANY key in project.env" 'holds no secrets.*line number' au up research
 refuses "config research refuses ANY key in project.env" 'holds no secrets' au config research
@@ -519,7 +624,7 @@ for p in bio2 "$NAME"; do
 done
 check "  ...skips a symlinked folder, a non-project name and an incomplete folder" \
   bash -c '! grep -Eq "linked|Bad Name|partial|elsewhere" "$1" && grep -q "skipped" <<<"$2"' _ "$RRO" "$upr"
-check "  ...exactly 2 projects x 3 exchange mounts + switch + 2 instruction mounts" test "$(grep -c "^      - type: bind" "$RRO")" = 9
+check "  ...exactly 2 projects x 3 exchange mounts + _general + switch + 2 instruction mounts" test "$(grep -c "^      - type: bind" "$RRO")" = 10
 rm -rf "$RD/Bad Name" "$RD/partial"; rm -f "$RD/linked"
 echo "x" > "$RD/$NAME/downloads/big.tif"
 stout="$(au status research 2>&1)" || true
@@ -614,6 +719,13 @@ if docker compose version >/dev/null 2>&1; then
     jq -e '.services.agent.environment.TUNNEL_EDGE_IP_VERSION == "4" and .services.agent.environment.T3_CONNECT == "1"' <<<"$J1"
   check "rendered (T3_CONNECT=1): otherwise identical to T3_CONNECT=0" \
     bash -c 'diff <(jq -S "del(.services.agent.environment.T3_CONNECT, .services.agent.environment.TUNNEL_EDGE_IP_VERSION) | .services.agent.volumes |= map(select(.target != \"/etc/firewall/t3-connect\"))" <<<"$1") <(jq -S . <<<"$2")' _ "$J1" "$J"
+  sed -i 's/^T3_CONNECT=.*/T3_CONNECT=publish/' "$CFG/project.conf"
+  JP="$(render "$T")"
+  sed -i 's/^T3_CONNECT=.*/T3_CONNECT=0/' "$CFG/project.conf"
+  check "rendered (T3_CONNECT=publish): switch mount read-only, env T3_CONNECT=publish, no TUNNEL_EDGE_IP_VERSION" \
+    jq -e '.services.agent.environment.T3_CONNECT == "publish" and .services.agent.environment.TUNNEL_EDGE_IP_VERSION == null and ([.services.agent.volumes[] | select(.target=="/etc/firewall/t3-connect") | .read_only] == [true])' <<<"$JP"
+  check "rendered (T3_CONNECT=publish): otherwise identical to T3_CONNECT=0" \
+    bash -c 'diff <(jq -S "del(.services.agent.environment.T3_CONNECT) | .services.agent.volumes |= map(select(.target != \"/etc/firewall/t3-connect\"))" <<<"$1") <(jq -S . <<<"$2")' _ "$JP" "$J"
   # Research exchange, builder opt-in: exactly three /research mounts + the two instruction files, nothing else changes.
   sed -i 's/^RESEARCH=.*/RESEARCH=1/' "$CFG/project.conf"
   JR="$(render "$T")"
@@ -637,13 +749,15 @@ if docker compose version >/dev/null 2>&1; then
   # The shared research container.
   JS="$(cd "$T" && aureal config research --format json)"
   RCFGR="$CFGROOT/research"
-  check "rendered research: project name 'research', cwd /research, mem_limit 16g" \
-    jq -e '.name == "research" and .services.agent.working_dir == "/research" and ((.services.agent.mem_limit|tostring) == "17179869184")' <<<"$JS"
+  check "rendered research: project name 'research', cwd /research/_general, mem_limit 16g" \
+    jq -e '.name == "research" and .services.agent.working_dir == "/research/_general" and ((.services.agent.mem_limit|tostring) == "17179869184")' <<<"$JS"
   check "rendered research: image pinned by digest" bash -c 'jq -r .services.agent.image <<<"$1" | grep -Eq "spades-gis@sha256:[0-9a-f]{64}$"' _ "$JS"
   check "rendered research: NO project, spades.ai, memory, Require cache or project allowlist mount" \
     jq -e '[.services.agent.volumes[].target | select(. == "/workspace" or . == "/opt/memory" or . == "/opt/reference/spades.ai" or . == "/home/agent/.cache/R/Require" or startswith("/etc/firewall/allowlist.d"))] == []' <<<"$JS"
   check "rendered research: environment holds no secret (exactly the 3 seed variables)" \
-    jq -e '(.services.agent.environment | keys) == ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC","CLAUDE_CONFIG_DIR","T3_PROJECT_DIR"] and .services.agent.environment.T3_PROJECT_DIR == "/research"' <<<"$JS"
+    jq -e '(.services.agent.environment | keys) == ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC","CLAUDE_CONFIG_DIR","T3_PROJECT_DIR"] and .services.agent.environment.T3_PROJECT_DIR == "/research/_general"' <<<"$JS"
+  check "rendered research: /research/_general read-write from RESEARCH_DIR/_general" \
+    test "$(mr "$JS" /research/_general)" = "[{\"type\":\"bind\",\"source\":\"$RDR/_general\",\"ro\":false}]"
   check "rendered research: profile switch read-only at /etc/firewall/profile (the only /etc/firewall mount)" \
     bash -c '[ "$(jq -c "[.services.agent.volumes[] | select(.target|startswith(\"/etc/firewall\")) | {target, source, ro: (.read_only // false)}]" <<<"$1")" = "[{\"target\":\"/etc/firewall/profile\",\"source\":\"$2/.generated/profile\",\"ro\":true}]" ]' _ "$JS" "$RCFGR"
   for t in /etc/claude-code/CLAUDE.md /home/agent/.codex/AGENTS.md; do

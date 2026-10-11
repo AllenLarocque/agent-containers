@@ -4,7 +4,8 @@
 # port 22, Docker's resolver) live in test-agent-egress.sh and run as the agent user.
 # Env: EXPECT_UPSTREAM = the container's ORIGINAL resolver (captured from /etc/resolv.conf by the CI
 #      step BEFORE the firewall ran; never read back from the firewall's own state).
-#      EXPECT_T3_CONNECT = 1 when the CI step mounted /etc/firewall/t3-connect with T3_CONNECT=1
+#      EXPECT_T3_CONNECT = 1 when the CI step mounted /etc/firewall/t3-connect with T3_CONNECT=1,
+#      publish when it held T3_CONNECT=publish (t3.codes only, no tunnel edge)
 #      (default 0: the rules must be exactly the ones without the feature).
 #      EXPECT_RSTUDIO = 1 when the CI step mounted /etc/firewall/rstudio with RSTUDIO=1 (default 0:
 #      exactly the rules without RStudio Server).
@@ -53,7 +54,7 @@ expect_v4=$(sed -e "s|@UP@|$EXPECT_UPSTREAM|g" -e "s|@DUID@|$DUID|g" -e "s|@GW@|
 @T3@-A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
 EOF
 )
-# T3 Connect ON adds exactly these two rules (7844, the t3-tunnel set only); OFF adds nothing.
+# T3 Connect ON adds exactly these two rules (7844, the t3-tunnel set only); OFF and publish add nothing.
 if [ "$EXPECT_T3_CONNECT" = 1 ]; then
   t3_rules='-A OUTPUT -p udp -m udp --dport 7844 -m set --match-set t3-tunnel dst -j ACCEPT
 -A OUTPUT -p tcp -m tcp --dport 7844 -m set --match-set t3-tunnel dst -j ACCEPT
@@ -152,6 +153,13 @@ if [ "$EXPECT_T3_CONNECT" = 1 ]; then
     [ -n "$before" ] && [ "${after:-0}" -gt "$before" ] && ok "UDP to ${tips[0]}:7844 is ACCEPTed by the t3-tunnel udp rule ($before -> $after)" \
       || bad "UDP to ${tips[0]}:7844 did not match the t3-tunnel udp rule ($before -> $after)"
   fi
+elif [ "$EXPECT_T3_CONNECT" = publish ]; then
+  # Notifications only: t3.codes is allowlisted, but nothing tunnel-related exists.
+  grep -q '^server=/t3\.codes/' "$conf" && ok "dnsmasq forwards t3.codes (publish)" || bad "no server=/t3.codes/ line (publish)"
+  conf_has "ipset=/t3.codes/allowed-domains" && ok "t3.codes is allowlisted (22/80/443)" || bad "t3.codes not allowlisted (publish)"
+  ipset list -n | grep -qx t3-tunnel && bad "ipset t3-tunnel exists with T3_CONNECT=publish" || ok "no t3-tunnel ipset (publish)"
+  grep -q argotunnel "$conf" && bad "dnsmasq config mentions argotunnel with T3_CONNECT=publish" || ok "no argotunnel.com in dnsmasq (publish)"
+  iptables -S OUTPUT | grep -q -- '--dport 7844' && bad "a 7844 rule exists with T3_CONNECT=publish" || ok "no 7844 rule (publish)"
 else
   grep -q argotunnel "$conf" && bad "dnsmasq config mentions argotunnel with T3 Connect off" || ok "no argotunnel.com in dnsmasq (T3 Connect off)"
   grep -q 't3\.codes' "$conf" && bad "dnsmasq config mentions t3.codes with T3 Connect off" || ok "no t3.codes in dnsmasq (T3 Connect off)"

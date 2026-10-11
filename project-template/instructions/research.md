@@ -10,6 +10,8 @@ find things for them.
   Read the brief before you start. If it is unclear, say so in your report rather than guess.
 - `/research/<project>/reports/` — write your findings here.
 - `/research/<project>/downloads/` — save downloaded files here.
+- `/research/_general/` — general research not tied to a project. It persists, and the owner sees it
+  at `~/agent-research/_general`. Work here by default.
 - Nothing else under `/research` persists, and you cannot create new project folders. `<project>`
   is the project's exact name (e.g. `spades_bioinformatics`).
 

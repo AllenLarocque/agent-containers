@@ -37,6 +37,8 @@
 # says T3_CONNECT=1, t3.codes joins the allowlist (relay + login, ports 22/80/443 like any entry) and
 # argotunnel.com resolves too, but its addresses go into a SEPARATE ipset (t3-tunnel) that is open on
 # port 7844 ONLY (cloudflared: QUIC/UDP, HTTP2/TCP fallback). 7844 is never open to any other host.
+# T3_CONNECT=publish is the notifications-only variant: t3.codes joins the allowlist (the relay, for
+# push notifications) but there is NO tunnel: no argotunnel.com, no t3-tunnel ipset, no 7844 rule.
 # Absent file (or T3_CONNECT=0): the rules are exactly the ones without the feature.
 #
 # RESEARCH PROFILE (owner decision 2026-10-09, spec §2.1): when /etc/firewall/profile says
@@ -80,14 +82,15 @@ DNSMASQ_CONF=/etc/dnsmasq.d/allowlist.conf
 # T3 Connect switch. agent-up mounts it READ-ONLY from the owner's config dir (.generated/t3-connect,
 # from T3_CONNECT in project.conf); /etc/firewall is root-owned, so the agent can neither edit nor
 # create it. Deliberately NOT an environment variable: sudo resets the environment, and the agent
-# controls its own. Anything but the two exact values aborts here, before any change.
+# controls its own. Anything but the three exact values aborts here, before any change.
 T3_CONNECT_FILE=/etc/firewall/t3-connect
 T3_CONNECT=0
 if [ -e "$T3_CONNECT_FILE" ]; then
   case "$(cat "$T3_CONNECT_FILE" 2>/dev/null)" in
     T3_CONNECT=0) ;;
     T3_CONNECT=1) T3_CONNECT=1 ;;
-    *) echo "ERROR: $T3_CONNECT_FILE must hold exactly T3_CONNECT=0 or T3_CONNECT=1"; exit 1 ;;
+    T3_CONNECT=publish) T3_CONNECT=publish ;;
+    *) echo "ERROR: $T3_CONNECT_FILE must hold exactly T3_CONNECT=0, T3_CONNECT=1 or T3_CONNECT=publish"; exit 1 ;;
   esac
 fi
 # Profile switch: same pattern (agent-up writes .generated/profile from PROFILE in project.conf, and
@@ -145,7 +148,7 @@ done
 if [ "${#RAW_DOMAINS[@]}" -eq 0 ]; then
   echo "ERROR: no domains found in $ALLOWLIST_DIR/*.txt"; exit 1
 fi
-if [ "$T3_CONNECT" = 1 ]; then
+if [ "$T3_CONNECT" = 1 ] || [ "$T3_CONNECT" = publish ]; then
   RAW_DOMAINS+=(t3.codes)   # app./relay./clerk.t3.codes (the relay's OTLP trace host is NOT added)
 fi
 mapfile -t ALLOWED_DOMAINS < <(printf '%s\n' "${RAW_DOMAINS[@]}" | tr 'A-Z' 'a-z' | sort -u)
@@ -161,6 +164,10 @@ if [ "$T3_CONNECT" = 1 ] && [ "$PROFILE" = research ]; then
   echo "T3 Connect: ON (research: open egress already covers t3.codes and the tunnel edge on $TUNNEL_PORT)"
 elif [ "$T3_CONNECT" = 1 ]; then
   echo "T3 Connect: ON (t3.codes allowlisted; $TUNNEL_DOMAIN on port $TUNNEL_PORT only)"
+elif [ "$T3_CONNECT" = publish ] && [ "$PROFILE" = research ]; then
+  echo "T3 Connect: publish-only (research: open egress already covers t3.codes)"
+elif [ "$T3_CONNECT" = publish ]; then
+  echo "T3 Connect: publish-only (t3.codes allowlisted; no tunnel edge)"
 else
   echo "T3 Connect: off"
 fi
@@ -464,8 +471,8 @@ if [ "$PROFILE" = research ]; then
 elif [ "$T3_CONNECT" = 1 ] && [ "$n_tunnel" != 2 ]; then
   echo "ERROR: Firewall verification failed - T3 Connect is on but the $TUNNEL_PORT rules are missing ($n_tunnel of 2)"; exit 1
 fi
-if [ "$T3_CONNECT" = 0 ] && iptables -S OUTPUT | grep -q -- "--dport $TUNNEL_PORT"; then
-  echo "ERROR: Firewall verification failed - T3 Connect is off but a $TUNNEL_PORT rule is present"; exit 1
+if { [ "$T3_CONNECT" = 0 ] || [ "$T3_CONNECT" = publish ]; } && iptables -S OUTPUT | grep -q -- "--dport $TUNNEL_PORT"; then
+  echo "ERROR: Firewall verification failed - T3 Connect is off or publish-only but a $TUNNEL_PORT rule is present"; exit 1
 fi
 n_rstudio=$(iptables -S INPUT | grep -c -- "--dport $RSTUDIO_PORT -j ACCEPT" || true)
 if [ "$RSTUDIO" = 1 ] && [ "$n_rstudio" != 1 ]; then

@@ -2,9 +2,10 @@
 # Run INSIDE a started container AS THE AGENT USER (uid 1000), AFTER init-firewall.sh.
 # T3 Connect (owner opt-in, spec §13.1): with the switch ON, t3.codes resolves and cloudflared reaches
 # Cloudflare's tunnel edge on 7844 (UDP/QUIC and TCP/HTTP2), and 7844 stays closed to every other
-# host; with it OFF, none of that works. Root-side checks (exact rules, ipset contents) live in
+# host; with it OFF, none of that works. MODE=publish (notifications only): t3.codes resolves, but
+# the tunnel edge behaves exactly as OFF. Root-side checks (exact rules, ipset contents) live in
 # test-firewall.sh (EXPECT_T3_CONNECT).
-# Env: MODE      on | off
+# Env: MODE      on | off | publish
 #      EDGE_IP   a tunnel-edge IPv4 (region1.v2.argotunnel.com) that the CI step proved reachable on
 #                TCP 7844 from the runner, so a block here is the firewall (not a dead edge)
 #      ANNOTATE  =1 in CI: also print failures as ::error:: annotations (CI logs are not readable
@@ -13,7 +14,7 @@ set -uo pipefail
 fail=0
 ok(){ echo "OK:   $*"; }
 bad(){ echo "FAIL: $*"; fail=1; [ "${ANNOTATE:-0}" != 1 ] || echo "::error title=T3 Connect ($MODE)::$*"; }
-: "${MODE:?MODE must be on or off}" "${EDGE_IP:?EDGE_IP must be set}"
+: "${MODE:?MODE must be on, off or publish}" "${EDGE_IP:?EDGE_IP must be set}"
 [ "$(id -u)" = 1000 ] && ok "running as uid 1000 ($(id -un))" || bad "must run as the agent (uid 1000), not $(id -u)"
 A_RE='^[0-9]+(\.[0-9]+){3}$'
 SRV=_v2-origintunneld._tcp.argotunnel.com
@@ -78,7 +79,11 @@ if [ "$MODE" = on ]; then
 else
   st=$(dig @127.0.0.1 SRV "$SRV" +time=3 +tries=2 2>/dev/null | sed -n 's/.*status: \([A-Z]*\).*/\1/p' | head -1)
   case "$st" in REFUSED|NXDOMAIN) ok "SRV $SRV is $st (argotunnel.com not resolvable)";; *) bad "SRV $SRV status '$st', want REFUSED/NXDOMAIN";; esac
-  [ -z "$(a_of app.t3.codes)" ] && ok "app.t3.codes does not resolve" || bad "app.t3.codes resolves with T3 Connect off"
+  if [ "$MODE" = publish ]; then
+    [ -n "$(a_of relay.t3.codes)" ] && ok "relay.t3.codes resolves (publish)" || bad "relay.t3.codes does not resolve with MODE=publish"
+  else
+    [ -z "$(a_of app.t3.codes)" ] && ok "app.t3.codes does not resolve" || bad "app.t3.codes resolves with T3 Connect off"
+  fi
   rejected_here "$EDGE_IP" 7844 "tunnel edge $EDGE_IP (literal) on TCP 7844"
   if [ -n "$CF" ]; then
     log=$(run_cloudflared quic 30)

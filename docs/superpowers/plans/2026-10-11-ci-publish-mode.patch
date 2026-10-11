@@ -1,0 +1,38 @@
+--- a/.github/workflows/ci.yml	2026-10-11 12:29:08.813606255 -0700
++++ b/.github/workflows/ci.yml	2026-10-11 12:29:08.813606255 -0700
+@@ -243,6 +243,35 @@
+           docker rm -f fwt3
+           docker network rm t3net
+           exit $rc
++      - name: Firewall with T3_CONNECT=publish (t3.codes only, no tunnel edge)
++        if: always() && steps.mode.outputs.mode == 'full'
++        run: |
++          # The owner's switch, mounted read-only exactly as agent-up's generated overlay does.
++          printf 'T3_CONNECT=publish\n' > /tmp/t3-connect
++          printf 'www.python.org' > /tmp/40-extra.txt
++          printf 'www.r-project.org\r\ncran.r-project.org  # inline comment\n\n# comment only\nwww.mozilla.org' > /tmp/50-project.txt
++          EDGE_IP=$(getent ahostsv4 region1.v2.argotunnel.com | awk 'NR==1{print $1}')
++          docker network create pubnet
++          docker run -d --name fwpub --network pubnet --cap-add NET_ADMIN --cap-add NET_RAW \
++            -v /tmp/t3-connect:/etc/firewall/t3-connect:ro \
++            -v /tmp/40-extra.txt:/etc/firewall/allowlist.d/40-extra.txt:ro \
++            -v /tmp/50-project.txt:/etc/firewall/allowlist.d/50-project.txt:ro \
++            -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
++          UP=$(docker exec fwpub awk '/^nameserver/{print $2; exit}' /etc/resolv.conf); echo "original resolver: $UP"
++          docker exec fwpub sudo /usr/local/bin/init-firewall.sh
++          docker exec fwpub sudo /usr/local/bin/init-firewall.sh
++          rc=0   # run every suite, fail at the end; FAIL lines become annotations (logs are not readable remotely)
++          run(){ "$@" 2>&1 | tee -a /tmp/pub.log; return "${PIPESTATUS[0]}"; }
++          run docker exec -u root -e EXPECT_UPSTREAM="$UP" -e EXPECT_T3_CONNECT=publish fwpub bash /tests/firewall/test-firewall.sh || rc=1
++          run docker exec -u agent -e EXPECT_UPSTREAM="$UP" -e REQUIRE_DOCKER_DNS=1 fwpub bash /tests/firewall/test-agent-egress.sh || rc=1
++          run docker exec -u agent -e MODE=publish -e EDGE_IP="$EDGE_IP" fwpub bash /tests/firewall/test-t3-connect.sh || rc=1
++          if [ "$rc" -ne 0 ]; then
++            msg=$(grep -E '^(FAIL|        )' /tmp/pub.log | head -n 40 | sed 's/%/%25/g; s/\r//g' | awk '{printf "%s%%0A", $0}')
++            echo "::error title=T3_CONNECT=publish firewall tests::$msg"
++          fi
++          docker rm -f fwpub
++          docker network rm pubnet
++          exit $rc
+       - name: Firewall research profile (compose-like network, idempotent re-run, open public egress)
+         if: always() && steps.mode.outputs.mode == 'full'
+         run: |
