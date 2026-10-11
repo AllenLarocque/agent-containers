@@ -288,10 +288,10 @@ cp "$T/pconf-t3.bak" "$CFG/project.conf"
 
 # ---- T3 Connect (owner opt-in): validated by up/config only; a missing key is 0
 cp "$CFG/project.conf" "$T/pconf-t3c.bak"
-for v in 2 yes on " 1"; do
+for v in 2 yes on Publish " 1"; do
   sed -i "s/^T3_CONNECT=.*/T3_CONNECT=$v/" "$CFG/project.conf"
   : > "$DLOG"
-  refuses "up refuses T3_CONNECT='$v'" "T3_CONNECT='$v'.*must be 0 \(off\) or 1 \(on\)" au up "$NAME"
+  refuses "up refuses T3_CONNECT='$v'" "T3_CONNECT='$v'.*must be 0 \(off\), 1 \(managed tunnel\) or publish \(publish-only\)" au up "$NAME"
   check "  ...without reaching docker" test ! -s "$DLOG"
   refuses "config refuses T3_CONNECT='$v'" "T3_CONNECT='$v'" au config "$NAME"
   check "stop works with T3_CONNECT='$v' (lifecycle never validates it)" au stop "$NAME"
@@ -318,6 +318,14 @@ check "  ...firewall switch file says T3_CONNECT=1" test "$(cat "$CFG/.generated
 check "  ...overlay mounts it read-only at /etc/firewall/t3-connect" \
   bash -c 'grep -qx "        source: ./.generated/t3-connect" "$1" && grep -qx "        target: /etc/firewall/t3-connect" "$1" && grep -qx "        read_only: true" "$1"' _ "$T3O"
 check "  ...and sets TUNNEL_EDGE_IP_VERSION=4 for cloudflared" grep -qE '^      TUNNEL_EDGE_IP_VERSION: "4"' "$T3O"
+sed -i 's/^T3_CONNECT=.*/T3_CONNECT=publish/' "$CFG/project.conf"
+upout="$(au up "$NAME" 2>&1)" && rc=0 || rc=$?
+check "up with T3_CONNECT=publish" test "$rc" -eq 0
+check "  ...says publish-only and how to link it" grep -q "T3 Connect: publish-only .*t3 connect link --publish-only" <<<"$upout"
+check "  ...firewall switch file says exactly T3_CONNECT=publish" test "$(cat "$CFG/.generated/t3-connect")" = "T3_CONNECT=publish"
+check "  ...overlay mounts it read-only, env T3_CONNECT=publish" \
+  bash -c 'grep -qx "        target: /etc/firewall/t3-connect" "$1" && grep -qx "        read_only: true" "$1" && grep -qE "^      T3_CONNECT: \"publish\"" "$1"' _ "$T3O"
+check "  ...and no TUNNEL_EDGE_IP_VERSION (no tunnel)" bash -c '! grep -q TUNNEL_EDGE_IP_VERSION "$1"' _ "$T3O"
 sed -i 's/^T3_CONNECT=.*/T3_CONNECT=0/' "$CFG/project.conf"
 check "back to T3_CONNECT=0: config succeeds" au config "$NAME"
 check "  ...and the switch file is gone" test ! -e "$CFG/.generated/t3-connect"
@@ -478,6 +486,11 @@ check "down research without 1Password" au down research
 # research holds no secrets: project.env may exist only empty (comments)
 printf '# nothing\n\n' > "$RCFG/project.env"
 check "up research accepts a comments-only project.env" au up research
+sed -i 's/^T3_CONNECT=.*/T3_CONNECT=publish/' "$RCFG/project.conf"
+check "up research with T3_CONNECT=publish" au up research
+check "  ...research switch file says T3_CONNECT=publish" test "$(cat "$RCFG/.generated/t3-connect")" = "T3_CONNECT=publish"
+sed -i 's/^T3_CONNECT=.*/T3_CONNECT=0/' "$RCFG/project.conf"
+au config research >/dev/null 2>&1 || true
 echo 'GH_TOKEN=op://agent-research/github-agent/token' >> "$RCFG/project.env"
 refuses "up research refuses ANY key in project.env" 'holds no secrets.*line number' au up research
 refuses "config research refuses ANY key in project.env" 'holds no secrets' au config research
@@ -614,6 +627,13 @@ if docker compose version >/dev/null 2>&1; then
     jq -e '.services.agent.environment.TUNNEL_EDGE_IP_VERSION == "4" and .services.agent.environment.T3_CONNECT == "1"' <<<"$J1"
   check "rendered (T3_CONNECT=1): otherwise identical to T3_CONNECT=0" \
     bash -c 'diff <(jq -S "del(.services.agent.environment.T3_CONNECT, .services.agent.environment.TUNNEL_EDGE_IP_VERSION) | .services.agent.volumes |= map(select(.target != \"/etc/firewall/t3-connect\"))" <<<"$1") <(jq -S . <<<"$2")' _ "$J1" "$J"
+  sed -i 's/^T3_CONNECT=.*/T3_CONNECT=publish/' "$CFG/project.conf"
+  JP="$(render "$T")"
+  sed -i 's/^T3_CONNECT=.*/T3_CONNECT=0/' "$CFG/project.conf"
+  check "rendered (T3_CONNECT=publish): switch mount read-only, env T3_CONNECT=publish, no TUNNEL_EDGE_IP_VERSION" \
+    jq -e '.services.agent.environment.T3_CONNECT == "publish" and .services.agent.environment.TUNNEL_EDGE_IP_VERSION == null and ([.services.agent.volumes[] | select(.target=="/etc/firewall/t3-connect") | .read_only] == [true])' <<<"$JP"
+  check "rendered (T3_CONNECT=publish): otherwise identical to T3_CONNECT=0" \
+    bash -c 'diff <(jq -S "del(.services.agent.environment.T3_CONNECT) | .services.agent.volumes |= map(select(.target != \"/etc/firewall/t3-connect\"))" <<<"$1") <(jq -S . <<<"$2")' _ "$JP" "$J"
   # Research exchange, builder opt-in: exactly three /research mounts + the two instruction files, nothing else changes.
   sed -i 's/^RESEARCH=.*/RESEARCH=1/' "$CFG/project.conf"
   JR="$(render "$T")"

@@ -92,6 +92,25 @@ account) and a Cloudflare Tunnel that the T3 server runs inside the container (`
 which T3 downloads from GitHub releases on first use and checks against a pinned sha256). It is
 **off by default, per project** (decision 2026-10-09, spec §13.1).
 
+`T3_CONNECT` takes three values: `0` (off), `1` (managed tunnel: T3's relay plus a Cloudflare
+tunnel, at most 3 per T3 account) and `publish` (publish-only: notifications through T3's relay,
+no tunnel; you connect over Tailscale instead). **`publish` is the recommended mode**: no tunnel
+limit and no public hostname. `publish` opens `t3.codes` only (no Cloudflare edge, no port 7844).
+
+**An image older than this PR refuses `T3_CONNECT=publish` and the container fails closed.** Pin a
+digest from digests.md built after this PR's publish run first; until then `T3_CONNECT=1` plus a
+publish-only link also works.
+
+**Publish-only first time:** `agent-up shell <project>`, then `t3 connect --headless`,
+`t3 connect link --publish-only`, `t3 connect publish`, then `agent-up up <project>`.
+
+**Migrating a project from a managed tunnel:** in the container run `t3 connect unlink` (a 5 s
+timeout warning is harmless; "Revoked the relay-side environment record" means the slot is freed; if
+the app still counts it: Account -> T3 Connect -> Deregister), then `t3 connect link --publish-only`,
+`t3 connect publish`, set `T3_CONNECT=publish` and run `agent-up up <project>`. The app shows the
+environment as "activity publishing only"; it errors until a direct route is added (see the
+Tailscale section).
+
 What `T3_CONNECT=1` changes, and nothing else:
 - the firewall allowlists `t3.codes` (relay and login: `app.`, `relay.`, `clerk.`) on ports 22/80/443
   like any entry;
