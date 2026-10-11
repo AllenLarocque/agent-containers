@@ -48,12 +48,8 @@ Each container runs a T3 Code server (`t3 serve`, pinned in the image, telemetry
   The browser shows the new name after `agent-up up <project>`. Through T3 Connect the name is
   fixed when the environment is **linked**, so one linked earlier keeps its old name until relinked
   (see the T3 Connect gotchas).
-- Phone (or another of your devices) without T3 Connect: with Tailscale on Windows, run in PowerShell
-  `tailscale serve --bg <T3_PORT>`; the first time it asks you to enable Serve and HTTPS
-  certificates for the tailnet. **Never enable Funnel** (it makes T3 public). `tailscale serve status`
-  must say `(tailnet only)`. Pair the device with the same token on the tailnet address:
-  `https://<machine>.<tailnet>.ts.net/pair#token=…`. A second project needs its own HTTPS port:
-  `tailscale serve --bg --https=8443 <its T3_PORT>`.
+- Phone and desktop apps: see "Phone and desktop apps (Tailscale)" below. `agent-up up` prints the
+  one-time `tailscale serve` command and `agent-up pair` prints the app addresses.
 - T3 drives the container's own Claude Code (your login, behind the firewall). Don't enable the
   desktop app's local environment or WSL integration: those run agents on the host, outside any sandbox.
 
@@ -109,7 +105,7 @@ timeout warning is harmless; "Revoked the relay-side environment record" means t
 the app still counts it: Account -> T3 Connect -> Deregister), then `t3 connect link --publish-only`,
 `t3 connect publish`, set `T3_CONNECT=publish` and run `agent-up up <project>`. The app shows the
 environment as "activity publishing only"; it errors until a direct route is added (see the
-Tailscale section).
+"Phone and desktop apps (Tailscale)" section).
 
 What `T3_CONNECT=1` changes, and nothing else:
 - the firewall allowlists `t3.codes` (relay and login: `app.`, `relay.`, `clerk.`) on ports 22/80/443
@@ -174,6 +170,37 @@ without it, the server keeps trying to reach the relay, which the firewall now b
 `T3_CONNECT` means 0). To opt in, add the line `T3_CONNECT=1` to its `project.conf` and follow
 the steps above; the image must be one that includes T3 Connect support (a digest from
 `digests.md` dated after this change).
+
+## Phone and desktop apps (Tailscale)
+
+The T3 phone and desktop apps connect straight to the container's T3 server (the `publish` mode of
+T3 Connect only sends notifications). The phone reaches it over your tailnet via Tailscale Serve;
+the desktop app on the host PC uses `localhost`.
+
+**One time, shared:** create `~/.config/agent-containers/agent-up.conf` with your machine's tailnet
+name (from `tailscale status` or the Tailscale admin console):
+
+```
+TAILSCALE_HOST=<machine>.<tailnet>.ts.net
+```
+
+**Per project:**
+1. `agent-up up <project>` prints the command, e.g.
+   `tailscale serve --bg --https=8442 3773`. Run it once in Windows PowerShell (Tailscale runs on the
+   Windows host). The first time ever, Tailscale asks you to enable Serve and HTTPS certificates for
+   the tailnet. `tailscale serve status` must say `(tailnet only)`. **Never use Funnel**: it makes T3
+   public. The mapping survives reboots.
+2. `agent-up pair <project>` prints the addresses and a pairing code.
+3. In each app: Add environment, then the host and the pairing code. Desktop app on this PC:
+   `http://localhost:<T3_PORT>`. Phone, with Tailscale on:
+   `https://<machine>.<tailnet>.ts.net:<port>` (no `:<port>` when it is 443).
+
+The HTTPS port defaults to `8443 + T3_PORT - 3774` (T3_PORT 3773 gives 8442, 3774 gives 8443, 3775
+gives 8444). Two projects may not share one: `agent-up` refuses a collision. A project whose
+mapping predates this formula keeps it with `TAILSCALE_HTTPS_PORT=<port>` in its `project.conf`
+(e.g. `TAILSCALE_HTTPS_PORT=443` for a project already served on 443).
+
+Retiring a project: `tailscale serve --https=<port> off` in PowerShell.
 
 ## Research container
 

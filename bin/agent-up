@@ -19,7 +19,7 @@ usage:
                                          (research: no secrets, no `op run`)
   agent-up config <project> [ARGS...]    print the rendered compose config (no secrets needed)
   agent-up shell <project>               zsh in the container as `agent`
-  agent-up pair <project>                print a one-time T3 Code pairing link (valid 10 min)
+  agent-up pair <project>                print a one-time T3 Code pairing link (valid 10 min) and the app addresses
   agent-up rstudio <project>             print the RStudio Server address, user and password (RSTUDIO=1)
   agent-up status|stop|down <project>
 USAGE
@@ -375,13 +375,46 @@ check_rstudio(){ # only up, config and rstudio: stop/down/status must work whate
 }
 t3_host(){ printf '%s.localhost' "$(printf '%s' "$1" | tr '_' '-')"; } # per-project browser origin (cookies are per host, not per port)
 rstudio_host(){ printf 'rstudio-%s' "$(t3_host "$1")"; } # its own origin: not T3's, not another project's
+tailscale_host(){ # the shared TAILSCALE_HOST from $CFG_ROOT/agent-up.conf: validated host or nothing (unset)
+  local f="$CFG_ROOT/agent-up.conf" v=""
+  [ ! -f "$f" ] || v="$(conf_get "$f" TAILSCALE_HOST)"
+  [ -n "$v" ] || return 0
+  [[ $v =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]] \
+    || die "TAILSCALE_HOST='$v' in $f: must be a bare host name like machine.tailnet.ts.net"
+  printf '%s' "$v"
+}
+ts_port_raw(){ # $1 config dir -> override or the formula, unvalidated (empty if neither is computable)
+  local v t; v="$(conf_get "$1/project.conf" TAILSCALE_HTTPS_PORT)"
+  if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
+  t="$(conf_get "$1/project.conf" T3_PORT)"
+  [[ $t =~ ^[0-9]+$ ]] && printf '%s' "$((8443 + t - 3774))" || true
+}
+ts_port(){ # $1 config dir -> the Tailscale Serve HTTPS port, validated 1-65535
+  local v; v="$(ts_port_raw "$1")"
+  [[ $v =~ ^[0-9]+$ ]] && [ "$v" -ge 1 ] && [ "$v" -le 65535 ] \
+    || die "TAILSCALE_HTTPS_PORT='$v' in $1/project.conf: must be a port 1-65535"
+  printf '%s' "$v"
+}
+check_ts_port(){ # only up and pair: stop/down/status must work whatever the values
+  local port other; port="$(ts_port "$1")"
+  for other in "$CFG_ROOT"/*/project.conf; do
+    [ -f "$other" ] && [ "$other" != "$1/project.conf" ] || continue
+    [ "$(ts_port_raw "$(dirname "$other")")" != "$port" ] \
+      || die "TAILSCALE_HTTPS_PORT=$port in $1/project.conf is also used by $(basename "$(dirname "$other")"): set TAILSCALE_HTTPS_PORT to a free port in $1/project.conf"
+  done
+  tailscale_host >/dev/null
+}
+ts_url(){ # $1 config dir -> the phone address (placeholder host when TAILSCALE_HOST is unset)
+  local h port; h="$(tailscale_host)"; port="$(ts_port "$1")"
+  if [ "$port" = 443 ]; then printf 'https://%s' "${h:-<tailnet-host>}"; else printf 'https://%s:%s' "${h:-<tailnet-host>}" "$port"; fi
+}
 check_digest(){
   grep -Eq '^[[:space:]]*image:[[:space:]]*[^[:space:]]+@sha256:[0-9a-f]{64}[[:space:]]*$' "$1" \
     || die "$1: the image is not pinned to a real digest (@sha256:<64 hex>). Copy one from agent-containers/digests.md."
 }
 check_project_env(){ # op:// references only; never echo a line (it could hold a pasted secret)
   local bad reserved
-  reserved="$(grep -nE '^[[:space:]]*(PROJECT|PROJECT_DIR|PROFILE|IMAGE|SPADES_AI_DIR|AGENT_MEMORY_DIR|T3_PORT|T3_CONNECT|RESEARCH|RSTUDIO|PATH|HOME|COMPOSE|(COMPOSE|DOCKER|OP|TUNNEL|RESEARCH|RS|RSTUDIO)_[A-Za-z0-9_]*)=' "$1" | sed 's/^\([0-9]*\):[[:space:]]*\([A-Za-z0-9_]*\)=.*/line \1: \2/' | paste -sd, - || true)"
+  reserved="$(grep -nE '^[[:space:]]*(PROJECT|PROJECT_DIR|PROFILE|IMAGE|SPADES_AI_DIR|AGENT_MEMORY_DIR|T3_PORT|T3_CONNECT|TAILSCALE_HTTPS_PORT|TAILSCALE_HOST|RESEARCH|RSTUDIO|PATH|HOME|COMPOSE|(COMPOSE|DOCKER|OP|TUNNEL|RESEARCH|RS|RSTUDIO)_[A-Za-z0-9_]*)=' "$1" | sed 's/^\([0-9]*\):[[:space:]]*\([A-Za-z0-9_]*\)=.*/line \1: \2/' | paste -sd, - || true)"
   [ -z "$reserved" ] || die "$1 uses reserved key name(s) that would override compose or the launcher ($reserved); rename them"
   bad="$(grep -nEv '^[[:space:]]*(#|$)' "$1" | grep -Ev '^[0-9]+:[A-Za-z_][A-Za-z0-9_]*=op://[^[:space:]]+$' | cut -d: -f1 | paste -sd, - || true)"
   [ -z "$bad" ] || die "$1 may hold only KEY=op://... references; offending line number(s): $bad (values not shown)"
@@ -574,6 +607,7 @@ cmd_up(){
   check_files "$cfg"
   check_t3_port "$cfg"
   check_t3_connect "$cfg"
+  check_ts_port "$cfg"
   check_research "$cfg"
   check_rstudio "$cfg"
   check_digest "$cfg/compose.yaml"
@@ -608,6 +642,7 @@ cmd_up(){
   fi
   echo "agent-up: '$name' running. Attach: agent-up shell $name, or VS Code: Dev Containers: Attach to Running Container... -> ${name}-agent-1"
   echo "agent-up: T3 Code at http://$(t3_host "$name"):$(conf_get "$cfg/project.conf" T3_PORT) (first time: agent-up pair $name)"
+  echo "agent-up: Tailscale (once, Windows PowerShell): tailscale serve --bg --https=$(ts_port "$cfg") $(conf_get "$cfg/project.conf" T3_PORT)"
   if [ "$(t3_connect "$cfg")" = 1 ]; then
     echo "agent-up: T3 Connect is ON (first time: agent-up shell $name; t3 connect --headless; then agent-up up $name)"
   elif [ "$(t3_connect "$cfg")" = publish ]; then
@@ -642,6 +677,7 @@ cmd_pair(){
   local cfg name port tok; cfg="$(cfg_dir "$1")"; name="$(basename "$cfg")"
   check_files "$cfg"
   check_t3_port "$cfg"
+  check_ts_port "$cfg"
   port="$(conf_get "$cfg/project.conf" T3_PORT)"
   tok="$(docker exec -u agent "$name-agent-1" agent-t3 pair "$(hostname)")" \
     || die "could not mint a pairing token (is '$name' running? agent-up status $name)"
@@ -650,6 +686,11 @@ cmd_pair(){
   echo "  http://$(t3_host "$name"):$port/pair#$tok"
   echo "Its own browser origin keeps this project's T3 session apart from other projects'."
   echo "If your browser cannot open it, use: http://localhost:$port/pair#$tok"
+  echo "In the T3 apps (Add environment -> host + pairing code):"
+  echo "  desktop app on this PC: http://localhost:$port"
+  echo "  phone (Tailscale on):   $(ts_url "$cfg")"
+  echo "  pairing code: ${tok#token=}"
+  [ -n "$(tailscale_host)" ] || echo "  (set TAILSCALE_HOST in $CFG_ROOT/agent-up.conf to your machine.tailnet.ts.net name; see the README, Phone and desktop apps (Tailscale))"
 }
 cmd_rstudio(){
   [ $# -eq 1 ] || usage
@@ -701,7 +742,7 @@ cmd_status(){
 # must not override it (a shell variable beats --env-file in compose).
 unset COMPOSE_FILE COMPOSE_PROFILES COMPOSE_PATH_SEPARATOR COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES \
       PROJECT PROJECT_DIR PROFILE IMAGE SPADES_AI_DIR AGENT_MEMORY_DIR T3_PORT T3_CONNECT RESEARCH RESEARCH_DIR \
-      RSTUDIO RSTUDIO_PORT
+      RSTUDIO RSTUDIO_PORT TAILSCALE_HTTPS_PORT TAILSCALE_HOST
 
 [ $# -ge 1 ] || usage
 cmd="$1"; shift

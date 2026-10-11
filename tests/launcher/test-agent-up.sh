@@ -284,6 +284,59 @@ cp "$T/pconf-t3.bak" "$CFG/project.conf"
 cp "$CFGROOT/bio2/project.conf" "$T/bio2conf.bak"; sed -i 's/^T3_PORT=.*/T3_PORT=3773/' "$CFGROOT/bio2/project.conf"
 refuses "a T3_PORT used by another project is refused" 'T3_PORT=3773 .* also used by bio2' au pair "$NAME"
 cp "$T/bio2conf.bak" "$CFGROOT/bio2/project.conf"
+
+# ---- Tailscale addresses (shared $CFG_ROOT/agent-up.conf + per-project TAILSCALE_HTTPS_PORT)
+AUC="$CFGROOT/agent-up.conf"
+pairout="$(au pair "$NAME" 2>&1)" || true
+check "pair: desktop app address on this PC" grep -qxF "  desktop app on this PC: http://localhost:3773" <<<"$pairout"
+check "  ...phone address uses a placeholder host and the computed port" grep -qxF "  phone (Tailscale on):   https://<tailnet-host>:8442" <<<"$pairout"
+check "  ...pairing code on its own line" grep -qxF "  pairing code: fakeTok_123" <<<"$pairout"
+check "  ...hint to set TAILSCALE_HOST" grep -qF "set TAILSCALE_HOST in $AUC" <<<"$pairout"
+check "  ...the browser-link lines stay" grep -qxF "  http://demo-proj.localhost:3773/pair#token=fakeTok_123" <<<"$pairout"
+echo "TAILSCALE_HOST=box.tail1.ts.net" > "$AUC"
+pairout="$(au pair "$NAME" 2>&1)" || true
+check "pair with TAILSCALE_HOST: phone address" grep -qxF "  phone (Tailscale on):   https://box.tail1.ts.net:8442" <<<"$pairout"
+check "  ...no hint any more" bash -c '! grep -q "set TAILSCALE_HOST" <<<"$1"' _ "$pairout"
+upout="$(au up "$NAME" 2>&1)" || true
+check "up prints the Tailscale Serve command" grep -qxF "agent-up: Tailscale (once, Windows PowerShell): tailscale serve --bg --https=8442 3773" <<<"$upout"
+echo "TAILSCALE_HTTPS_PORT=443" >> "$CFG/project.conf"
+pairout="$(au pair "$NAME" 2>&1)" || true
+check "TAILSCALE_HTTPS_PORT=443: phone address has no :443" grep -qxF "  phone (Tailscale on):   https://box.tail1.ts.net" <<<"$pairout"
+upout="$(au up "$NAME" 2>&1)" || true
+check "  ...and up prints --https=443" grep -qF "tailscale serve --bg --https=443 3773" <<<"$upout"
+cp "$T/pconf-t3.bak" "$CFG/project.conf"
+pairout="$(au pair bio2 2>&1)" || true
+check "a T3_PORT=3774 project gets 8443 (bio2)" grep -qxF "  phone (Tailscale on):   https://box.tail1.ts.net:8443" <<<"$pairout"
+pairout="$(au pair symproj1 2>&1)" || true
+check "a T3_PORT=3775 project gets 8444 (symproj1)" grep -qxF "  phone (Tailscale on):   https://box.tail1.ts.net:8444" <<<"$pairout"
+cp "$T/bio2conf.bak" "$CFGROOT/bio2/project.conf"
+echo "TAILSCALE_HTTPS_PORT=8442" >> "$CFGROOT/bio2/project.conf"
+refuses "up refuses a TAILSCALE_HTTPS_PORT used by another project" 'TAILSCALE_HTTPS_PORT.*also used by demo-proj' au up bio2
+refuses "pair refuses a TAILSCALE_HTTPS_PORT used by another project" 'TAILSCALE_HTTPS_PORT.*also used by demo-proj' au pair bio2
+cp "$T/bio2conf.bak" "$CFGROOT/bio2/project.conf"
+for h in "https://x.ts.net" "a b" "x.ts.net/p" "UPPER.ts.net" "nodots"; do
+  echo "TAILSCALE_HOST=$h" > "$AUC"
+  : > "$DLOG"
+  rc=0; out="$(au up "$NAME" 2>&1)" || rc=$?
+  check "up refuses TAILSCALE_HOST='$h'" bash -c '[ "$1" -ne 0 ] && grep -q "TAILSCALE_HOST=" <<<"$2" && ! grep -q "tailscale serve" <<<"$2"' _ "$rc" "$out"
+  refuses "pair refuses TAILSCALE_HOST='$h'" 'TAILSCALE_HOST=' au pair "$NAME"
+  check "stop works with TAILSCALE_HOST='$h'" au stop "$NAME"
+done
+rm -f "$AUC"
+for v in 0 70000 abc; do
+  echo "TAILSCALE_HTTPS_PORT=$v" >> "$CFG/project.conf"
+  refuses "up refuses TAILSCALE_HTTPS_PORT=$v" "TAILSCALE_HTTPS_PORT='$v'.*1-65535" au up "$NAME"
+  check "stop works with TAILSCALE_HTTPS_PORT=$v" au stop "$NAME"
+  check "down works with TAILSCALE_HTTPS_PORT=$v" au down "$NAME"
+  check "status works with TAILSCALE_HTTPS_PORT=$v" au status "$NAME"
+  cp "$T/pconf-t3.bak" "$CFG/project.conf"
+done
+cp "$CFG/project.env" "$T/penv-ts.bak"
+for k in TAILSCALE_HTTPS_PORT TAILSCALE_HOST; do
+  echo "$k=op://x/y" >> "$CFG/project.env"
+  refuses "up refuses reserved key $k in project.env" "reserved.*$k" au up "$NAME"
+  cp "$T/penv-ts.bak" "$CFG/project.env"
+done
 cp "$T/pconf-t3.bak" "$CFG/project.conf"
 
 # ---- T3 Connect (owner opt-in): validated by up/config only; a missing key is 0
