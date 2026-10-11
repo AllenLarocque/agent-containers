@@ -5,6 +5,6 @@ Updated by the `publish` workflow via PR — never edit by hand.
 
 | image | tag | digest |
 |---|---|---|
-| spades-base | 2026.10.10-a8d14d5 | `sha256:930a7c34cfa1ff7c38f3c7d1199b03ca4d8b532234041f4e07320ec3b4b039a5` |
-| spades-gis | 2026.10.10-a8d14d5 | `sha256:8b2022ea37040ed626fa650da9e26784e896b8ff0601b5f30135d453e8812bc1` |
-| spades-bio | 2026.10.10-a8d14d5 | `sha256:f16dce6ab3b97ee196b00aea79e06c74feadda86bda70e1e9e3dcbb8689a54d8` |
+| spades-base | 2026.10.11-d2dbc08 | `sha256:df435917688b5447d38b79189bcd502a9ade380892a80b897dbb833048f02c61` |
+| spades-gis | 2026.10.11-d2dbc08 | `sha256:5c48268f49a90d98644ded8d7a706b51f032e99e6d2683898ec48b4f465e2a3f` |
+| spades-bio | 2026.10.11-d2dbc08 | `sha256:3aac427cb76028600b54ceafe3de535e946d91ba29b1922186d01c229f228d6c` |
