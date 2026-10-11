@@ -1018,8 +1018,8 @@ OVR
       bash -c 'e="$(docker exec "$1" env)"; ! grep -Eq "^(GH_TOKEN|GITHUB_TOKEN|OP_[A-Z_]*)=" <<<"$e" && ! grep -q ambient- <<<"$e"' _ "$RID"
     check "research: no project, spades.ai or memory mount" \
       bash -c '! docker inspect -f "{{range .Mounts}}{{.Destination}} {{end}}" "$1" | grep -Eq "(^| )(/workspace|/opt/memory|/opt/reference/spades.ai)( |$)"' _ "$RID"
-    check "research: /research holds exactly the exchange projects" \
-      test "$(docker exec -u agent "$RID" ls /research | paste -sd' ' -)" = "bio2 $NAME"
+    check "research: /research holds exactly the exchange projects + _general" \
+      test "$(docker exec -u agent "$RID" sh -c 'LC_ALL=C ls /research' | paste -sd' ' -)" = "_general bio2 $NAME"
     check "  ...briefs are READ-ONLY for the research agent (even root)" \
       bash -c 'out="$(docker exec -u root "$1" sh -c "echo x > /research/$2/briefs/x" 2>&1)"; rc=$?; [ "$rc" -ne 0 ] && printf "%s" "$out" | grep -q "Read-only file system"' _ "$RID" "$NAME"
     check "  ...it reads the builder's brief" docker exec -u agent "$RID" grep -q brief "/research/$NAME/briefs/b.md"
