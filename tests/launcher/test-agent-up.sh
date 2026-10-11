@@ -539,7 +539,17 @@ check "  ...research instructions written (readable: mode 644)" \
   bash -c 'cmp -s "$1" "$2" && [ "$(stat -c %a "$1")" = 644 ]' _ "$RCFG/.generated/agent-instructions.md" "$ROOT/project-template/instructions/research.md"
 check "  ...switch read-only at /etc/firewall/profile; instructions read-only at Claude's managed CLAUDE.md + Codex's AGENTS.md" \
   bash -c 'f="$1"; for t in /etc/firewall/profile /etc/claude-code/CLAUDE.md /home/agent/.codex/AGENTS.md; do grep -A1 "target: \"$t\"" "$f" | grep -q "read_only: true" || { echo "not ro: $t"; exit 1; }; done' _ "$RCFG/.generated/research.yaml"
-check "  ...no project subfolders yet: no /research mounts" bash -c '! grep -q "target: \"/research/" "$1"' _ "$RCFG/.generated/research.yaml"
+check "  ...no project subfolders yet: only the /research/_general mount" bash -c '! grep "target: \"/research/" "$1" | grep -qv "target: \"/research/_general\""' _ "$RCFG/.generated/research.yaml"
+check "  ...created RD/_general, said so" bash -c 'test -d "$1/_general" && ! test -L "$1/_general" && grep -qxF "agent-up: created $1/_general" <<<"$2"' _ "$RD" "$out"
+check "  ...no 'skipped' message for _general; not in the research projects line" bash -c '! grep -q "skipped .*_general" <<<"$1" && ! grep "research projects:" <<<"$1" | grep -q _general' _ "$out"
+check "  ..._general read-write at /research/_general (no read_only)" \
+  bash -c 'grep -A2 "source: \"$2/_general\"" "$1" | grep -q "target: \"/research/_general\"" && ! grep -A2 "source: \"$2/_general\"" "$1" | grep -q read_only' _ "$RCFG/.generated/research.yaml" "$RD"
+check "  ...overlay sets working_dir and T3_PROJECT_DIR to /research/_general" \
+  bash -c 'grep -qE "^    working_dir: /research/_general( |$)" "$1" && grep -qE "^      T3_PROJECT_DIR: /research/_general( |$)" "$1"' _ "$RCFG/.generated/research.yaml"
+check "  ...a builder's overlay has no _general" bash -c '! grep -rq _general "$1"' _ "$CFG/.generated"
+mv "$RD/_general" "$T/_general.real"; ln -s "$T/_general.real" "$RD/_general"
+refuses "up research refuses a symlinked _general" '_general is a symlink' au up research
+rm "$RD/_general"; mv "$T/_general.real" "$RD/_general"
 check "  ...no RStudio Server for the research container (overlay adds nothing, no switch, no password)" \
   bash -c '[ "$(grep -v "^#" "$1/rstudio.yaml")" = "$(printf "services:\n  agent: {}")" ] && [ ! -e "$1/rstudio" ] && [ ! -e "$1/rstudio-password" ]' _ "$RCFG/.generated"
 cp "$RCFG/project.conf" "$T/rconf-rs.bak"
@@ -550,8 +560,8 @@ check "  ...stop research still works with RSTUDIO=1 in its config (renders RStu
 check "  ...and its overlay stays empty" bash -c '[ ! -e "$1/rstudio" ] && [ ! -e "$1/rstudio-password" ]' _ "$RCFG/.generated"
 cp "$T/rconf-rs.bak" "$RCFG/project.conf"
 : > "$DLOG"
-check "shell research opens /research" au shell research
-check "  ...docker exec -w /research" grep -qxF "ARGS: exec -it -u agent -w /research research-agent-1 zsh" "$DLOG"
+check "shell research opens /research/_general" au shell research
+check "  ...docker exec -w /research/_general" grep -qxF "ARGS: exec -it -u agent -w /research/_general research-agent-1 zsh" "$DLOG"
 check "stop research without 1Password" au stop research
 check "down research without 1Password" au down research
 # research holds no secrets: project.env may exist only empty (comments)
@@ -603,7 +613,7 @@ for p in bio2 "$NAME"; do
 done
 check "  ...skips a symlinked folder, a non-project name and an incomplete folder" \
   bash -c '! grep -Eq "linked|Bad Name|partial|elsewhere" "$1" && grep -q "skipped" <<<"$2"' _ "$RRO" "$upr"
-check "  ...exactly 2 projects x 3 exchange mounts + switch + 2 instruction mounts" test "$(grep -c "^      - type: bind" "$RRO")" = 9
+check "  ...exactly 2 projects x 3 exchange mounts + _general + switch + 2 instruction mounts" test "$(grep -c "^      - type: bind" "$RRO")" = 10
 rm -rf "$RD/Bad Name" "$RD/partial"; rm -f "$RD/linked"
 echo "x" > "$RD/$NAME/downloads/big.tif"
 stout="$(au status research 2>&1)" || true
@@ -728,13 +738,15 @@ if docker compose version >/dev/null 2>&1; then
   # The shared research container.
   JS="$(cd "$T" && aureal config research --format json)"
   RCFGR="$CFGROOT/research"
-  check "rendered research: project name 'research', cwd /research, mem_limit 16g" \
-    jq -e '.name == "research" and .services.agent.working_dir == "/research" and ((.services.agent.mem_limit|tostring) == "17179869184")' <<<"$JS"
+  check "rendered research: project name 'research', cwd /research/_general, mem_limit 16g" \
+    jq -e '.name == "research" and .services.agent.working_dir == "/research/_general" and ((.services.agent.mem_limit|tostring) == "17179869184")' <<<"$JS"
   check "rendered research: image pinned by digest" bash -c 'jq -r .services.agent.image <<<"$1" | grep -Eq "spades-gis@sha256:[0-9a-f]{64}$"' _ "$JS"
   check "rendered research: NO project, spades.ai, memory, Require cache or project allowlist mount" \
     jq -e '[.services.agent.volumes[].target | select(. == "/workspace" or . == "/opt/memory" or . == "/opt/reference/spades.ai" or . == "/home/agent/.cache/R/Require" or startswith("/etc/firewall/allowlist.d"))] == []' <<<"$JS"
   check "rendered research: environment holds no secret (exactly the 3 seed variables)" \
-    jq -e '(.services.agent.environment | keys) == ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC","CLAUDE_CONFIG_DIR","T3_PROJECT_DIR"] and .services.agent.environment.T3_PROJECT_DIR == "/research"' <<<"$JS"
+    jq -e '(.services.agent.environment | keys) == ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC","CLAUDE_CONFIG_DIR","T3_PROJECT_DIR"] and .services.agent.environment.T3_PROJECT_DIR == "/research/_general"' <<<"$JS"
+  check "rendered research: /research/_general read-write from RESEARCH_DIR/_general" \
+    test "$(mr "$JS" /research/_general)" = "[{\"type\":\"bind\",\"source\":\"$RDR/_general\",\"ro\":false}]"
   check "rendered research: profile switch read-only at /etc/firewall/profile (the only /etc/firewall mount)" \
     bash -c '[ "$(jq -c "[.services.agent.volumes[] | select(.target|startswith(\"/etc/firewall\")) | {target, source, ro: (.read_only // false)}]" <<<"$1")" = "[{\"target\":\"/etc/firewall/profile\",\"source\":\"$2/.generated/profile\",\"ro\":true}]" ]' _ "$JS" "$RCFGR"
   for t in /etc/claude-code/CLAUDE.md /home/agent/.codex/AGENTS.md; do

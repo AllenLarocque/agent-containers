@@ -225,8 +225,23 @@ agent-up init --profile research          # ~/.config/agent-containers/research/
 agent-up up <project>                     # each opted-in builder: mounts its three folders
 agent-up up research                      # no OP_SERVICE_ACCOUNT_TOKEN needed; mounts every project folder
 agent-up shell research                   # first time: `claude` (log in), `codex login --device-auth`
-agent-up pair research                    # T3 Code for the research container (its project is /research)
+agent-up pair research                    # T3 Code for the research container (its project is /research/_general)
 ```
+
+**What persists in the research container.** `agent-up up research` recreates the container
+(`--force-recreate`), so only these survive:
+
+| Where | After `agent-up up` | Visible on the host |
+|---|---|---|
+| `/research/_general` (general research, T3's default project and the shell's start folder) | survives | yes, `~/agent-research/_general` |
+| `/research/<project>/reports` and `/downloads` | survives restart | yes, `~/agent-research/<project>/...` |
+| `/research/<project>/briefs` | survives (read-only for research) | yes |
+| `~/.t3/...` incl. T3 scratch threads | survives (`t3-research` volume) | no (only inside Docker) |
+| anything else (`/home/agent/...`, `/tmp`, other `/research/...` paths) | wiped on every `agent-up up` | no |
+
+Create T3 projects in the research container only under `/research/_general` or
+`/research/<project>`. A T3 project at any other path breaks after the next `agent-up up`; remove
+it in T3 (right-click, Remove).
 
 `docker logs research-agent-1` shows `Profile: research`. A builder opted in **after** the research
 container started reaches it at its next `agent-up up research`.

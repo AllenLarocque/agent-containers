@@ -190,7 +190,7 @@ Next (project-template/README.md "Research container"):
   1. set the image digest in $cfg/compose.yaml (the spades-$image row of agent-containers/digests.md)
   2. set RESEARCH=1 in each builder project's project.conf that should use it
   3. agent-up up research; then log in once: agent-up shell research -> claude, codex login --device-auth
-  4. agent-up pair research (T3 Code)
+  4. agent-up pair research (T3 Code; its project is /research/_general, which persists; create T3 projects only under /research/_general or /research/<project>)
 FINALEOF
 }
 
@@ -282,10 +282,18 @@ exchange_dirs(){ # $1 research root, $2 project: create <project>/{briefs,report
     fi
   done
 }
+general_dir(){ # $1 research root: create <root>/_general (research not tied to a project), never through a symlink
+  [ ! -L "$1/_general" ] || die "$1/_general is a symlink: it must be a real folder"
+  if [ ! -d "$1/_general" ]; then
+    mkdir "$1/_general" || die "could not create $1/_general"
+    echo "agent-up: created $1/_general"
+  fi
+}
 exchange_projects(){ # $1 research root -> the complete project subfolders, one per line
   local d p
   for d in "$1"/*/; do
     d="${d%/}"; p="${d##*/}"
+    [ "$p" != _general ] || continue   # not a project: its own mount (general_dir)
     [ -d "$d" ] && [ ! -L "$d" ] || continue
     if [[ ! $p =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then echo "agent-up: research: skipped '$d' (not a project name)" >&2; continue; fi
     if [ ! -d "$d/briefs" ] || [ ! -d "$d/reports" ] || [ ! -d "$d/downloads" ] \
@@ -299,6 +307,7 @@ make_exchange(){ # up only: the research root and this config's project subfolde
   local rd other
   if [ "$(profile "$1")" = research ]; then
     rd="$(research_dir "$1")"; mkdir -p "$rd"
+    general_dir "$rd"
     # every builder that opted in (and shares this root), so the order of `up`s does not matter
     for other in "$CFG_ROOT"/*/project.conf; do
       [ -f "$other" ] && research_on "$(dirname "$other")" || continue
@@ -503,14 +512,20 @@ write_research(){ # the research profile's switch + instructions + exchange; a b
     echo "services:"
     if [ "$(profile "$1")" = research ]; then
       echo "  agent:"
+      echo "    working_dir: /research/_general        # persistent; overrides the owner's compose.yaml"
+      echo "    environment:"
+      echo "      T3_PROJECT_DIR: /research/_general   # T3 Code's default project; overrides compose.yaml"
       echo "    volumes:"
       echo "      # read by the root firewall at start (open public egress); the agent cannot change it"
       bind_yaml ./.generated/profile /etc/firewall/profile ro
       echo "      # the owner's instructions: Claude Code's managed CLAUDE.md, and Codex's global AGENTS.md"
       bind_yaml ./.generated/agent-instructions.md /etc/claude-code/CLAUDE.md ro
       bind_yaml ./.generated/agent-instructions.md /home/agent/.codex/AGENTS.md ro
-      echo "      # the research exchange: one set per project subfolder of RESEARCH_DIR ($rd)"
+      echo "      # the research exchange: one set per project subfolder of RESEARCH_DIR ($rd), plus _general"
       if [ -d "$rd" ]; then
+        if [ -d "$rd/_general" ] && [ ! -L "$rd/_general" ]; then
+          bind_yaml "$rd/_general" /research/_general rw
+        fi
         while IFS= read -r p; do
           [ -n "$p" ] || continue
           bind_yaml "$rd/$p/briefs" "/research/$p/briefs" ro
@@ -669,7 +684,7 @@ cmd_config(){
 cmd_shell(){
   [ $# -eq 1 ] || usage
   local cfg wd=/workspace; cfg="$(cfg_dir "$1")"
-  if [ "$(profile "$cfg" 2>/dev/null || true)" = research ]; then wd=/research; fi
+  if [ "$(profile "$cfg" 2>/dev/null || true)" = research ]; then wd=/research/_general; fi
   docker exec -it -u agent -w "$wd" "$(basename "$cfg")-agent-1" zsh
 }
 cmd_pair(){
