@@ -679,8 +679,15 @@ cmd_pair(){
   check_t3_port "$cfg"
   check_ts_port "$cfg"
   port="$(conf_get "$cfg/project.conf" T3_PORT)"
-  tok="$(docker exec -u agent "$name-agent-1" agent-t3 pair "$(hostname)")" \
+  local wait="${AGENT_UP_PAIR_WAIT:-60}" waited=0
+  [[ $wait =~ ^[1-9][0-9]*$ ]] || wait=60
+  [ "$(docker inspect -f '{{.State.Running}}' "$name-agent-1" 2>/dev/null)" = true ] \
     || die "could not mint a pairing token (is '$name' running? agent-up status $name)"
+  until tok="$(docker exec -u agent "$name-agent-1" agent-t3 pair "$(hostname)" 2>/dev/null)"; do
+    [ "$waited" -lt "$wait" ] || die "T3 server in '$name' did not answer within $wait s (agent-up status $name; docker logs $name-agent-1)"
+    [ "$waited" -gt 0 ] || echo "agent-up: waiting for the T3 server in '$name'..." >&2
+    sleep 2; waited=$((waited + 2))
+  done
   [[ $tok =~ ^token=[A-Za-z0-9._~%-]+$ ]] || die "unexpected pairing output from the container"
   echo "T3 Code for '$name' (one-time link, valid 10 minutes):"
   echo "  http://$(t3_host "$name"):$port/pair#$tok"

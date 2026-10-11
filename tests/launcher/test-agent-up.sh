@@ -46,7 +46,11 @@ cat > "$T/dstub/docker" <<'STUB'
   echo "OPTOK: ${OP_SERVICE_ACCOUNT_TOKEN-<unset>}"
 } >> "$DLOG"
 case "$*" in
-  *"agent-t3 pair"*) echo "token=fakeTok_123" ;;
+  "inspect -f {{.State.Running}} "*) if [ -f "$(dirname "$DLOG")/RUNNING" ] && [ "$(cat "$(dirname "$DLOG")/RUNNING")" = 0 ]; then echo false; else echo true; fi ;;
+  *"agent-t3 pair"*)
+    sd="$(dirname "$DLOG")"; n=$(( $(cat "$sd/pair.count" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$sd/pair.count"
+    if [ -f "$sd/PAIR_FAILS" ] && [ "$n" -le "$(cat "$sd/PAIR_FAILS")" ]; then exit 1; fi
+    echo "token=fakeTok_123" ;;
   "exec -u agent "*" claude --version") echo "9.9.9 (Claude Code)" ;;
   "exec -u agent "*" codex --version") echo "codex-cli 8.8.8" ;;
 esac
@@ -338,6 +342,20 @@ for k in TAILSCALE_HTTPS_PORT TAILSCALE_HOST; do
   cp "$T/penv-ts.bak" "$CFG/project.env"
 done
 cp "$T/pconf-t3.bak" "$CFG/project.conf"
+# ---- pair waits for the T3 server
+echo 2 > "$T/PAIR_FAILS"; rm -f "$T/pair.count"; : > "$DLOG"
+pairout="$(AMBIENT=(AGENT_UP_PAIR_WAIT=10); au pair "$NAME" 2>&1)" || true
+check "pair retries until the T3 server answers (prints the token)" grep -qF "pair#token=fakeTok_123" <<<"$pairout"
+check "  ...after 3 pair attempts" test "$(grep -c 'agent-t3 pair' "$DLOG")" = 3
+check "  ...says it is waiting" grep -qF "waiting for the T3 server in '$NAME'" <<<"$pairout"
+echo 99 > "$T/PAIR_FAILS"; rm -f "$T/pair.count"
+AMBIENT=(AGENT_UP_PAIR_WAIT=3)
+refuses "pair gives up when the T3 server never answers" "T3 server in '$NAME' did not answer within 3 s" au pair "$NAME"
+rm -f "$T/PAIR_FAILS" "$T/pair.count"
+echo 0 > "$T/RUNNING"; : > "$DLOG"
+refuses "pair refuses at once when the container is not running" "is '$NAME' running\\? agent-up status $NAME" au pair "$NAME"
+check "  ...and makes no agent-t3 pair call" bash -c '! grep -q "agent-t3 pair" "$1"' _ "$DLOG"
+rm -f "$T/RUNNING"; AMBIENT=()
 
 # ---- T3 Connect (owner opt-in): validated by up/config only; a missing key is 0
 cp "$CFG/project.conf" "$T/pconf-t3c.bak"
