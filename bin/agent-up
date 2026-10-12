@@ -106,6 +106,7 @@ RESEARCH_DIR=$HOME/agent-research
 RSTUDIO=0
 RSTUDIO_PORT=$(next_rstudio_port)
 CONFEOF
+  ftp_seed "$image" >> "$tmp/project.conf"
   chmod 600 "$tmp/compose.yaml" "$tmp/project.env" "$tmp/allowlist" "$tmp/project.conf"
   chmod 700 "$tmp"
   mv -T "$tmp" "$cfg"
@@ -382,6 +383,47 @@ check_rstudio(){ # only up, config and rstudio: stop/down/status must work whate
     *) die "RSTUDIO='$(rstudio "$1")' in $1/project.conf: must be 0 (off) or 1 (on)" ;;
   esac
 }
+ftp_seed(){ # $1 image -> the FTP_HOSTS block of a new builder's project.conf: always commented out (off)
+  echo "# FTP uploads: space-separated bare domains that get plain FTP (tcp 21, CLEARTEXT) + the kernel's"
+  echo "# FTP conntrack helper; empty or absent = off. Builders only. Read project-template/README.md"
+  echo "# \"FTP uploads (sequence archives)\" first (the host kernel needs nf_conntrack_ftp)."
+  if [ "$1" = bio ]; then
+    echo "# Sequence archives: ENA Webin webin2.ebi.ac.uk, NCBI SRA ftp-private.ncbi.nlm.nih.gov (list only what you use)."
+    echo "#FTP_HOSTS=webin2.ebi.ac.uk"
+  else
+    echo "#FTP_HOSTS="
+  fi
+}
+ftp_hosts(){ # $1 config dir -> FTP_HOSTS as written, minus ONE pair of surrounding quotes; absent = empty (off)
+  local v; v="$(conf_get "$1/project.conf" FTP_HOSTS)"
+  case "$v" in \"*\") v="${v#\"}"; v="${v%\"}" ;; \'*\') v="${v#\'}"; v="${v%\'}" ;; esac
+  printf '%s' "$v"
+}
+FTP_DOMAIN_RE='^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$'   # = init-firewall.sh's DOMAIN_RE (the allowlist's)
+ftp_bad_token(){ # $1 config dir -> the first FTP_HOSTS token that is not a bare domain (nothing: all fine)
+  local t; local -a toks
+  read -r -a toks <<<"$(ftp_hosts "$1")" || true
+  for t in "${toks[@]}"; do [[ $t =~ $FTP_DOMAIN_RE ]] || { printf '%s' "$t"; return 0; }; done
+}
+ftp_list(){ # $1 config dir -> the FTP_HOSTS domains, lower-cased, sorted, unique, one per line
+  local -a toks
+  read -r -a toks <<<"$(ftp_hosts "$1")" || true
+  [ "${#toks[@]}" -gt 0 ] || return 0
+  printf '%s\n' "${toks[@]}" | tr 'A-Z' 'a-z' | sort -u
+}
+ftp_on(){ # a builder with a non-empty FTP_HOSTS of valid domains. stop/down render with this and never
+  # refuse: an invalid list renders FTP off for them (up/config refuse it instead).
+  [ "$(profile "$1")" = builder ] && [ -n "$(ftp_list "$1")" ] && [ -z "$(ftp_bad_token "$1")" ]
+}
+check_ftp(){ # only up and config: stop/down/status must work whatever the value
+  local bad
+  if [ "$(profile "$1")" = research ]; then
+    [ -z "$(ftp_list "$1")" ] || die "FTP_HOSTS in $1/project.conf: FTP uploads are for builder projects only; the research container's egress is already open on every port"
+    return 0
+  fi
+  bad="$(ftp_bad_token "$1")"
+  [ -z "$bad" ] || die "FTP_HOSTS in $1/project.conf: '$bad' is not a bare domain (want space-separated names like webin2.ebi.ac.uk: no ftp://, port, path or wildcard)"
+}
 t3_host(){ printf '%s.localhost' "$(printf '%s' "$1" | tr '_' '-')"; } # per-project browser origin (cookies are per host, not per port)
 rstudio_host(){ printf 'rstudio-%s' "$(t3_host "$1")"; } # its own origin: not T3's, not another project's
 tailscale_host(){ # the shared TAILSCALE_HOST from $CFG_ROOT/agent-up.conf: validated host or nothing (unset)
@@ -426,7 +468,7 @@ check_digest(){
 }
 check_project_env(){ # op:// references only; never echo a line (it could hold a pasted secret)
   local bad reserved
-  reserved="$(grep -nE '^[[:space:]]*(PROJECT|PROJECT_DIR|PROFILE|IMAGE|SPADES_AI_DIR|AGENT_MEMORY_DIR|T3_PORT|T3_CONNECT|TAILSCALE_HTTPS_PORT|TAILSCALE_HOST|RESEARCH|RSTUDIO|PATH|HOME|COMPOSE|(COMPOSE|DOCKER|OP|TUNNEL|RESEARCH|RS|RSTUDIO)_[A-Za-z0-9_]*)=' "$1" | sed 's/^\([0-9]*\):[[:space:]]*\([A-Za-z0-9_]*\)=.*/line \1: \2/' | paste -sd, - || true)"
+  reserved="$(grep -nE '^[[:space:]]*(PROJECT|PROJECT_DIR|PROFILE|IMAGE|SPADES_AI_DIR|AGENT_MEMORY_DIR|T3_PORT|T3_CONNECT|TAILSCALE_HTTPS_PORT|TAILSCALE_HOST|RESEARCH|RSTUDIO|FTP_HOSTS|PATH|HOME|COMPOSE|(COMPOSE|DOCKER|OP|TUNNEL|RESEARCH|RS|RSTUDIO)_[A-Za-z0-9_]*)=' "$1" | sed 's/^\([0-9]*\):[[:space:]]*\([A-Za-z0-9_]*\)=.*/line \1: \2/' | paste -sd, - || true)"
   [ -z "$reserved" ] || die "$1 uses reserved key name(s) that would override compose or the launcher ($reserved); rename them"
   bad="$(grep -nEv '^[[:space:]]*(#|$)' "$1" | grep -Ev '^[0-9]+:[A-Za-z_][A-Za-z0-9_]*=op://[^[:space:]]+$' | cut -d: -f1 | paste -sd, - || true)"
   [ -z "$bad" ] || die "$1 may hold only KEY=op://... references; offending line number(s): $bad (values not shown)"
@@ -600,6 +642,33 @@ write_rstudio(){ # RSTUDIO=1 (rstudio_on): port, volume, read-only switch + pass
   # Only an exact, validated 1 opens anything; any other value (stop/down do not validate) is off.
   if rstudio_on "$1"; then echo "RSTUDIO=1" > "$flag"; else rm -f "$flag"; fi
 }
+write_ftp(){ # FTP_HOSTS set (ftp_on): the host list, mounted read-only for the firewall. Otherwise: nothing.
+  # A file, never an environment variable: sudo resets the environment, and the agent controls its own.
+  local out="$1/.generated/ftp.yaml" list="$1/.generated/ftp-hosts"
+  mkdir -p "$1/.generated"; chmod 700 "$1/.generated"
+  {
+    echo "# GENERATED by agent-up from FTP_HOSTS in project.conf. Do not edit."
+    echo "services:"
+    if ftp_on "$1"; then
+      echo "  agent:"
+      echo "    volumes:"
+      echo "      - type: bind                  # read by the root firewall at start; the agent cannot change it"
+      echo "        source: ./.generated/ftp-hosts"
+      echo "        target: /etc/firewall/ftp-hosts"
+      echo "        read_only: true"
+      echo "        bind: {create_host_path: false}"
+    else
+      echo "  agent: {}"
+    fi
+  } > "$out"
+  # Only a validated, non-empty list opens anything; any other value (stop/down do not validate) is off.
+  if ftp_on "$1"; then
+    ( umask 077; ftp_list "$1" > "$list.tmp" && mv "$list.tmp" "$list" ) || die "could not write $list"
+    chmod 600 "$list"
+  else
+    rm -f "$list"
+  fi
+}
 container_hostname(){ # $1 project -> a valid hostname: _ -> -, no trailing hyphen, at most 63 characters
   local h; h="$(printf '%s' "$1" | tr '_' '-' | cut -c1-63)"; h="${h%"${h##*[!-]}"}"; printf '%s' "${h:-agent}"
 }
@@ -614,10 +683,10 @@ write_hostname(){ # always: a readable hostname instead of the container ID (T3 
 }
 compose_cmd(){ # sets COMPOSE for config dir $1
   COMPOSE=(docker compose --env-file "$1/project.conf" -f "$1/compose.yaml" -f "$1/.generated/env-passthrough.yaml"
-           -f "$1/.generated/t3-connect.yaml" -f "$1/.generated/research.yaml" -f "$1/.generated/rstudio.yaml" -f "$1/.generated/hostname.yaml"
+           -f "$1/.generated/t3-connect.yaml" -f "$1/.generated/research.yaml" -f "$1/.generated/rstudio.yaml" -f "$1/.generated/ftp.yaml" -f "$1/.generated/hostname.yaml"
            --project-directory "$1" -p "$(basename "$1")")
 }
-prepare(){ check_files "$1"; write_passthrough "$1"; write_t3_connect "$1"; write_research "$1"; write_rstudio "$1"; write_hostname "$1"; compose_cmd "$1"; }
+prepare(){ check_files "$1"; write_passthrough "$1"; write_t3_connect "$1"; write_research "$1"; write_rstudio "$1"; write_ftp "$1"; write_hostname "$1"; compose_cmd "$1"; }
 
 cmd_up(){
   [ $# -eq 1 ] || usage
@@ -628,6 +697,7 @@ cmd_up(){
   check_ts_port "$cfg"
   check_research "$cfg"
   check_rstudio "$cfg"
+  check_ftp "$cfg"
   check_digest "$cfg/compose.yaml"
   if [ "$(profile "$cfg")" = research ]; then check_research_env "$cfg"; else check_project_env "$cfg/project.env"; fi
   check_mounts "$cfg"
@@ -666,6 +736,11 @@ cmd_up(){
   elif [ "$(t3_connect "$cfg")" = publish ]; then
     echo "agent-up: T3 Connect: publish-only (first time: agent-up shell $name; t3 connect --headless; t3 connect link --publish-only; t3 connect publish; then agent-up up $name)"
   fi
+  if ftp_on "$cfg"; then
+    echo "agent-up: FTP uploads ON (tcp 21 + conntrack ftp helper; cleartext) to: $(ftp_list "$cfg" | paste -sd' ' -)"
+    # A hint only: the Docker daemon's kernel may not be this one (it is, on WSL2 and native Linux).
+    [ -d /sys/module/nf_conntrack_ftp ] || echo "agent-up: WARNING: nf_conntrack_ftp is not loaded in this kernel: the container's firewall will refuse to start. Run: sudo modprobe nf_conntrack_ftp"
+  fi
   if [ "$(rstudio "$cfg")" = 1 ]; then
     echo "agent-up: RStudio Server at http://$(rstudio_host "$name"):$(conf_get "$cfg/project.conf" RSTUDIO_PORT) (user and password: agent-up rstudio $name)"
   fi
@@ -678,6 +753,7 @@ cmd_config(){
   check_t3_connect "$cfg"
   check_research "$cfg"
   check_rstudio "$cfg"
+  check_ftp "$cfg"
   prepare "$cfg"
   # Never print the owner's ambient value of a passthrough key: it is only meaningful under `op run`.
   local k
@@ -767,7 +843,7 @@ cmd_status(){
 # must not override it (a shell variable beats --env-file in compose).
 unset COMPOSE_FILE COMPOSE_PROFILES COMPOSE_PATH_SEPARATOR COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES \
       PROJECT PROJECT_DIR PROFILE IMAGE SPADES_AI_DIR AGENT_MEMORY_DIR T3_PORT T3_CONNECT RESEARCH RESEARCH_DIR \
-      RSTUDIO RSTUDIO_PORT TAILSCALE_HTTPS_PORT TAILSCALE_HOST
+      RSTUDIO RSTUDIO_PORT TAILSCALE_HTTPS_PORT TAILSCALE_HOST FTP_HOSTS
 
 [ $# -ge 1 ] || usage
 cmd="$1"; shift

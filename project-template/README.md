@@ -4,7 +4,7 @@ This folder is **not copied into your project by hand.** `bin/agent-up init` use
 
 | Seed | Copied to | Who edits it |
 |---|---|---|
-| `config/compose.yaml`, `config/project.env`, `config/allowlist` (+ `config/allowlist.bio-example` for `--image bio`) | `~/.config/agent-containers/<project>/` | you, the owner. **Never mounted** into the container, except `allowlist` (read-only) and, with `T3_CONNECT=1` or `publish` / `RSTUDIO=1`, the generated switches and RStudio password (read-only) |
+| `config/compose.yaml`, `config/project.env`, `config/allowlist` (+ `config/allowlist.bio-example` for `--image bio`) | `~/.config/agent-containers/<project>/` | you, the owner. **Never mounted** into the container, except `allowlist` (read-only) and, with `T3_CONNECT=1` or `publish` / `RSTUDIO=1` / `FTP_HOSTS`, the generated switches, RStudio password and FTP host list (read-only) |
 | `repo/.github/CODEOWNERS`, `repo/.github/workflows/gitleaks.yml`, `repo/.gitignore` | the project folder (only where absent) | you; commit them |
 | `config/compose.research.yaml` | `~/.config/agent-containers/research/compose.yaml` (`init --profile research`) | you |
 | `instructions/research.md`, `instructions/builder-research.md` | `<config>/.generated/agent-instructions.md` at every `agent-up` run, mounted **read-only** as Claude's managed `CLAUDE.md` and Codex's `AGENTS.md` (research container; builders with `RESEARCH=1`) | change them here (PR) |
@@ -343,6 +343,66 @@ printf 'RSTUDIO=1\nRSTUDIO_PORT=8787\n' >> ~/.config/agent-containers/<project>/
 The image must include RStudio Server (a digest from `digests.md` dated after this change).
 `agent-up up` refuses a port that is taken.
 
+## FTP uploads (sequence archives)
+
+Some archives take uploads over **plain FTP only**: ENA's Webin upload server
+(`webin2.ebi.ac.uk`) and NCBI SRA's (`ftp-private.ncbi.nlm.nih.gov`). The builder firewall opens only
+ports 22, 80 and 443, so FTP is a separate, **per-project opt-in, off by default** (decision
+2026-10-11, spec §13.4).
+
+What `FTP_HOSTS` changes, and nothing else:
+- the listed hosts resolve, and their addresses go into their own set (`ftp-hosts`), open on
+  **tcp 21 only**. No other host gets port 21, and the FTP hosts get no other port (unless they are
+  also on the allowlist, which keeps its 22/80/443). A name covers its subdomains, as in the
+  allowlist;
+- FTP's data connections (passive mode, which curl and most clients use) go to a random high port
+  the server picks. Instead of opening a port range, the firewall attaches the kernel's **FTP
+  conntrack helper** to those tcp 21 connections: it reads the server's reply and lets out exactly
+  the one data connection it announced, to that same server (as `RELATED`);
+- builders only: the research container refuses it (its egress is already open on every port).
+
+**FTP is cleartext.** Your Webin/SRA login and the files cross the network unencrypted; that is how
+those archives document it. Keep the list to the upload servers you use, and remove it when the
+upload is done.
+
+**The host kernel needs `nf_conntrack_ftp`** (a container cannot load kernel modules):
+- WSL2 (Docker in WSL): built into the kernel, nothing to do;
+- native Linux: `sudo modprobe nf_conntrack_ftp` (to keep it across reboots:
+  `echo nf_conntrack_ftp | sudo tee /etc/modules-load.d/nf_conntrack_ftp.conf`).
+
+Without it the firewall refuses to start the container (`docker logs <project>-agent-1` says what to
+load), and `agent-up up` warns.
+
+**Enable:**
+
+1. In `~/.config/agent-containers/<project>/project.conf` add (or uncomment) one line,
+   space-separated bare domains (no `ftp://`, port or path; quotes are optional):
+   ```bash
+   FTP_HOSTS=webin2.ebi.ac.uk
+   ```
+   Bio projects created after this change already have it there, commented out.
+2. `agent-up up <project>`. `docker logs <project>-agent-1` shows
+   `FTP: ON (hosts webin2.ebi.ac.uk; tcp 21 + conntrack ftp helper)`.
+3. Check from inside (`agent-up shell <project>`):
+   ```bash
+   sudo iptables -S OUTPUT | grep 'dport 21'   # -> ... --dport 21 -m set --match-set ftp-hosts dst -j ACCEPT
+   ```
+   Upload with any passive-mode client, e.g. `curl -T file.fastq.gz --user "$WEBIN_USER:$WEBIN_PASSWORD" ftp://webin2.ebi.ac.uk/`
+   (credentials as `KEY=op://...` lines in `project.env`; only `FTP_HOSTS` is a reserved name there).
+
+**Disable:** delete the line (or set `FTP_HOSTS=`), then `agent-up up <project>`. The rules, the
+helper and the set are gone.
+
+**Gotchas:**
+- Active mode (`PORT`/`EPRT`, the server connecting back to you) does not work: inbound is closed.
+  Use passive mode (curl's default).
+- The helper only expects the data connection at the address the server announces. curl asks for
+  `EPSV` first (same address, port only), which always fits; a server that only speaks `PASV` and
+  announces a different address than the one you connected to will not work.
+- An existing project: just add the line to its `project.conf` (no other key is needed), with an
+  image digest from `digests.md` dated after this change (an older image ignores the list and keeps
+  port 21 closed).
+
 ## Lifecycle
 
 | Action | Steps |
@@ -367,6 +427,7 @@ The image must include RStudio Server (a digest from `digests.md` dated after th
 | `/etc/claude-code/CLAUDE.md`, `~/.codex/AGENTS.md` (only with `RESEARCH=1`) | `.generated/agent-instructions.md`, from `instructions/builder-research.md` | **ro** |
 | `/etc/firewall/rstudio`, `/run/secrets/rstudio-password` (only with `RSTUDIO=1`) | `~/.config/agent-containers/<project>/.generated/rstudio{,-password}`, written by `agent-up` | **ro** |
 | `~/.local/share/rstudio` (only with `RSTUDIO=1`) | volume `rstudio-<project>` | persists across `up` |
+| `/etc/firewall/ftp-hosts` (only with `FTP_HOSTS`) | `~/.config/agent-containers/<project>/.generated/ftp-hosts` (mode 600), written by `agent-up` from `project.conf` | **ro** |
 | `~/.claude`, `~/.codex`, the project R library | volumes `claude-<project>`, `codex-<project>`, `rlib-<project>` | persist across `up` |
 | Require's cache | volume `require-cache-shared` | shared by all projects |
 | npm's download cache (Claude Code and Codex install from it at each start, pinned + integrity-checked) | volume `npm-cache-shared` | shared by all projects |
@@ -413,7 +474,8 @@ On the host, treat all of them as untrusted:
 ## Known residual risks
 
 The firewall confines the agent to allowlisted names on ports 22, 80 and 443 (plus 7844 to
-Cloudflare's tunnel edge only, where `T3_CONNECT=1`), and to DNS for allowlisted names only. It does not remove these risks:
+Cloudflare's tunnel edge only, where `T3_CONNECT=1`, and tcp 21 to the `FTP_HOSTS` only, where set),
+and to DNS for allowlisted names only. It does not remove these risks:
 
 - Read-write shared mounts (spades.ai, ~/agent-memory, the Require cache) are writable by every builder project: a compromised builder could affect the others (accepted for builders, spec §2.1).
 - **Upload-capable allowlisted domains.** Anything that accepts uploads, with credentials the agent
@@ -443,6 +505,11 @@ Cloudflare's tunnel edge only, where `T3_CONNECT=1`), and to DNS for allowlisted
   from other local users and browser pages, **not from the agent**: the agent can read the password
   file and could replace the server on port 8787 with its own. Treat what you see there as you treat
   the agent's files. It is reachable only from your host's loopback.
+- **FTP uploads, where enabled (`FTP_HOSTS`):** each listed host is an upload channel the agent
+  can use with any credentials it holds, in **cleartext** (anyone on the path sees the login and the
+  data). The conntrack helper also lets out the one data connection each server reply announces,
+  to that server's own address on the port it names (a reply naming another address opens nothing).
+  List only the archive upload servers you use, and remove the line when the upload is done.
 - **Tier-A secrets are readable inside the container**, and visible to anyone on the host who can
   run `docker inspect`. Keep them scoped and short-lived (spec §5).
 - **First real `agent-up up` on WSL2 / Docker Desktop:** check the firewall log
