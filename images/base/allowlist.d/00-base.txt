@@ -28,6 +28,12 @@ codeload.github.com
 objects.githubusercontent.com
 ghcr.io
 pkg-containers.githubusercontent.com
+# GitHub Actions run logs (`gh run view --log`, the jobs/<id>/logs API): the results service, then a
+# redirect to the Azure storage account holding the log. EXACT account names only, never
+# blob.core.windows.net (anyone can create an account there: an open exfiltration route). GitHub
+# shards logs across numbered accounts; add each as it is hit (docs/allowlist-requests.md).
+results-receiver.actions.githubusercontent.com
+productionresultssa10.blob.core.windows.net
 # --- R package sources used by setupProject/Require/pak
 cloud.r-project.org
 packagemanager.posit.co
