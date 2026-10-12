@@ -104,6 +104,10 @@ and can send data anywhere must not also hold private data or credentials.
 - *(2026-10-09, owner-approved)* **RStudio Server, per project, opt-in** (§13.3): it runs as the
   agent, so its password guards against other local users and pages, not against the agent (which
   could read it or replace the server). Host loopback only; no new egress.
+- *(2026-10-11, owner-approved)* **FTP uploads, per project, opt-in** (§13.4): the one exception to
+  "no port-based bypasses". tcp 21 to the owner's `FTP_HOSTS` only, plus the kernel's FTP conntrack
+  helper for the passive data connection (no port range). Cleartext by protocol (ENA Webin / SRA's
+  documented route): each listed host is an upload channel for whatever credentials the agent holds.
 
 Revisit if builders start consuming untrusted content heavily.
 
@@ -250,7 +254,7 @@ from the project folder.
   compose.yaml                          # generated from the seed, then owner-edited
   project.env                           # op:// references only
   allowlist                             # project domains → /etc/firewall/allowlist.d/50-project.txt:ro
-  project.conf                          # PROJECT_DIR, PROFILE (builder|research; research = the one shared research container, §2.1), IMAGE (base|gis|bio), T3_PORT, T3_CONNECT (0|1|publish, absent = 0; §13.1; `publish` added 2026-10-11), RESEARCH (0|1, absent = 0) + RESEARCH_DIR (§2.1), RSTUDIO (0|1, absent = 0; builders only) + RSTUDIO_PORT (§13.3)
+  project.conf                          # PROJECT_DIR, PROFILE (builder|research; research = the one shared research container, §2.1), IMAGE (base|gis|bio), T3_PORT, T3_CONNECT (0|1|publish, absent = 0; §13.1; `publish` added 2026-10-11), RESEARCH (0|1, absent = 0) + RESEARCH_DIR (§2.1), RSTUDIO (0|1, absent = 0; builders only) + RSTUDIO_PORT (§13.3), FTP_HOSTS (bare domains, absent/empty = off; builders only; §13.4)
 <project-dir>/                          # the agent's read-write workspace: code, data, outputs, CLAUDE.md
 ```
 
@@ -260,7 +264,7 @@ from the project folder.
 |---|---|
 | `agent-up init <project-dir> [--image gis] [--profile builder]` | creates `~/.config/agent-containers/<project>/` from the seeds; prints the remaining steps (vault, digest) |
 | `agent-up init --profile research` | creates `~/.config/agent-containers/research/` (compose + `project.conf` only: no secrets) and `~/agent-research/` (§2.1) |
-| `agent-up up <project>` | checks the image digest, mounts and `project.env`, then `op run --env-file <cfg>/project.env -- docker compose --env-file <cfg>/project.conf -f <cfg>/compose.yaml -f <cfg>/.generated/env-passthrough.yaml -f <cfg>/.generated/t3-connect.yaml -f <cfg>/.generated/research.yaml -f <cfg>/.generated/rstudio.yaml -f <cfg>/.generated/hostname.yaml --project-directory <cfg> -p <project> up -d --force-recreate` (generated overlays: the `project.env` key names only, never values; and the T3 Connect switch, empty unless `T3_CONNECT=1` or `publish`, §13.1; the research mounts, §2.1; RStudio Server, empty unless `RSTUDIO=1`, §13.3; the hostname, §13.1) |
+| `agent-up up <project>` | checks the image digest, mounts and `project.env`, then `op run --env-file <cfg>/project.env -- docker compose --env-file <cfg>/project.conf -f <cfg>/compose.yaml -f <cfg>/.generated/env-passthrough.yaml -f <cfg>/.generated/t3-connect.yaml -f <cfg>/.generated/research.yaml -f <cfg>/.generated/rstudio.yaml -f <cfg>/.generated/ftp.yaml -f <cfg>/.generated/hostname.yaml --project-directory <cfg> -p <project> up -d --force-recreate` (generated overlays: the `project.env` key names only, never values; and the T3 Connect switch, empty unless `T3_CONNECT=1` or `publish`, §13.1; the research mounts, §2.1; RStudio Server, empty unless `RSTUDIO=1`, §13.3; the FTP host list, empty unless `FTP_HOSTS` is set, §13.4; the hostname, §13.1) |
 | `agent-up config <project>` | prints the rendered compose config; no secrets needed |
 | `agent-up shell <project>` | `docker exec -it -u agent <project>-agent-1 zsh` |
 | `agent-up status \| stop \| down <project>` | compose wrappers |
@@ -626,3 +630,68 @@ it and base edits do not rebuild it. Above the original 700 MB base budget, acce
 
 **Upgrade note:** existing configs need nothing to stay off. To opt in, add `RSTUDIO=1` and a free
 `RSTUDIO_PORT` to `project.conf` and use an image that includes RStudio Server.
+
+### 13.4 FTP uploads (decided 2026-10-11, owner-approved)
+
+The science projects must deposit sequencing reads with archives whose upload route is **plain FTP**:
+ENA's Webin upload server `webin2.ebi.ac.uk` (and, if used, NCBI SRA's `ftp-private.ncbi.nlm.nih.gov`),
+via libcurl in passive mode (EPSV first, then PASV). The builder firewall allows only 22/80/443
+(decision 2026-10-04, "no port-based bypasses"). This is the one narrow, owner-controlled exception.
+
+**Decisions (fixed by the owner):**
+1. **Mechanism: tcp 21 + the kernel's FTP conntrack helper.** No open high-port range. The helper is
+   attached explicitly (`CT --helper ftp`; automatic helper assignment is off in modern kernels) to
+   tcp 21 connections to the FTP hosts; it parses the server's EPSV/PASV reply and creates an
+   expectation for that one data connection, which then matches the existing `ESTABLISHED,RELATED`
+   OUTPUT accept. With the kernel's default (`loose=0`) a PASV reply naming another address than the
+   server's own opens nothing.
+2. **Scope: a separate owner list,** `FTP_HOSTS` in `project.conf` (space-separated bare domains; a
+   name covers its subdomains, as in the allowlist). Only those hosts get port 21; the allowlist
+   stays 22/80/443. They resolve through dnsmasq into their OWN ipset `ftp-hosts`, used only by the
+   port-21 rules (the `t3-tunnel` pattern of §13.1).
+3. **Bio default: seeded but off.** `agent-up init --image bio` writes `#FTP_HOSTS=webin2.ebi.ac.uk`
+   (commented) and names the SRA host in the comment; other builder images get a commented, empty
+   `#FTP_HOSTS=`; the research config gets none.
+
+**agent-up:** `FTP_HOSTS` is read from `project.conf` only (one pair of surrounding quotes tolerated).
+`up` and `config` validate every token with the allowlist's domain rule and refuse it for the research
+profile (its egress is already open); `stop`/`down`/`status` never refuse (an invalid list renders FTP
+off for them). When set, `.generated/ftp-hosts` (one lower-cased domain per line, sorted, unique; mode
+600) is mounted **read-only** at `/etc/firewall/ftp-hosts` by `.generated/ftp.yaml`; unset or empty,
+the overlay adds nothing and a stale host file is removed. Never an environment variable (sudo resets
+it and the agent controls its own). `FTP_HOSTS` is reserved in `project.env` (other `FTP_*` names are
+not: the Webin credentials can be `op://` references there).
+
+**Firewall (`init-firewall.sh`), only when the file exists:**
+- Read-only phase (abort before any change): the file is parsed like the allowlist (comments,
+  blanks, CRLF; `DOMAIN_RE`); a present file must name a host (agent-up never writes an empty one);
+  the research profile, a host overlapping `argotunnel.com`, a missing `/sys/module/nf_conntrack_ftp`
+  ("load it on the HOST: sudo modprobe nf_conntrack_ftp") or an unavailable raw table abort.
+- dnsmasq: `server=/<host>/<upstream>` + `ipset=/<host>/ftp-hosts`. dnsmasq takes ONE ipset= line per
+  name and the longest match wins, so a name that is (or is under) an allowlisted name gets
+  `allowed-domains,ftp-hosts` on its single line, and an allowlisted name under an FTP host gets
+  `ftp-hosts` added to its own (the `TUNNEL_LISTED` case of §13.1, generalised to subdomains).
+- Rules: raw `OUTPUT -j AGENT_FTP`, `AGENT_FTP -p tcp --dport 21 -m set --match-set ftp-hosts dst -j
+  CT --helper ftp`; filter `OUTPUT -p tcp --dport 21 -m set --match-set ftp-hosts dst -j ACCEPT`
+  before the closing REJECT. Nothing else.
+- Re-runs: the raw table is never flushed; a previous run's `AGENT_FTP` chain (and its jump) is
+  removed before the `ftp-hosts` set is destroyed, so FTP off after on leaves no helper rule, chain
+  or set. **Off:** raw is not touched, and the filter rules and the dnsmasq config are byte-identical
+  to before (CI snapshot; every firewall run also asserts nothing of FTP exists).
+- Verification: on = exactly one tcp 21 rule (the ftp-hosts ACCEPT), one raw jump and one helper
+  rule; off = none of them and no `ftp-hosts` set. The log says `FTP: ON (hosts …; tcp 21 + conntrack
+  ftp helper)` or `FTP: off`.
+
+**Host requirement:** `nf_conntrack_ftp` in the Docker host's kernel (a container cannot load
+modules). Built in on the owner's WSL2 kernel 5.15 (`CONFIG_NF_CONNTRACK_FTP=y`); native Linux:
+`sudo modprobe nf_conntrack_ftp`. CI loads it on the runner before the firewall tests.
+
+**Tests:** `tests/firewall/test-ftp.sh` (bad lists abort with nothing changed; on/re-run/off; the
+both-sets dnsmasq line; a **hard** live check: the agent lists `ftp://ftp.ebi.ac.uk/pub/` in passive
+mode, which only works through the RELATED data connection, the conntrack entry shows `helper=ftp`,
+and the same listing fails with FTP off), `test-ftp-unit.sh` (domain matching), `test-firewall.sh`
+`EXPECT_FTP=1` (exact snapshot with agent-up's read-only mount) and the launcher tests (seeding,
+validation, rendering, and the behavioural chain into the real firewall).
+
+**Residual risk:** cleartext credentials and data; each FTP host is an upload channel for any
+credentials the agent holds (`project-template/README.md`, Known residual risks).

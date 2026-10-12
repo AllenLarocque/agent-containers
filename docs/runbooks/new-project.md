@@ -47,6 +47,9 @@ permissions).
    - Anything not listed is blocked and doesn't even resolve.
    - Only ports 22, 80 and 443 are open, and only to listed hosts. **SSH to your own servers
      (cloud VM, NAS) needs their domain here too.**
+   - Plain-FTP uploads (ENA Webin, NCBI SRA) are a separate opt-in: `FTP_HOSTS` in `project.conf`
+     opens tcp 21 to those hosts only (bio projects get it commented out). See
+     `project-template/README.md` "FTP uploads (sequence archives)".
 6. **Clone `spades.ai`** to `~/GitHub/spades.ai`, or point `SPADES_AI_DIR` in
    `~/.config/agent-containers/<project>/project.conf` at your clone. `agent-up up` stops if it's
    missing.
