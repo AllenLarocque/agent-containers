@@ -110,6 +110,11 @@ check "  ...compose uses spades-bio" grep -q "spades-bio@sha256:" "$CFGROOT/bio2
 check "  ...bio domains appended to the allowlist" grep -qx "mycoportal.org" "$CFGROOT/bio2/allowlist"
 check "  ...second project gets the next free T3_PORT (3774)" grep -qx "T3_PORT=3774" "$CFGROOT/bio2/project.conf"
 check "  ...and the next free RSTUDIO_PORT (8788)" grep -qx "RSTUDIO_PORT=8788" "$CFGROOT/bio2/project.conf"
+check "project.conf (gis): FTP_HOSTS documented but commented out and empty (FTP is opt-in)" \
+  bash -c 'grep -qx "#FTP_HOSTS=" "$1" && ! grep -q "^FTP_HOSTS" "$1"' _ "$CFG/project.conf"
+check "project.conf (bio): FTP_HOSTS seeded COMMENTED OUT with ENA Webin; SRA named in the comment" \
+  bash -c 'grep -qx "#FTP_HOSTS=webin2.ebi.ac.uk" "$1" && grep -q "^#.*ftp-private\.ncbi\.nlm\.nih\.gov" "$1" && ! grep -q "^FTP_HOSTS" "$1"' _ "$CFGROOT/bio2/project.conf"
+check "  ...and the comment warns that FTP is cleartext" grep -q "^#.*CLEARTEXT" "$CFGROOT/bio2/project.conf"
 
 # ---- init: symlinks, permissions, atomicity, names
 SP1="$T/symproj1"; mkdir -p "$SP1/.github"; ln -s "$T/evil-target" "$SP1/.github/CODEOWNERS"
@@ -214,7 +219,7 @@ AMBIENT=(COMPOSE_FILE=evil.yaml COMPOSE_PROFILES=evil PROJECT_DIR=/evil SPADES_A
 rc=0; out=$(au up "$NAME" 2>&1) || rc=$?
 AMBIENT=()
 check "up succeeds (stub op + stub docker)" test "$rc" -eq 0
-C="compose --env-file $CFG/project.conf -f $CFG/compose.yaml -f $CFG/.generated/env-passthrough.yaml -f $CFG/.generated/t3-connect.yaml -f $CFG/.generated/research.yaml -f $CFG/.generated/rstudio.yaml -f $CFG/.generated/hostname.yaml --project-directory $CFG -p $NAME"
+C="compose --env-file $CFG/project.conf -f $CFG/compose.yaml -f $CFG/.generated/env-passthrough.yaml -f $CFG/.generated/t3-connect.yaml -f $CFG/.generated/research.yaml -f $CFG/.generated/rstudio.yaml -f $CFG/.generated/ftp.yaml -f $CFG/.generated/hostname.yaml --project-directory $CFG -p $NAME"
 check "  ...op run resolves project.env, then runs docker compose" \
   grep -qxF "OP: run --env-file $CFG/project.env -- docker $C up -d --force-recreate" "$OPLOG"
 check "  ...docker compose gets ONLY the config dir's files" grep -qxF "ARGS: $C up -d --force-recreate" "$DLOG"
@@ -237,6 +242,9 @@ check "  ...no profile switch, no instructions file" bash -c '[ ! -e "$1/profile
 RSO="$CFG/.generated/rstudio.yaml"
 check "RSTUDIO=0: the RStudio overlay adds nothing" bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent: {}")" ]' _ "$RSO"
 check "  ...no RStudio switch file and no password generated" bash -c '[ ! -e "$1/rstudio" ] && [ ! -e "$1/rstudio-password" ]' _ "$CFG/.generated"
+FO="$CFG/.generated/ftp.yaml"
+check "FTP_HOSTS unset: the FTP overlay adds nothing" bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent: {}")" ]' _ "$FO"
+check "  ...and no FTP host file exists" test ! -e "$CFG/.generated/ftp-hosts"
 
 # ---- passthrough coverage
 cp "$CFG/project.env" "$T/penv2.bak"
@@ -517,6 +525,64 @@ check "agent-up rstudio my_proj: origin rstudio-my-proj.localhost (underscore ->
 rm -rf "$CFGROOT/my_proj"
 cp "$T/pconf-rs.bak" "$CFG/project.conf"
 au config "$NAME" >/dev/null 2>&1 || true
+# ---- FTP uploads (owner opt-in, spec §13.4): validated by up/config only; absent or empty = off
+cp "$CFG/project.conf" "$T/pconf-ftp.bak"
+setftp(){ sed -i '/^FTP_HOSTS=/d' "$CFG/project.conf"; printf 'FTP_HOSTS=%s\n' "$1" >> "$CFG/project.conf"; }
+for v in "ftp://webin2.ebi.ac.uk" "webin2.ebi.ac.uk:21" "*.ebi.ac.uk" "webin2.ebi.ac.uk/upload" "webin2.ebi.ac.uk,ftp.ebi.ac.uk" "-webin2.ebi.ac.uk" "webin2.ebi.ac.uk # ENA"; do
+  setftp "$v"
+  : > "$DLOG"
+  refuses "up refuses FTP_HOSTS='$v'" "FTP_HOSTS in .*is not a bare domain" au up "$NAME"
+  check "  ...without reaching docker" test ! -s "$DLOG"
+  refuses "config refuses FTP_HOSTS='$v'" "FTP_HOSTS in .*is not a bare domain" au config "$NAME"
+  check "stop works with FTP_HOSTS='$v' (lifecycle never validates it)" au stop "$NAME"
+  check "down works with FTP_HOSTS='$v'" au down "$NAME"
+  check "status works with FTP_HOSTS='$v'" au status "$NAME"
+  check "  ...and an invalid list opens nothing (empty overlay, no host file)" \
+    bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent: {}")" ] && [ ! -e "$2" ]' _ "$FO" "$CFG/.generated/ftp-hosts"
+done
+setftp "webin2.ebi.ac.uk ftp://evil.example"
+refuses "up names the offending token of a mixed list" "'ftp://evil.example' is not a bare domain" au up "$NAME"
+setftp ""
+check "config accepts an empty FTP_HOSTS= (off)" au config "$NAME"
+check "  ...empty overlay, no host file" \
+  bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent: {}")" ] && [ ! -e "$2" ]' _ "$FO" "$CFG/.generated/ftp-hosts"
+setftp '""'
+check 'config accepts FTP_HOSTS="" (off)' au config "$NAME"
+check "  ...no host file" test ! -e "$CFG/.generated/ftp-hosts"
+setftp '"Webin2.EBI.ac.uk  ftp-private.ncbi.nlm.nih.gov webin2.ebi.ac.uk"'
+TOK=tok; : > "$DLOG"
+upout="$(au up "$NAME" 2>&1)" && rc=0 || rc=$?
+check "up with a quoted, mixed-case, duplicated FTP_HOSTS list" test "$rc" -eq 0
+check "  ...says FTP is ON, cleartext, and to which hosts" \
+  grep -qF "agent-up: FTP uploads ON (tcp 21 + conntrack ftp helper; cleartext) to: ftp-private.ncbi.nlm.nih.gov webin2.ebi.ac.uk" <<<"$upout"
+check "  ...docker compose gets the FTP overlay" grep -qxF "ARGS: $C up -d --force-recreate" "$DLOG"
+check "  ...host file: one domain per line, lower-cased, sorted, unique" \
+  test "$(cat "$CFG/.generated/ftp-hosts")" = "$(printf 'ftp-private.ncbi.nlm.nih.gov\nwebin2.ebi.ac.uk')"
+check "  ...host file is owner-only (mode 600)" test "$(stat -c %a "$CFG/.generated/ftp-hosts")" = 600
+check "  ...overlay mounts it read-only at /etc/firewall/ftp-hosts, and adds nothing else" \
+  bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent:\n    volumes:\n      - type: bind                  # read by the root firewall at start; the agent cannot change it\n        source: ./.generated/ftp-hosts\n        target: /etc/firewall/ftp-hosts\n        read_only: true\n        bind: {create_host_path: false}")" ]' _ "$FO"
+check "  ...never an environment variable" bash -c '! grep -rq "FTP_HOSTS:" "$1"' _ "$CFG/.generated"
+setftp "webin2.ebi.ac.uk"
+check "an unquoted single host: config succeeds" au config "$NAME"
+check "  ...host file says exactly webin2.ebi.ac.uk" test "$(cat "$CFG/.generated/ftp-hosts")" = webin2.ebi.ac.uk
+sed -i '/^FTP_HOSTS=/d' "$CFG/project.conf"
+check "back to no FTP_HOSTS: config succeeds" au config "$NAME"
+check "  ...the host file is gone, the overlay is empty" \
+  bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent: {}")" ] && [ ! -e "$2" ]' _ "$FO" "$CFG/.generated/ftp-hosts"
+cp "$CFG/project.env" "$T/penv-ftp.bak"
+echo "FTP_HOSTS=op://v/i/f" >> "$CFG/project.env"
+refuses "up refuses reserved key FTP_HOSTS in project.env" "reserved.*FTP_HOSTS" au up "$NAME"
+cp "$T/penv-ftp.bak" "$CFG/project.env"
+echo "FTP_PASSWORD=op://agent-demo-proj/webin/password" >> "$CFG/project.env"
+check "  ...but other FTP_* keys are not reserved (Webin credentials may come from project.env)" au config "$NAME"
+cp "$T/penv-ftp.bak" "$CFG/project.env"
+AMBIENT=(FTP_HOSTS=webin2.ebi.ac.uk)
+au config "$NAME" >/dev/null 2>&1 || true
+AMBIENT=()
+check "an ambient FTP_HOSTS in the owner's shell changes nothing (only project.conf counts)" test ! -e "$CFG/.generated/ftp-hosts"
+cp "$T/pconf-ftp.bak" "$CFG/project.conf"
+au config "$NAME" >/dev/null 2>&1 || true
+TOK=""
 # ---- research profile: the ONE shared research container (spec §2.1, Phase 1b)
 RCFG="$CFGROOT/research"; RD="$H/agent-research"
 refuses "init --profile research refuses another name" "always named 'research'" au init --profile research --name foo
@@ -534,7 +600,7 @@ check "  ...created the research exchange root" test -d "$RD"
 refuses "init --profile research never overwrites" 'already exists' au init --profile research
 refuses "up research refuses the placeholder digest" 'not pinned to a real digest' au up research
 sed -i "s/REPLACE_WITH_DIGEST_FROM_digests.md/$H64/" "$RCFG/compose.yaml"
-RC="compose --env-file $RCFG/project.conf -f $RCFG/compose.yaml -f $RCFG/.generated/env-passthrough.yaml -f $RCFG/.generated/t3-connect.yaml -f $RCFG/.generated/research.yaml -f $RCFG/.generated/rstudio.yaml -f $RCFG/.generated/hostname.yaml --project-directory $RCFG -p research"
+RC="compose --env-file $RCFG/project.conf -f $RCFG/compose.yaml -f $RCFG/.generated/env-passthrough.yaml -f $RCFG/.generated/t3-connect.yaml -f $RCFG/.generated/research.yaml -f $RCFG/.generated/rstudio.yaml -f $RCFG/.generated/ftp.yaml -f $RCFG/.generated/hostname.yaml --project-directory $RCFG -p research"
 : > "$DLOG"; rm -f "$OPLOG"; TOK=""
 AMBIENT=(OP_SERVICE_ACCOUNT_TOKEN=owner-op-token GH_TOKEN=owner-gh-token)
 rc=0; out=$(au up research 2>&1) || rc=$?
@@ -569,6 +635,16 @@ refuses "config research refuses RSTUDIO=1 (builders only)" "RStudio Server is f
 refuses "rstudio research refuses (builders only)" "RStudio Server is for builder projects only" au rstudio research
 check "  ...stop research still works with RSTUDIO=1 in its config (renders RStudio off)" au stop research
 check "  ...and its overlay stays empty" bash -c '[ ! -e "$1/rstudio" ] && [ ! -e "$1/rstudio-password" ]' _ "$RCFG/.generated"
+cp "$T/rconf-rs.bak" "$RCFG/project.conf"
+check "  ...no FTP for the research container (overlay adds nothing, no host file)" \
+  bash -c '[ "$(grep -v "^#" "$1/ftp.yaml")" = "$(printf "services:\n  agent: {}")" ] && [ ! -e "$1/ftp-hosts" ]' _ "$RCFG/.generated"
+check "  ...and init --profile research does not seed FTP_HOSTS" bash -c '! grep -q "FTP_HOSTS" "$1"' _ "$RCFG/project.conf"
+printf 'FTP_HOSTS=webin2.ebi.ac.uk\n' >> "$RCFG/project.conf"
+refuses "config research refuses FTP_HOSTS (builders only; its egress is already open)" "FTP uploads are for builder projects only; the research container's egress is already open" au config research
+refuses "up research refuses FTP_HOSTS" "FTP uploads are for builder projects only" au up research
+check "  ...stop research still works with FTP_HOSTS in its config (renders FTP off)" au stop research
+check "  ...and its overlay stays empty, no host file" \
+  bash -c '[ "$(grep -v "^#" "$1/ftp.yaml")" = "$(printf "services:\n  agent: {}")" ] && [ ! -e "$1/ftp-hosts" ]' _ "$RCFG/.generated"
 cp "$T/rconf-rs.bak" "$RCFG/project.conf"
 : > "$DLOG"
 check "shell research opens /research/_general" au shell research
@@ -803,6 +879,26 @@ if docker compose version >/dev/null 2>&1; then
     bash -c '! jq -r ".services.agent.environment | to_entries[] | .value" <<<"$1" | grep -qF "$(cat "$2")"' _ "$JR" "$CFG/.generated/rstudio-password"
   check "rendered (RSTUDIO=1): otherwise identical to RSTUDIO=0" \
     bash -c 'diff <(jq -S "del(.volumes.rstudio) | .services.agent.ports |= map(select(.target != 8787)) | .services.agent.volumes |= map(select(.target != \"/etc/firewall/rstudio\" and .target != \"/run/secrets/rstudio-password\" and .target != \"/home/agent/.local/share/rstudio\"))" <<<"$1") <(jq -S . <<<"$2")' _ "$JR" "$J"
+  # FTP_HOSTS unset must render exactly what the launcher rendered before FTP existed (no overlay).
+  JNOFTP="$(cd "$T" && env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u T3_PORT -u T3_CONNECT HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" \
+          docker compose --env-file "$CFG/project.conf" -f "$CFG/compose.yaml" -f "$CFG/.generated/env-passthrough.yaml" \
+          -f "$CFG/.generated/t3-connect.yaml" -f "$CFG/.generated/research.yaml" -f "$CFG/.generated/rstudio.yaml" -f "$CFG/.generated/hostname.yaml" --project-directory "$CFG" -p "$NAME" config --format json)"
+  check "rendered (FTP_HOSTS unset): identical to the config rendered without the FTP overlay" \
+    bash -c 'diff <(jq -S . <<<"$1") <(jq -S . <<<"$2")' _ "$JNOFTP" "$J"
+  cp "$CFG/project.conf" "$T/pconf-ftp-render.bak"
+  echo "FTP_HOSTS=webin2.ebi.ac.uk ftp-private.ncbi.nlm.nih.gov" >> "$CFG/project.conf"   # unquoted, with a space: compose's --env-file must accept it
+  JF="$(render "$T")"
+  cp "$T/pconf-ftp-render.bak" "$CFG/project.conf"
+  ( cd "$T" && aureal config "$NAME" >/dev/null 2>&1 ) || true   # regenerate the FTP-off overlay
+  check "rendered (FTP_HOSTS set): the host file from the config dir, read-only, at /etc/firewall/ftp-hosts" \
+    bash -c 'jq -e --arg s "$2" "[.services.agent.volumes[] | select(.target==\"/etc/firewall/ftp-hosts\") | {type, source, read_only}] == [{\"type\":\"bind\",\"source\":\$s,\"read_only\":true}]" <<<"$1"' _ "$JF" "$CFG/.generated/ftp-hosts"
+  check "rendered (FTP_HOSTS set): exactly two mounts under /etc/firewall (allowlist + FTP hosts)" \
+    test "$(jq '[.services.agent.volumes[] | select(.target|startswith("/etc/firewall"))] | length' <<<"$JF")" = 2
+  check "rendered (FTP_HOSTS set): no FTP setting in the environment (the firewall reads only the file)" \
+    bash -c '! jq -r ".services.agent.environment | keys[]" <<<"$1" | grep -qi ftp' _ "$JF"
+  check "rendered (FTP_HOSTS set): otherwise identical to FTP_HOSTS unset" \
+    bash -c 'diff <(jq -S ".services.agent.volumes |= map(select(.target != \"/etc/firewall/ftp-hosts\"))" <<<"$1") <(jq -S . <<<"$2")' _ "$JF" "$J"
+  check "rendered (back to unset): the host file is gone" test ! -e "$CFG/.generated/ftp-hosts"
   ambient_hidden(){ local o; o="$(cd "$T" && aureal config "$NAME" --format json)" || return 1; ! grep -q dummy-render <<<"$o"; }
   AMBIENT=(GH_TOKEN=dummy-render)
   check "rendered: config never prints the owner's ambient value of a passthrough key" ambient_hidden
@@ -837,6 +933,14 @@ if [ -n "${TEMPLATE_IMAGE:-}" ]; then
   sed -i 's/^RESEARCH=.*/RESEARCH=1/' "$CFG/project.conf"
   # RStudio Server ON too: project.conf -> overlay -> read-only switch -> firewall + entrypoint -> rserver.
   sed -i 's/^RSTUDIO=.*/RSTUDIO=1/' "$CFG/project.conf"
+  # FTP uploads ON too: project.conf -> overlay -> read-only host list -> firewall. Only where the kernel
+  # has the FTP conntrack helper (CI loads it on the runner); without it the firewall refuses to start.
+  FTP_BEHAV=0
+  if [ -d /sys/module/nf_conntrack_ftp ]; then
+    echo "FTP_HOSTS=ftp.ebi.ac.uk" >> "$CFG/project.conf"; FTP_BEHAV=1
+  else
+    echo "SKIP: FTP behavioural checks (nf_conntrack_ftp not loaded on this host: sudo modprobe nf_conntrack_ftp)"
+  fi
   au config "$NAME" >/dev/null 2>&1 || true   # (re)writes .generated/ (stub docker)
   # CI-ONLY: the runner's uid is not 1000, so the agent could not read the 0600 password file.
   # In real use the host user IS uid 1000 (spec §3.1) and the file stays 0600.
@@ -851,13 +955,13 @@ services:
 OVR
   dc(){ env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u COMPOSE_FILE HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" GH_TOKEN=dummy-in-container \
           docker compose --env-file "$CFG/project.conf" -f "$CFG/compose.yaml" -f "$CFG/.generated/env-passthrough.yaml" \
-          -f "$CFG/.generated/t3-connect.yaml" -f "$CFG/.generated/research.yaml" -f "$CFG/.generated/rstudio.yaml" -f "$CFG/.generated/hostname.yaml" -f "$T/override.yaml" --project-directory "$CFG" -p "$NAME" "$@"; }
+          -f "$CFG/.generated/t3-connect.yaml" -f "$CFG/.generated/research.yaml" -f "$CFG/.generated/rstudio.yaml" -f "$CFG/.generated/ftp.yaml" -f "$CFG/.generated/hostname.yaml" -f "$T/override.yaml" --project-directory "$CFG" -p "$NAME" "$@"; }
   # The research container: agent-up's exact arguments, with the owner's ambient secrets in compose's
   # environment (they must NOT reach the container).
   rdc(){ env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u COMPOSE_FILE HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" \
           GH_TOKEN=ambient-gh OP_SERVICE_ACCOUNT_TOKEN=ambient-op \
           docker compose --env-file "$RCFG/project.conf" -f "$RCFG/compose.yaml" -f "$RCFG/.generated/env-passthrough.yaml" \
-          -f "$RCFG/.generated/t3-connect.yaml" -f "$RCFG/.generated/research.yaml" -f "$RCFG/.generated/rstudio.yaml" -f "$RCFG/.generated/hostname.yaml" -f "$T/override.yaml" --project-directory "$RCFG" -p research "$@"; }
+          -f "$RCFG/.generated/t3-connect.yaml" -f "$RCFG/.generated/research.yaml" -f "$RCFG/.generated/rstudio.yaml" -f "$RCFG/.generated/ftp.yaml" -f "$RCFG/.generated/hostname.yaml" -f "$T/override.yaml" --project-directory "$RCFG" -p research "$@"; }
   # The agent (uid 1000) writes into the project dir (e.g. RStudio's .Rproj.user): hand $T back to the
   # runner before removing it, or the EXIT trap's rm fails and turns a passing run into exit 1.
   reclaim(){ docker run --rm -u root -v "$T:/t" "$TEMPLATE_IMAGE" chown -R "$(id -u):$(id -g)" /t >/dev/null 2>&1 || true; }
@@ -961,6 +1065,21 @@ OVR
       bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 relay.t3.codes A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID"
     check "  ...an agent re-run of the firewall keeps it ON (the switch, not the env, decides)" \
       bash -c 'out=$(docker exec -u agent -e T3_CONNECT=0 "$1" sudo /usr/local/bin/init-firewall.sh 2>&1) && grep -q "^T3 Connect: ON" <<<"$out"' _ "$CID"
+    # FTP uploads (FTP_HOSTS above): the firewall read the owner's host list, and the agent cannot change it.
+    if [ "$FTP_BEHAV" = 1 ]; then
+      check "FTP: the firewall read the host list (log says ON for ftp.ebi.ac.uk)" \
+        bash -c 'docker logs "$1" 2>&1 | grep -q "^FTP: ON (hosts ftp.ebi.ac.uk;"' _ "$CID"
+      check "  ...exactly one tcp 21 rule, to the ftp-hosts set only" \
+        bash -c '[ "$(docker exec -u root "$1" iptables -S OUTPUT | grep -E -- "--dport 21( |\$)")" = "-A OUTPUT -p tcp -m tcp --dport 21 -m set --match-set ftp-hosts dst -j ACCEPT" ]' _ "$CID"
+      check "  ...the ftp conntrack helper is attached in the raw table" \
+        bash -c 'docker exec -u root "$1" iptables-save -t raw | grep -qx -- "-A AGENT_FTP -p tcp -m tcp --dport 21 -m set --match-set ftp-hosts dst -j CT --helper ftp"' _ "$CID"
+      check "  ...the in-container host list == the generated file" \
+        bash -c 'diff <(docker exec -u root "$1" cat /etc/firewall/ftp-hosts) "$2"' _ "$CID" "$CFG/.generated/ftp-hosts"
+      check "  ...the host list is a read-only mount (even root cannot write it)" \
+        bash -c 'out="$(docker exec -u root "$1" sh -c "echo evil.example >> /etc/firewall/ftp-hosts" 2>&1)"; rc=$?; [ "$rc" -ne 0 ] && printf "%s" "$out" | grep -q "Read-only file system"' _ "$CID"
+      check "  ...an agent re-run of the firewall keeps it ON (the file, not the env, decides)" \
+        bash -c 'out=$(docker exec -u agent -e FTP_HOSTS= "$1" sudo /usr/local/bin/init-firewall.sh 2>&1) && grep -q "^FTP: ON" <<<"$out"' _ "$CID"
+    fi
     # RStudio Server (RSTUDIO=1 above): started by the entrypoint after T3, only because of the switch.
     RSP=$(sed -n 's/^RSTUDIO_PORT=//p' "$CFG/project.conf")
     for _ in $(seq 1 60); do [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$RSP/")" != 000 ] && break; sleep 2; done

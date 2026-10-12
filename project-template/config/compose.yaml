@@ -8,6 +8,8 @@
 # RStudio Server (RSTUDIO=1 in project.conf) is added by the generated .generated/rstudio.yaml: the
 # 127.0.0.1:<RSTUDIO_PORT> port, the rstudio-<project> volume, a read-only firewall switch and the
 # read-only password file; with RSTUDIO=0 it adds nothing.
+# FTP uploads (FTP_HOSTS in project.conf) are added by the generated .generated/ftp.yaml: the host list,
+# read-only at /etc/firewall/ftp-hosts (tcp 21 to those hosts only); unset or empty, it adds nothing.
 name: ${PROJECT:?set PROJECT in project.conf}
 services:
   agent:
