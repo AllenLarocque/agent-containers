@@ -16,12 +16,13 @@
 #      any failure.
 #   3. Therefore ANY failure under set -e leaves the container closed. The final rules only ADD the
 #      T3 INPUT accept (gateway only), the RStudio INPUT accept (gateway only, only when the owner
-#      enabled it), the ipset ACCEPT, the T3 Connect tunnel ACCEPTs (only when the owner enabled it)
-#      and the closing REJECT.
+#      enabled it), the ipset ACCEPT, the T3 Connect tunnel ACCEPTs (only when the owner enabled it),
+#      the FTP helper (raw table) + tcp 21 ACCEPT (only for the owner's FTP hosts) and the closing REJECT.
 #
 # CONFINEMENT (owner decision 2026-10-04):
 #   - No port-based bypasses: TCP 22 is allowed only to allowlisted hosts (ipset rule, ports
-#     22/80/443). SSH to your own servers needs an allowlist entry.
+#     22/80/443). SSH to your own servers needs an allowlist entry. The ONE exception is FTP below
+#     (tcp 21, only to the owner's separate FTP host list, decision 2026-10-11).
 #   - DNS: only the dnsmasq uid may reach the upstream resolver (UDP/TCP 53, owner match). Docker's
 #     embedded resolver 127.0.0.11 is rejected for every other uid. dnsmasq forwards ONLY allowlisted
 #     names (one server=/<domain>/ line each, no default server), so other names get REFUSED: no DNS
@@ -53,6 +54,17 @@
 # says RSTUDIO=1, ONE more INPUT rule accepts tcp 8787 from the container's gateway only (the host;
 # compose publishes it on the host's 127.0.0.1), exactly like the T3 rule. No egress change.
 # Absent file (or RSTUDIO=0): the rules are exactly the ones without the feature.
+# FTP (owner opt-in per project, decision 2026-10-11, spec §13.4): when /etc/firewall/ftp-hosts exists
+# (agent-up writes it from FTP_HOSTS in project.conf: one bare domain per line, parsed like the
+# allowlist), those names resolve through dnsmasq and their addresses go into a SEPARATE ipset
+# (ftp-hosts) that is open on tcp 21 ONLY. Passive data connections are not opened by port: the
+# kernel's FTP conntrack helper, attached explicitly in the raw table (our own AGENT_FTP chain; the
+# kernel no longer assigns helpers automatically), reads the server's EPSV/PASV reply and expects the
+# data connection, which then matches the ESTABLISHED,RELATED accept. No high-port range is opened.
+# Needs nf_conntrack_ftp in the HOST kernel (a container cannot load modules). FTP is cleartext: the
+# credentials and the data cross the network in the clear (ENA Webin's documented route), so keep the
+# list narrow. A name covers its subdomains, as in the allowlist. Builders only: research rejects it.
+# Absent file: the rules are exactly the ones without the feature (nothing in the raw table).
 
 # IPv6 is "unavailable" only if the kernel genuinely has no usable IPv6 to leak.
 # $1 = ip6tables error text; $2 = if_inet6 path (default /proc/net/if_inet6; a parameter for the unit test).
@@ -63,6 +75,25 @@ v6_unavailable(){
   # errors): acceptable ONLY if there is no non-loopback IPv6 address either.
   grep -qE "can't initialize ip6tables table|Table does not exist|Perhaps ip6tables or your kernel needs to be upgraded" <<<"$1" || return 1
   ! awk '$6!="lo"{f=1} END{exit !f}' "$ifinet6"
+}
+# Is domain $1 one of the domains in the remaining arguments, or a subdomain of one? dnsmasq's own
+# rule (a server=/ipset= line covers the name and its subdomains; for ipset= the LONGEST match wins,
+# so a name listed in both the allowlist and the FTP hosts, or under one and listed in the other, needs
+# ONE ipset= line naming every set that covers it). Exact label match: "xebi.ac.uk" is not under "ebi.ac.uk".
+covered_by(){
+  local d=$1 n; shift
+  for n in "$@"; do
+    if [ "$d" = "$n" ] || [[ $d == *."$n" ]]; then return 0; fi
+  done
+  return 1
+}
+# Is $1 exactly one of the remaining arguments?
+one_of(){
+  local d=$1 n; shift
+  for n in "$@"; do
+    if [ "$d" = "$n" ]; then return 0; fi
+  done
+  return 1
 }
 # Sourced (unit test): stop after the function definitions, before touching anything.
 [[ "${BASH_SOURCE[0]}" != "$0" ]] && return 0
@@ -121,6 +152,12 @@ if [ -e "$RSTUDIO_FILE" ]; then
   esac
 fi
 RSTUDIO_PORT=8787
+# FTP host list: same mount pattern (agent-up writes .generated/ftp-hosts from FTP_HOSTS, only when it
+# is non-empty). Its domains are parsed and validated below, with the allowlist files.
+FTP_HOSTS_FILE=/etc/firewall/ftp-hosts
+FTP_PORT=21
+FTP_CHAIN=AGENT_FTP                          # our own raw-table chain: the only thing we touch in raw
+FTP_HELPER_SYS=/sys/module/nf_conntrack_ftp  # present when the host kernel has the helper (built in or loaded)
 TUNNEL_DOMAIN=argotunnel.com   # cloudflared's edge: SRV _v2-origintunneld._tcp.argotunnel.com -> region*.v2.argotunnel.com
 TUNNEL_PORT=7844
 
@@ -157,6 +194,48 @@ TUNNEL_LISTED=0   # the owner also allowlisted argotunnel.com itself: one ipset=
 for d in "${ALLOWED_DOMAINS[@]}"; do
   if [ "$d" = "$TUNNEL_DOMAIN" ]; then TUNNEL_LISTED=1; fi
 done
+# FTP hosts: the same line-by-line parsing and the same DOMAIN_RE as the allowlist, every token
+# checked before any change. A present file must name at least one host (agent-up never writes an
+# empty one, so an empty file is a broken mount, not "off": abort like an empty switch file).
+FTP_ON=0
+FTP_DOMAINS=()
+if [ -e "$FTP_HOSTS_FILE" ]; then
+  RAW_FTP=()
+  n=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n+1))
+    line=${line%$'\r'}; line=${line%%#*}
+    [[ $line =~ ^[[:space:]]*(.*[^[:space:]])[[:space:]]*$ ]] || continue   # blank
+    tok=${BASH_REMATCH[1]}
+    if [[ ! $tok =~ $DOMAIN_RE ]]; then
+      echo "ERROR: invalid FTP host in $FTP_HOSTS_FILE line $n: '$tok' (want a bare domain, e.g. webin2.ebi.ac.uk)"; exit 1
+    fi
+    RAW_FTP+=("$tok")
+  done < "$FTP_HOSTS_FILE"
+  if [ "${#RAW_FTP[@]}" -eq 0 ]; then
+    echo "ERROR: $FTP_HOSTS_FILE names no host (remove FTP_HOSTS from project.conf to turn FTP off)"; exit 1
+  fi
+  if [ "$PROFILE" = research ]; then
+    echo "ERROR: $FTP_HOSTS_FILE is for builder projects only (the research profile's egress is already open on every port)"; exit 1
+  fi
+  # The helper must exist BEFORE we change anything: without it the control connection would work
+  # but every data connection would be rejected (nothing would expect it).
+  if [ ! -d "$FTP_HELPER_SYS" ]; then
+    echo "ERROR: FTP hosts are set but the kernel has no FTP conntrack helper ($FTP_HELPER_SYS missing). A container cannot load it: load it on the HOST: sudo modprobe nf_conntrack_ftp (WSL2 kernels have it built in)"; exit 1
+  fi
+  mapfile -t FTP_DOMAINS < <(printf '%s\n' "${RAW_FTP[@]}" | tr 'A-Z' 'a-z' | sort -u)
+  # argotunnel.com has its own set and dnsmasq takes one ipset= line per name: keep the two apart.
+  for d in "${FTP_DOMAINS[@]}"; do
+    if covered_by "$d" "$TUNNEL_DOMAIN" || covered_by "$TUNNEL_DOMAIN" "$d"; then
+      echo "ERROR: FTP host '$d' in $FTP_HOSTS_FILE overlaps $TUNNEL_DOMAIN (T3 Connect's tunnel edge), which is never an FTP host"; exit 1
+    fi
+  done
+  if ! iptables -t raw -S OUTPUT >/dev/null 2>&1; then
+    echo "ERROR: FTP hosts are set but the iptables raw table is unavailable (needed to attach the FTP helper)"; exit 1
+  fi
+  FTP_ON=1
+fi
+
 if [ "$PROFILE" = research ]; then
   echo "Profile: research (open egress to public IPv4 on any port; private, local and reserved ranges denied; DNS not restricted)"
 fi
@@ -175,6 +254,12 @@ if [ "$RSTUDIO" = 1 ]; then
   echo "RStudio Server: ON (inbound tcp $RSTUDIO_PORT from the gateway only)"
 else
   echo "RStudio Server: off"
+fi
+if [ "$FTP_ON" = 1 ]; then
+  ftp_list=$(printf '%s ' "${FTP_DOMAINS[@]}")
+  echo "FTP: ON (hosts ${ftp_list% }; tcp $FTP_PORT + conntrack ftp helper)"
+else
+  echo "FTP: off"
 fi
 
 # The ORIGINAL upstream resolver. First run: /etc/resolv.conf (in Docker: 127.0.0.11 on user-defined
@@ -277,6 +362,16 @@ iptables -t nat -F
 iptables -t nat -X
 iptables -t mangle -F
 iptables -t mangle -X
+# raw: NOT flushed (nothing of ours lives there unless FTP was on). Remove only our own FTP chain,
+# if a previous run created it (FTP on before, maybe off now), so a re-run never keeps a stale helper
+# rule. Its ipset (below) can only be destroyed once no rule references it. Without the chain, raw is
+# not touched at all: the FTP-off rules are exactly the ones without the feature.
+raw_rules=$(iptables-save -t raw 2>/dev/null || true)   # captured: a grep -q on the pipe could SIGPIPE it (pipefail)
+if grep -q "^:$FTP_CHAIN " <<<"$raw_rules"; then
+  while iptables -t raw -D OUTPUT -j "$FTP_CHAIN" 2>/dev/null; do :; done
+  iptables -t raw -F "$FTP_CHAIN"
+  iptables -t raw -X "$FTP_CHAIN"
+fi
 # Kill connections opened before the firewall (or under a previous ruleset): without this their
 # conntrack entries would keep matching the ESTABLISHED rule below.
 conntrack -F >/dev/null
@@ -285,6 +380,7 @@ pkill -x dnsmasq 2>/dev/null || true
 for _ in $(seq 1 50); do pgrep -x dnsmasq >/dev/null || break; sleep 0.1; done
 ipset destroy allowed-domains 2>/dev/null || true
 ipset destroy t3-tunnel 2>/dev/null || true
+ipset destroy ftp-hosts 2>/dev/null || true
 
 [ "$PERSIST_UPSTREAM" = 1 ] && { umask 022; echo "$UPSTREAM_DNS" > "$UPSTREAM_FILE"; }
 
@@ -327,6 +423,9 @@ echo "Temporary setup rules: HTTPS to api.github.com at $(printf '%s ' "${SETUP_
 ipset create allowed-domains hash:net
 if [ "$T3_CONNECT" = 1 ]; then
   ipset create t3-tunnel hash:net   # argotunnel.com's addresses ONLY (filled by dnsmasq)
+fi
+if [ "$FTP_ON" = 1 ]; then
+  ipset create ftp-hosts hash:net   # the owner's FTP hosts' addresses ONLY (filled by dnsmasq; tcp 21 only)
 fi
 
 echo "Fetching GitHub IP ranges..."
@@ -381,11 +480,11 @@ mkdir -p /etc/dnsmasq.d
   # One line per domain: a single joined ipset= line overflows dnsmasq's config line limit.
   for d in "${ALLOWED_DOMAINS[@]}"; do echo "server=/$d/$UPSTREAM_DNS"; done
   for d in "${ALLOWED_DOMAINS[@]}"; do
-    if [ "$T3_CONNECT" = 1 ] && [ "$d" = "$TUNNEL_DOMAIN" ]; then
-      echo "ipset=/$d/allowed-domains,t3-tunnel"
-    else
-      echo "ipset=/$d/allowed-domains"
-    fi
+    sets=allowed-domains
+    if [ "$T3_CONNECT" = 1 ] && [ "$d" = "$TUNNEL_DOMAIN" ]; then sets+=,t3-tunnel; fi
+    # An allowlisted name that is (or is under) an FTP host: its own line must name ftp-hosts too.
+    if [ "$FTP_ON" = 1 ] && covered_by "$d" "${FTP_DOMAINS[@]}"; then sets+=,ftp-hosts; fi
+    echo "ipset=/$d/$sets"
   done
   # T3 Connect: argotunnel.com resolves (all record types, so cloudflared's SRV lookup works), and its
   # addresses land in t3-tunnel ONLY. dnsmasq adds the A records of each lookup of a name under it,
@@ -393,6 +492,16 @@ mkdir -p /etc/dnsmasq.d
   if [ "$T3_CONNECT" = 1 ] && [ "$TUNNEL_LISTED" = 0 ]; then
     echo "server=/$TUNNEL_DOMAIN/$UPSTREAM_DNS"
     echo "ipset=/$TUNNEL_DOMAIN/t3-tunnel"
+  fi
+  # FTP hosts: they resolve (dnsmasq forwards them) and their addresses land in ftp-hosts, open on
+  # tcp 21 only. One line per name: a name already on the allowlist got ftp-hosts on its line above;
+  # an FTP host under an allowlisted name keeps allowed-domains on its own line (longest match wins).
+  if [ "$FTP_ON" = 1 ]; then
+    for d in "${FTP_DOMAINS[@]}"; do
+      if one_of "$d" "${ALLOWED_DOMAINS[@]}"; then continue; fi
+      echo "server=/$d/$UPSTREAM_DNS"
+      if covered_by "$d" "${ALLOWED_DOMAINS[@]}"; then echo "ipset=/$d/allowed-domains,ftp-hosts"; else echo "ipset=/$d/ftp-hosts"; fi
+    done
   fi
 } > "$DNSMASQ_CONF.tmp"
 if [ "$PROFILE" = research ]; then
@@ -409,6 +518,11 @@ echo "nameserver 127.0.0.1" > /etc/resolv.conf
 # Prime the ipset for the allowlisted domains (also a dnsmasq sanity check). Builder only.
 if [ "$PROFILE" = builder ]; then
   for domain in "${ALLOWED_DOMAINS[@]}"; do
+    dig -r +short "$domain" @127.0.0.1 >/dev/null 2>&1 || true
+  done
+fi
+if [ "$FTP_ON" = 1 ]; then   # builder only (research aborted above)
+  for domain in "${FTP_DOMAINS[@]}"; do
     dig -r +short "$domain" @127.0.0.1 >/dev/null 2>&1 || true
   done
 fi
@@ -432,6 +546,16 @@ if [ "$PROFILE" = builder ]; then
   if [ "$T3_CONNECT" = 1 ]; then
     iptables -A OUTPUT -p udp --dport "$TUNNEL_PORT" -m set --match-set t3-tunnel dst -j ACCEPT
     iptables -A OUTPUT -p tcp --dport "$TUNNEL_PORT" -m set --match-set t3-tunnel dst -j ACCEPT
+  fi
+  # FTP only: the owner's FTP hosts, control connection on tcp 21 and nothing else. The raw-table
+  # rule attaches the kernel's FTP helper to exactly those connections; it parses the EPSV/PASV reply
+  # and expects the data connection, which the ESTABLISHED,RELATED accept above then lets out. No
+  # other host gets 21, and the FTP hosts get no other port (no high-port range is ever opened).
+  if [ "$FTP_ON" = 1 ]; then
+    iptables -t raw -N "$FTP_CHAIN"
+    iptables -t raw -A "$FTP_CHAIN" -p tcp --dport "$FTP_PORT" -m set --match-set ftp-hosts dst -j CT --helper ftp
+    iptables -t raw -A OUTPUT -j "$FTP_CHAIN"
+    iptables -A OUTPUT -p tcp --dport "$FTP_PORT" -m set --match-set ftp-hosts dst -j ACCEPT
   fi
 else
   # Research: the denied ranges FIRST, then any public IPv4 destination on any TCP/UDP port.
@@ -473,6 +597,22 @@ elif [ "$T3_CONNECT" = 1 ] && [ "$n_tunnel" != 2 ]; then
 fi
 if { [ "$T3_CONNECT" = 0 ] || [ "$T3_CONNECT" = publish ]; } && iptables -S OUTPUT | grep -q -- "--dport $TUNNEL_PORT"; then
   echo "ERROR: Firewall verification failed - T3 Connect is off or publish-only but a $TUNNEL_PORT rule is present"; exit 1
+fi
+# FTP: on = exactly one tcp 21 rule in OUTPUT (the ftp-hosts ACCEPT), exactly one jump to our raw chain
+# and exactly one helper rule in it; off = no tcp 21 rule, no helper rule anywhere in raw, no chain.
+n_ftp_any=$(iptables -S OUTPUT | grep -cE -- "--dport $FTP_PORT( |\$)" || true)
+n_ftp=$(iptables -S OUTPUT | grep -c -- "--dport $FTP_PORT -m set --match-set ftp-hosts dst -j ACCEPT" || true)
+raw_rules=$(iptables-save -t raw 2>/dev/null || true)
+n_ftp_jump=$(grep -cx -- "-A OUTPUT -j $FTP_CHAIN" <<<"$raw_rules" || true)
+n_ftp_helper=$(grep -c -- "--helper ftp" <<<"$raw_rules" || true)
+n_ftp_helper_ours=$(grep -cE -- "^-A $FTP_CHAIN -p tcp -m tcp --dport $FTP_PORT -m set --match-set ftp-hosts dst -j CT --helper ftp\$" <<<"$raw_rules" || true)
+if [ "$FTP_ON" = 1 ]; then
+  if [ "$n_ftp" != 1 ] || [ "$n_ftp_any" != 1 ] || [ "$n_ftp_jump" != 1 ] || [ "$n_ftp_helper" != 1 ] || [ "$n_ftp_helper_ours" != 1 ]; then
+    echo "ERROR: Firewall verification failed - FTP is on but its rules are wrong (tcp $FTP_PORT ACCEPT $n_ftp of 1, any tcp $FTP_PORT $n_ftp_any of 1, raw jump $n_ftp_jump of 1, helper $n_ftp_helper_ours of 1, any helper $n_ftp_helper of 1)"; exit 1
+  fi
+elif [ "$n_ftp_any" != 0 ] || [ "$n_ftp_helper" != 0 ] || grep -q -- "$FTP_CHAIN" <<<"$raw_rules" \
+     || grep -qx ftp-hosts <<<"$(ipset list -n 2>/dev/null || true)"; then
+  echo "ERROR: Firewall verification failed - FTP is off but a tcp $FTP_PORT rule, an ftp helper rule, the $FTP_CHAIN chain or the ftp-hosts set is present"; exit 1
 fi
 n_rstudio=$(iptables -S INPUT | grep -c -- "--dport $RSTUDIO_PORT -j ACCEPT" || true)
 if [ "$RSTUDIO" = 1 ] && [ "$n_rstudio" != 1 ]; then
