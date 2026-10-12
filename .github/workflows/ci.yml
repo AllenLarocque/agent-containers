@@ -121,6 +121,15 @@ jobs:
             docker pull -q "localhost:5000/allenlarocque/spades-$img:latest"
             docker tag "localhost:5000/allenlarocque/spades-$img:latest" "spades-$img:ci"
           done
+      # FTP uploads (spec §13.4) need the kernel's FTP conntrack helper, and a container cannot load a
+      # module: load it on the runner (as owners do on a native Linux host; WSL2 kernels have it built in)
+      # BEFORE any step that starts a firewall with FTP hosts (the FTP step and the launcher test).
+      - name: Load the FTP conntrack helper on the runner (nf_conntrack_ftp)
+        if: steps.mode.outputs.mode == 'full'
+        run: |
+          sudo modprobe nf_conntrack_ftp
+          test -d /sys/module/nf_conntrack_ftp || { echo "::error title=nf_conntrack_ftp::not loaded after modprobe"; exit 1; }
+          echo "nf_conntrack_ftp loaded: $(cat /sys/module/nf_conntrack_ftp/parameters/ports 2>/dev/null || echo '?') (ports)"
       - name: Image size report (annotation)
         if: always() && steps.mode.outputs.mode == 'full'
         run: |
@@ -162,6 +171,9 @@ jobs:
       - name: Firewall IPv6 classifier unit test (no NET_ADMIN, sources the shipped script)
         if: always() && steps.mode.outputs.mode == 'full'
         run: docker run --rm -v "$PWD/tests:/tests:ro" spades-base:ci bash /tests/firewall/test-v6-classifier.sh
+      - name: Firewall FTP domain-matching unit test (no NET_ADMIN, sources the shipped script)
+        if: always() && steps.mode.outputs.mode == 'full'
+        run: docker run --rm -v "$PWD/tests:/tests:ro" spades-base:ci bash /tests/firewall/test-ftp-unit.sh
       - name: Firewall test (default bridge; base + project allowlist merge + parsing; root + agent)
         if: always() && steps.mode.outputs.mode == 'full'
         run: |
@@ -294,6 +306,47 @@ jobs:
           docker rm -f fwres
           docker network rm resnet
           exit $rc
+      - name: Firewall with FTP hosts (tcp 21 + conntrack ftp helper; snapshot, on/off/re-run, live passive listing)
+        if: always() && steps.mode.outputs.mode == 'full'
+        run: |
+          test -d /sys/module/nf_conntrack_ftp || { echo "::error title=FTP firewall::nf_conntrack_ftp is not loaded on the runner"; exit 1; }
+          # The live check's server (EBI's public anonymous FTP), proven listable in passive mode FROM THE
+          # RUNNER first, so a failure inside the container is the firewall, not EBI.
+          FTP_HOST=ftp.ebi.ac.uk; FTP_URL=ftp://ftp.ebi.ac.uk/pub/
+          curl -q -sS --connect-timeout 10 --max-time 60 --list-only "$FTP_URL" -o /tmp/ftp-runner.list
+          echo "runner lists $FTP_URL ($(wc -l < /tmp/ftp-runner.list) entries)"
+          # (a) agent-up's exact mount: the owner's host list, read-only -> exact filter + raw snapshot.
+          printf '%s\n' "$FTP_HOST" > /tmp/ftp-hosts
+          printf 'www.python.org' > /tmp/40-extra.txt
+          printf 'www.r-project.org\r\ncran.r-project.org  # inline comment\n\n# comment only\nwww.mozilla.org' > /tmp/50-project.txt
+          docker network create ftpnet
+          docker run -d --name fwftp --network ftpnet --cap-add NET_ADMIN --cap-add NET_RAW \
+            -v /tmp/ftp-hosts:/etc/firewall/ftp-hosts:ro \
+            -v /tmp/40-extra.txt:/etc/firewall/allowlist.d/40-extra.txt:ro \
+            -v /tmp/50-project.txt:/etc/firewall/allowlist.d/50-project.txt:ro \
+            -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
+          # (b) no mount: test-ftp.sh writes the host list itself to turn FTP on and off between runs.
+          docker run -d --name fwftp2 --network ftpnet --cap-add NET_ADMIN --cap-add NET_RAW \
+            -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
+          UP=$(docker exec fwftp awk '/^nameserver/{print $2; exit}' /etc/resolv.conf); echo "original resolver: $UP"
+          rc=0   # run every suite, fail at the end; FAIL lines become annotations (logs are not readable remotely)
+          run(){ "$@" 2>&1 | tee -a /tmp/ftp.log; return "${PIPESTATUS[0]}"; }
+          run docker exec fwftp sudo /usr/local/bin/init-firewall.sh || rc=1
+          run docker exec fwftp sudo /usr/local/bin/init-firewall.sh || rc=1   # idempotent re-run
+          grep -q "^FTP: ON (hosts $FTP_HOST; tcp 21 + conntrack ftp helper)" /tmp/ftp.log || { echo "FAIL: no 'FTP: ON' line in the firewall log" | tee -a /tmp/ftp.log; rc=1; }
+          run docker exec -u root -e EXPECT_UPSTREAM="$UP" -e EXPECT_FTP=1 fwftp bash /tests/firewall/test-firewall.sh || rc=1
+          run docker exec -u agent -e EXPECT_UPSTREAM="$UP" -e REQUIRE_DOCKER_DNS=1 fwftp bash /tests/firewall/test-agent-egress.sh || rc=1
+          if docker exec -u agent fwftp curl -q -sS --connect-timeout 10 --max-time 60 --list-only "$FTP_URL" > /tmp/ftp-agent.list && [ -s /tmp/ftp-agent.list ]; then
+            echo "OK:   agent lists $FTP_URL through the read-only mount" | tee -a /tmp/ftp.log
+          else echo "FAIL: agent cannot list $FTP_URL through the read-only mount" | tee -a /tmp/ftp.log; rc=1; fi
+          run docker exec -u root -e FTP_HOST="$FTP_HOST" -e FTP_URL="$FTP_URL" -e ANNOTATE=1 fwftp2 bash /tests/firewall/test-ftp.sh || rc=1
+          if [ "$rc" -ne 0 ]; then
+            msg=$(grep -E '^(FAIL|ERROR|        )' /tmp/ftp.log | head -n 60 | sed 's/%/%25/g; s/\r//g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=FTP firewall tests::$msg"
+          fi
+          docker rm -f fwftp fwftp2
+          docker network rm ftpnet
+          exit $rc
       - name: RStudio Server (switch ON; firewall snapshot; start as agent, sign in, R session; metrics)
         if: always() && steps.mode.outputs.mode == 'full'
         run: |
@@ -400,7 +453,11 @@ jobs:
           docker rm -f fwbio
       - name: Launcher test (agent-up; render + behavioural against the built base image)
         if: always() && steps.mode.outputs.mode == 'full'
-        run: TEMPLATE_IMAGE=spades-base:ci bash tests/launcher/test-agent-up.sh
+        run: |
+          set -o pipefail
+          TEMPLATE_IMAGE=spades-base:ci bash tests/launcher/test-agent-up.sh 2>&1 | tee /tmp/launcher-full.log
+          # The FTP behavioural checks skip without nf_conntrack_ftp; on the runner it is loaded above.
+          if grep -q '^SKIP: FTP behavioural checks' /tmp/launcher-full.log; then echo "::error::launcher FTP behavioural checks were skipped"; exit 1; fi
       - name: Acceptance (setupProject behind firewall, plain Rscript)
         if: steps.mode.outputs.mode == 'full'
         run: |
