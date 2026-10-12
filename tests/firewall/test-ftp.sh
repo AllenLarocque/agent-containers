@@ -41,7 +41,9 @@ not_rejected_here(){ # $1 ip, $2 port, $3 label: the SYN left the container (con
 # The live listing, as the agent, passive (curl tries EPSV, then PASV). Up to 3 attempts, so a single
 # hiccup at EBI does not fail the run; a firewall that blocks the control or data channel fails all 3.
 list_ftp(){ for _ in 1 2 3; do as_agent curl -q -sS --connect-timeout 10 --max-time 60 --list-only "$@" "$FTP_URL" >/tmp/ftp-list.out 2>/tmp/ftp-list.err && [ -s /tmp/ftp-list.out ] && return 0; sleep 3; done; return 1; }
-snap(){ { iptables -S; iptables -t nat -S; iptables-save -t raw; ip6tables -S; ipset list -n; } 2>&1; }
+# raw via iptables-save, minus its '# Generated/Completed ... on <date>' comments: those carry a timestamp,
+# so an abort that crosses a second boundary would look like a change (CI run 38209981046, case [url]).
+snap(){ { iptables -S; iptables -t nat -S; iptables-save -t raw | grep -v '^#'; ip6tables -S; ipset list -n; } 2>&1; }
 run_fw(){ OUT=$("$FW" 2>&1); RC=$?; }
 raw(){ iptables-save -t raw 2>/dev/null; }
 n_of(){ grep -c -- "$1" || true; }   # stdin: count the lines containing $1
