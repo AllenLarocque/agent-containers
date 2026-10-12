@@ -5,8 +5,9 @@
 # read-only from the OWNER's host, never from the agent-writable workspace).
 #
 # FAIL-CLOSED INVARIANT: from the first mutation onward, EVERY intermediate state is deny-by-default.
-#   0. Everything read-only runs first: allowlist validation, the original resolver, the dnsmasq
-#      uid, Docker's DNS NAT rules, the ip6tables probe. Any failure there exits with NOTHING changed.
+#   0. Everything read-only runs first: allowlist validation, the FTP host list (+ the helper and raw
+#      table probes), the original resolver, the dnsmasq uid, Docker's DNS NAT rules, the ip6tables
+#      probe. Any failure there exits with NOTHING changed.
 #   1. Per family, OUTPUT then INPUT then FORWARD policies go to DROP BEFORE the flush. Flushing a
 #      DROP chain only removes ACCEPTs, so there is never a moment with an ACCEPT policy. IPv6 goes
 #      first, so a later IPv4 failure cannot leave IPv6 open.
