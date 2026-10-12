@@ -9,12 +9,15 @@
 #      (default 0: the rules must be exactly the ones without the feature).
 #      EXPECT_RSTUDIO = 1 when the CI step mounted /etc/firewall/rstudio with RSTUDIO=1 (default 0:
 #      exactly the rules without RStudio Server).
+#      EXPECT_FTP = 1 when the CI step mounted /etc/firewall/ftp-hosts (default 0: exactly the rules
+#      without FTP, and nothing of ours in the raw table).
 set -uo pipefail
 fail=0
 ok(){ echo "OK:   $*"; }; bad(){ echo "FAIL: $*"; fail=1; }
 : "${EXPECT_UPSTREAM:?EXPECT_UPSTREAM must be set to the pre-firewall resolver}"
 EXPECT_T3_CONNECT=${EXPECT_T3_CONNECT:-0}
 EXPECT_RSTUDIO=${EXPECT_RSTUDIO:-0}
+EXPECT_FTP=${EXPECT_FTP:-0}
 blocked(){ if curl --connect-timeout 5 -s "$1" >/dev/null 2>&1; then bad "$1 reachable, should be BLOCKED"; else ok "$1 blocked"; fi; }
 allowed(){ if curl --connect-timeout 10 -sSf "$1" >/dev/null 2>&1; then ok "$1 reachable"; else bad "$1 blocked, should be ALLOWED"; fi; }
 blocked https://example.com
@@ -51,7 +54,7 @@ expect_v4=$(sed -e "s|@UP@|$EXPECT_UPSTREAM|g" -e "s|@DUID@|$DUID|g" -e "s|@GW@|
 -A OUTPUT -d @UP@/32 -p udp -m udp --dport 53 -m owner --uid-owner @DUID@ -j ACCEPT
 -A OUTPUT -d @UP@/32 -p tcp -m tcp --dport 53 -m owner --uid-owner @DUID@ -j ACCEPT
 -A OUTPUT -p tcp -m set --match-set allowed-domains dst -m multiport --dports 22,80,443 -j ACCEPT
-@T3@-A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
+@T3@@FTP@-A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
 EOF
 )
 # T3 Connect ON adds exactly these two rules (7844, the t3-tunnel set only); OFF and publish add nothing.
@@ -62,6 +65,14 @@ if [ "$EXPECT_T3_CONNECT" = 1 ]; then
   expect_v4=${expect_v4/@T3@/$t3_rules}
 else
   expect_v4=${expect_v4/@T3@/}
+fi
+# FTP ON adds exactly this filter rule (tcp 21, the ftp-hosts set only); OFF adds nothing.
+if [ "$EXPECT_FTP" = 1 ]; then
+  ftp_rule='-A OUTPUT -p tcp -m tcp --dport 21 -m set --match-set ftp-hosts dst -j ACCEPT
+'
+  expect_v4=${expect_v4/@FTP@/$ftp_rule}
+else
+  expect_v4=${expect_v4/@FTP@/}
 fi
 # RStudio Server ON adds exactly this INPUT rule (gateway only, like T3's); OFF adds nothing.
 if [ "$EXPECT_RSTUDIO" = 1 ]; then
@@ -164,5 +175,27 @@ else
   grep -q argotunnel "$conf" && bad "dnsmasq config mentions argotunnel with T3 Connect off" || ok "no argotunnel.com in dnsmasq (T3 Connect off)"
   grep -q 't3\.codes' "$conf" && bad "dnsmasq config mentions t3.codes with T3 Connect off" || ok "no t3.codes in dnsmasq (T3 Connect off)"
   ipset list -n | grep -qx t3-tunnel && bad "ipset t3-tunnel exists with T3 Connect off" || ok "no t3-tunnel ipset (T3 Connect off)"
+fi
+
+# --- FTP: the raw table holds our helper chain ONLY when on; its set is filled only from the FTP hosts ---
+raw_rules=$(iptables-save -t raw 2>&1 | grep -E '^(-A|:)' || true)
+if [ "$EXPECT_FTP" = 1 ]; then
+  # Compared as sorted sets: iptables-save's chain order is the backend's (legacy vs nft), not ours.
+  expect_raw=$(printf '%s\n' ':PREROUTING ACCEPT' ':OUTPUT ACCEPT' ':AGENT_FTP -' '-A OUTPUT -j AGENT_FTP' \
+    '-A AGENT_FTP -p tcp -m tcp --dport 21 -m set --match-set ftp-hosts dst -j CT --helper ftp' | sort)
+  got_raw=$(sed -E 's/ \[[0-9]+:[0-9]+\]$//' <<<"$raw_rules" | sort)
+  if [ "$got_raw" = "$expect_raw" ]; then ok "raw table: exactly the AGENT_FTP jump + the ftp helper rule"
+  else bad "raw table differs (- expected, + actual):"; diff <(echo "$expect_raw") <(echo "$got_raw") | sed 's/^/        /'; fi
+  ipset list -n | grep -qx ftp-hosts && ok "ipset ftp-hosts exists" || bad "no ipset ftp-hosts"
+  grep -Eq '^ipset=/[^/]+/(allowed-domains,)?ftp-hosts$' "$conf" && ok "dnsmasq fills ftp-hosts" || bad "no dnsmasq ipset= line for ftp-hosts"
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    [ "$(grep -c "^ipset=/$d/" "$conf")" = 1 ] && ok "dnsmasq: exactly one ipset= line for FTP host $d" || bad "dnsmasq: not exactly one ipset= line for FTP host $d"
+  done < <(sed 's/#.*//; s/[[:space:]]//g' /etc/firewall/ftp-hosts | tr 'A-Z' 'a-z')
+else
+  ! grep -q -- 'AGENT_FTP' <<<"$raw_rules" && ok "raw table: no AGENT_FTP chain (FTP off)" || bad "raw table has AGENT_FTP with FTP off"
+  ! grep -q -- '--helper' <<<"$raw_rules" && ok "raw table: no helper rule (FTP off)" || bad "raw table has a helper rule with FTP off"
+  ipset list -n | grep -qx ftp-hosts && bad "ipset ftp-hosts exists with FTP off" || ok "no ftp-hosts ipset (FTP off)"
+  grep -q ftp-hosts "$conf" && bad "dnsmasq config names ftp-hosts with FTP off" || ok "no ftp-hosts in dnsmasq (FTP off)"
 fi
 [ "$fail" -eq 0 ] && echo "FIREWALL: ALL PASSED" || { echo "FIREWALL: FAILURES"; exit 1; }
