@@ -212,8 +212,9 @@ relay, not Tailscale).
 2. PowerShell: ``curl.exe -sS -o NUL -w "%{http_code}`n" http://127.0.0.1:<T3_PORT>/`` should print
    `200` (if step 1 passes but this fails, WSL's localhost forwarding is down).
 3. PowerShell: `tailscale status --self` must show the PC **online** with no "You are logged out"
-   health warning (if it does, run `tailscale up`). `tailscale serve status` must still list the
-   project's port.
+   health warning. If it says logged out, run `tailscale login` and open the printed link: the tray
+   icon can still say Connected, and `tailscale up` returns silently without logging in.
+   `tailscale serve status` must still list the project's port.
 
 ## Research container
 
