@@ -202,6 +202,19 @@ mapping predates this formula keeps it with `TAILSCALE_HTTPS_PORT=<port>` in its
 
 Retiring a project: `tailscale serve --https=<port> off` in PowerShell.
 
+**Keep the PC on the tailnet** (one time, Windows): tray icon → Preferences → **Run unattended**.
+Without it, Tailscale logs out when you sign out of Windows (and sometimes after an update), and
+the phone loses every project at once while notifications still arrive (they go through the T3
+relay, not Tailscale).
+
+**Phone can't connect?** Test each hop from the PC:
+1. WSL: `curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:<T3_PORT>/` should print `200`.
+2. PowerShell: ``curl.exe -sS -o NUL -w "%{http_code}`n" http://127.0.0.1:<T3_PORT>/`` should print
+   `200` (if step 1 passes but this fails, WSL's localhost forwarding is down).
+3. PowerShell: `tailscale status --self` must show the PC **online** with no "You are logged out"
+   health warning (if it does, run `tailscale up`). `tailscale serve status` must still list the
+   project's port.
+
 ## Research container
 
 One **shared** container, `research`, does the web research for every project (spec §2.1). It has
