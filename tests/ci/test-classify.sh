@@ -7,6 +7,10 @@ CL="$ROOT/scripts/ci-classify.sh"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 fail=0
 git -C "$T" init -q -b main
+# Every commit starts `git maintenance run --auto`, detached on newer git: it can still be writing
+# .git/objects when the EXIT trap's rm -rf runs ("Directory not empty").
+git -C "$T" config maintenance.auto false
+git -C "$T" config gc.auto 0
 git -C "$T" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
 base=$(git -C "$T" rev-parse HEAD)
 
