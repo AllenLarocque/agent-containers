@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# agent-new: owner-side automation for new projects and repo wiring
+# (docs/specs/2026-10-15-agent-new-design.md). Counterpart of bin/agent-up: agent-up runs the
+# sandbox with a project's read-only token; agent-new runs AS THE OWNER (gh repo admin, op
+# session) and automates docs/runbooks/new-project.md + machine-user-and-rulesets.md §2-4, §6.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+CFG_ROOT="${AGENT_CONTAINERS_CONFIG:-$HOME/.config/agent-containers}"
+
+say(){ printf 'agent-new: %s\n' "$*"; }
+skip(){ printf 'agent-new: SKIP (done): %s\n' "$*"; }
+warn(){ printf 'agent-new: WARNING: %s\n' "$*" >&2; }
+die(){ printf 'agent-new: %s\n' "$*" >&2; exit 1; }
+usage(){
+  cat >&2 <<'USAGE'
+usage:
+  agent-new project <folder> [--image base|gis|bio] [--public] [--no-research]
+                             [--t3 publish|1|0] [--token-from <vault>] [--machine-user <user>]
+  agent-new protect <owner>/<repo> [--machine-user <user>] [--vault <op-vault>] [--require <check>]...
+  agent-new verify  <project> | <owner>/<repo> [--vault <op-vault>]
+Runs AS THE OWNER. The runbooks in docs/runbooks/ remain the reference procedure.
+USAGE
+  exit 2
+}
+conf_get(){ sed -n "s/^$2=//p" "$1" | tail -n 1; }
+normalise(){ printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9_-]/-/g; s/^[^a-z0-9]*//'; }
+
+MACHINE_USER_FLAG="" VAULT="" IMAGE="" VISIBILITY=private RESEARCH=1 T3MODE=publish TOKEN_FROM=""
+REQUIRE_CHECKS=(gitleaks)
+
+machine_user(){
+  [ -n "$MACHINE_USER_FLAG" ] && { printf '%s' "$MACHINE_USER_FLAG"; return; }
+  local mu=""; [ -f "$CFG_ROOT/agent-up.conf" ] && mu="$(conf_get "$CFG_ROOT/agent-up.conf" MACHINE_USER)"
+  [ -n "$mu" ] || die "no machine user known: set MACHINE_USER= in $CFG_ROOT/agent-up.conf or pass --machine-user"
+  printf '%s' "$mu"
+}
+preflight_owner(){ # prints the owner login; dies if gh is absent/anonymous/the machine user
+  local who; who="$(gh api user --jq .login 2>/dev/null)" || die "gh is not logged in as you (gh auth login)"
+  [ -n "$who" ] || die "gh is not logged in as you (gh auth login)"
+  [ "$who" != "$(machine_user)" ] || die "gh is logged in as the machine user ($who): agent-new runs as the OWNER"
+  printf '%s' "$who"
+}
+
+cmd_project(){ die "project: not implemented yet"; }
+cmd_protect(){ die "protect: not implemented yet"; }
+cmd_verify(){ die "verify: not implemented yet"; }
+
+[ $# -ge 1 ] || usage
+sub="$1"; shift
+args=()
+while [ $# -gt 0 ]; do case "$1" in
+  --machine-user) MACHINE_USER_FLAG="${2:?}"; shift 2 ;;
+  --vault)        VAULT="${2:?}"; shift 2 ;;
+  --image)        IMAGE="${2:?}"; shift 2 ;;
+  --public)       VISIBILITY=public; shift ;;
+  --no-research)  RESEARCH=0; shift ;;
+  --t3)           T3MODE="${2:?}"; shift 2 ;;
+  --token-from)   TOKEN_FROM="${2:?}"; shift 2 ;;
+  --require)      REQUIRE_CHECKS+=("${2:?}"); shift 2 ;;
+  -*)             usage ;;
+  *)              args+=("$1"); shift ;;
+esac; done
+set -- "${args[@]:-}"
+
+case "$sub" in
+  project) [ $# -eq 1 ] && [ -n "$1" ] || usage; cmd_project "$1" ;;
+  protect) [ $# -eq 1 ] || usage; [[ "$1" == */* ]] || die "protect wants <owner>/<repo>"
+           preflight_owner >/dev/null; cmd_protect "$1" ;;
+  verify)  [ $# -eq 1 ] || usage; cmd_verify "$1" ;;
+  *) usage ;;
+esac
