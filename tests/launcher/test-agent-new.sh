@@ -27,7 +27,12 @@ newstate(){ rm -rf "$STATE"; mkdir -p "$STATE"; : > "$GHLOG"; : > "$OPLOG"; : > 
 cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 echo "GH${GH_TOKEN:+(mu)}: $*" >> "$GHLOG"
+echo "${GH_TOKEN:-}" >> "$STATE/gh-tokens"
 case "$*" in
+  "pr create"*) "$REALGIT" log -1 --format='AUTHOR: %an <%ae> COMMITTER: %cn <%ce>' >> "$STATE/gh-author" ;;
+  "pr merge --squash --admin") [ -f "$STATE/gate" ] && { echo "GraphQL: Repository rule violations found" >&2; exit 1; }; : ;;
+  "pr merge --squash") [ -f "$STATE/gate" ] && { echo "the base branch policy prohibits the merge" >&2; exit 1; }; : ;;
+  "pr review --approve") [ -f "$STATE/gate" ] && { echo "Review Can not approve your own pull request" >&2; exit 1; }; : ;;
   "api user --jq .login") if [ -n "${GH_TOKEN:-}" ]; then cat "$STATE/mu-login" 2>/dev/null || echo agent-allen
                           else [ -s "$STATE/login" ] || exit 1; cat "$STATE/login"; fi ;;
   api\ repos/*/collaborators/*) [ -f "$STATE/collab" ] ;;
@@ -66,7 +71,7 @@ case "$1 ${2:-}" in
   "service-account create") echo "$3" > "$STATE/sa-vault"; echo fake-sa-token ;;
   "item get")           [ -f "$STATE/item-$3" ] ;;
   "item create")        for a in "$@"; do case "$a" in --title) want=next ;; *) [ "${want:-}" = next ] && { touch "$STATE/item-$a"; want=; } ;; esac; done; true ;;
-  "read "*)             echo fake-op-secret ;;
+  "read "*)             case "$*" in *"service account"*) [ -f "$STATE/op-sa-read-fail" ] && exit 1 ;; esac; echo fake-op-secret ;;
 esac
 STUB
 chmod +x "$T/bin/gh" "$T/bin/op"
@@ -95,7 +100,8 @@ case "$1" in
   clone) echo "GITENV: global=${GIT_CONFIG_GLOBAL:-} nosystem=${GIT_CONFIG_NOSYSTEM:-} count=${GIT_CONFIG_COUNT:-} helper=${GIT_CONFIG_VALUE_0:-} name=${GIT_CONFIG_VALUE_1:-} email=${GIT_CONFIG_VALUE_2:-}" >> "$GITLOG"
          mkdir -p "${@: -1}"; cd "${@: -1}" && "$REALGIT" init -q -b main && "$REALGIT" commit -q --allow-empty -m seed && "$REALGIT" remote add origin "https://github.com/x/y" && "$REALGIT" update-ref refs/remotes/origin/main HEAD ;;
   fetch) exit 0 ;;
-  push)  [ -f "$STATE/push-fail-once" ] && { rm -f "$STATE/push-fail-once"; echo "remote: push rejected" >&2; exit 1; }
+  push)  case "$*" in *HEAD:main*) [ -f "$STATE/gate" ] && { echo "remote: error: GH013: Repository rule violations found" >&2; exit 1; } ;; esac
+         [ -f "$STATE/push-fail-once" ] && { rm -f "$STATE/push-fail-once"; echo "remote: push rejected" >&2; exit 1; }
          "$REALGIT" rev-parse --git-dir >/dev/null 2>&1 && "$REALGIT" update-ref refs/remotes/origin/main HEAD; exit 0 ;;
   *)     exec "$REALGIT" "$@" ;;
 esac
@@ -214,10 +220,14 @@ check "  later commands run in the worktree" grep -q 'DOCKER: exec -w /tmp/agent
 check "  never switches the owner's checkout" sh -c "! grep -q 'switch main' '$DLOG'"
 check "  worktree removed on exit"           grep -q 'DOCKER: exec -w /workspace p1-agent-1 git worktree remove --force /tmp/agent-new-verify' "$DLOG"
 check "  checks not retried when they report" test "$(grep -c 'pr checks' "$DLOG")" -eq 1
+check "  worktree pre-cleaned before add"     grep -qF 'bash -lc git worktree remove --force /tmp/agent-new-verify 2>/dev/null; git worktree prune; rm -rf /tmp/agent-new-verify' "$DLOG"
+check "  trap deletes the local verify-ruleset branch" grep -q 'DOCKER: exec -w /workspace p1-agent-1 git branch -D verify-ruleset' "$DLOG"
 newstate; plan_ok; sed -i 's/^api user|0|agent-allen/api user|0|allen/' "$STATE/exec-plan"
 refuses "container identity is the owner -> die" 'allen.*agent-allen|agent-allen.*allen' run verify p1
 check "  nothing pushed" sh -c "! grep -q 'git push' '$DLOG'"
-newstate; plan_ok
+newstate; plan_ok; sed -i '1i branch --show-current|0|verify-ruleset' "$STATE/exec-plan"
+refuses "/workspace left on verify-ruleset -> die, tells owner to switch" 'git switch main' run verify p1
+check "  no worktree add attempted" sh -c "! grep -q 'worktree add' '$DLOG'"
 newstate; cat > "$STATE/exec-plan" <<'PLAN'
 pr checks|1|no checks reported on the latest commit
 pr merge --squash --admin|1|GraphQL: Repository rule violations found (mergePullRequest)
@@ -262,6 +272,14 @@ check "  git isolated from owner config"     grep -q 'GITENV: global=/dev/null n
 check "  helper is literal, token via env"   grep -qF 'helper=!f(){ echo username=x-access-token; echo "password=$GH_TOKEN"; }; f' "$GITLOG"
 check "  commit identity is the machine user" grep -q 'name=agent-allen email=agent-allen@users.noreply.github.com' "$GITLOG"
 check "  token never in argv"                sh -c "! grep -q fake-op-secret '$GITLOG' '$GHLOG'"
+newstate; touch "$STATE/gate"
+printf 'export GH_TOKEN=bogus-owner-token\n' > "$H/.profile"
+VOUT=$(run verify allen/repo9 --vault agent-p1 2>&1); VRC=$?
+rm -f "$H/.profile"
+check "repo mode: gate passes on the canned refusals" test "$VRC" -eq 0
+check "  all four refusals asserted"         test "$(grep -c 'OK (refused as expected)' <<<"$VOUT")" -eq 4
+check "  login profile cannot swap the token (bash -c)" sh -c "! grep -q bogus-owner-token '$STATE/gh-tokens' && grep -q fake-op-secret '$STATE/gh-tokens'"
+check "  real commit author+committer is the machine user" grep -qx 'AUTHOR: agent-allen <agent-allen@users.noreply.github.com> COMMITTER: agent-allen <agent-allen@users.noreply.github.com>' "$STATE/gh-author"
 check "trap freezes tmp at set time (immediate expansion)" grep -q "trap \"rm -rf '" "$AN"
 unset TMPDIR
 
@@ -300,6 +318,35 @@ mkdir -p "$PROJHOME/Decoy" && git -C "$PROJHOME/Decoy" init -q && git -C "$PROJH
 refuses "existing folder with wrong origin refused" 'refusing to adopt' run project Decoy --token-from agent-old < /dev/null
 mkdir -p "$PROJHOME/Decoy2" && git -C "$PROJHOME/Decoy2" init -q && git -C "$PROJHOME/Decoy2" remote add origin "https://notgithub.com/allen/Decoy2"
 refuses "lookalike host refused" 'refusing to adopt' run project Decoy2 --token-from agent-old < /dev/null
+echo "== review fixes: re-run after the agent started =="
+mkrepo(){ # $1 name: an existing clone of allen/$1 with project config, one commit
+  rm -rf "$PROJHOME/$1" "$CFGROOT/$(echo "$1" | tr A-Z a-z)"
+  mkdir -p "$PROJHOME/$1" "$CFGROOT/$(echo "$1" | tr A-Z a-z)"
+  printf 'PROJECT=x\nT3_PORT=3790\n' > "$CFGROOT/$(echo "$1" | tr A-Z a-z)/project.conf"
+  printf 'image: ghcr.io/x/spades-gis@sha256:aaa111\n' > "$CFGROOT/$(echo "$1" | tr A-Z a-z)/compose.yaml"
+  git -C "$PROJHOME/$1" init -q -b main && git -C "$PROJHOME/$1" commit -q --allow-empty -m seed \
+    && git -C "$PROJHOME/$1" remote add origin "https://github.com/allen/$1"; }
+newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"; mkrepo Ahead
+git -C "$PROJHOME/Ahead" commit -q --allow-empty -m remote-only
+git -C "$PROJHOME/Ahead" update-ref refs/remotes/origin/main HEAD; git -C "$PROJHOME/Ahead" reset -q --hard HEAD~1
+check "origin/main ahead of local main: run completes" run project Ahead --token-from agent-old < /dev/null
+check "  no push attempted" sh -c "! grep -q '^GIT: push' '$GITLOG'"
+newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"; mkrepo Feat
+git -C "$PROJHOME/Feat" update-ref refs/remotes/origin/main HEAD
+git -C "$PROJHOME/Feat" switch -q -c feature; mkdir -p "$PROJHOME/Feat/.github"; echo '* @OWNER' > "$PROJHOME/Feat/.github/CODEOWNERS"
+OUT=$(run project Feat --token-from agent-old < /dev/null 2>&1); RC=$?
+check "dirty .github on a feature branch: run completes" test "$RC" -eq 0
+check "  WARNING, repo files skipped"     grep -q 'WARNING.*feature' <<<"$OUT"
+check "  nothing committed"               test "$(git -C "$PROJHOME/Feat" rev-list --count HEAD)" -eq 1
+check "  nothing staged"                  git -C "$PROJHOME/Feat" diff --cached --quiet
+check "  agent's file untouched"          grep -qx '\* @OWNER' "$PROJHOME/Feat/.github/CODEOWNERS"
+check "  existing clone's branch not renamed" test "$(git -C "$PROJHOME/Feat" branch --show-current)" = feature
+check "  no push attempted" sh -c "! grep -q '^GIT: push' '$GITLOG'"
+newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"; mkrepo Stage
+mkdir -p "$PROJHOME/Stage/.github/workflows"; echo '* @OWNER' > "$PROJHOME/Stage/.github/CODEOWNERS"; echo x > "$PROJHOME/Stage/.github/other.txt"; echo y > "$PROJHOME/Stage/stray.txt"
+run project Stage --token-from agent-old < /dev/null >/dev/null 2>&1
+check "only the template paths are committed" test "$(git -C "$PROJHOME/Stage" show --name-only --format= HEAD)" = ".github/CODEOWNERS"
+rm -rf "$PROJHOME/Ahead" "$PROJHOME/Feat" "$PROJHOME/Stage" "$CFGROOT/ahead" "$CFGROOT/feat" "$CFGROOT/stage"
 unset AGENT_NEW_STOP_AFTER
 
 echo "== task 5b: vault scope exclusivity =="
@@ -406,7 +453,18 @@ printf 'TAILSCALE_HTTPS_PORT=abc\n' >> "$CFGROOT/newproj/project.conf"
 refuses "non-numeric TAILSCALE_HTTPS_PORT dies" 'must be a port 1-65535' run project NewProj --token-from agent-old < /dev/null
 sed -i 's/^TAILSCALE_HTTPS_PORT=.*/TAILSCALE_HTTPS_PORT=70000/' "$CFGROOT/newproj/project.conf"
 refuses "out-of-range TAILSCALE_HTTPS_PORT dies" 'must be a port 1-65535' run project NewProj --token-from agent-old < /dev/null
+sed -i '/^TAILSCALE_HTTPS_PORT=/d; s/^T3_PORT=.*/T3_PORT=abc/' "$CFGROOT/newproj/project.conf"
+refuses "non-numeric T3_PORT dies" "T3_PORT='abc'" run project NewProj --token-from agent-old < /dev/null
 rm -rf "$PROJHOME/NewProj" "$CFGROOT/newproj"
+
+newstate
+refuses "--t3 outside publish|1|0 refused" '--t3 must be' run project BadT3 --t3 maybe < /dev/null
+newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
+fullstate; touch "$STATE/op-sa-read-fail"
+rm -rf "$PROJHOME/SaFail" "$CFGROOT/safail"
+refuses "service-account token read fails -> die" 'could not read the service account token' run project SaFail --token-from agent-old < /dev/null
+check "  agent-up up never called" sh -c "! grep -q ' up safail' '$AULOG'"
+rm -rf "$PROJHOME/SaFail" "$CFGROOT/safail"
 
 newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
 export AGENT_NEW_STOP_AFTER=token
