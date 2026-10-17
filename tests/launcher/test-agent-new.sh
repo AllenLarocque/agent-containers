@@ -280,6 +280,9 @@ check "repo mode: gate passes on the canned refusals" test "$VRC" -eq 0
 check "  all four refusals asserted"         test "$(grep -c 'OK (refused as expected)' <<<"$VOUT")" -eq 4
 check "  login profile cannot swap the token (bash -c)" sh -c "! grep -q bogus-owner-token '$STATE/gh-tokens' && grep -q fake-op-secret '$STATE/gh-tokens'"
 check "  real commit author+committer is the machine user" grep -qx 'AUTHOR: agent-allen <agent-allen@users.noreply.github.com> COMMITTER: agent-allen <agent-allen@users.noreply.github.com>' "$STATE/gh-author"
+newstate; touch "$STATE/gate"; printf '[ "$0" = bash ] && export GH_TOKEN=bogus-bashenv-token\n' > "$T/bashenv"
+BASH_ENV="$T/bashenv" run verify allen/repo9 --vault agent-p1 >/dev/null 2>&1
+check "  BASH_ENV cannot swap the token either" sh -c "! grep -q bogus-bashenv-token '$STATE/gh-tokens' && grep -q fake-op-secret '$STATE/gh-tokens'"
 check "trap freezes tmp at set time (immediate expansion)" grep -q "trap \"rm -rf '" "$AN"
 unset TMPDIR
 
@@ -346,7 +349,20 @@ newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"; mkrepo
 mkdir -p "$PROJHOME/Stage/.github/workflows"; echo '* @OWNER' > "$PROJHOME/Stage/.github/CODEOWNERS"; echo x > "$PROJHOME/Stage/.github/other.txt"; echo y > "$PROJHOME/Stage/stray.txt"
 run project Stage --token-from agent-old < /dev/null >/dev/null 2>&1
 check "only the template paths are committed" test "$(git -C "$PROJHOME/Stage" show --name-only --format= HEAD)" = ".github/CODEOWNERS"
-rm -rf "$PROJHOME/Ahead" "$PROJHOME/Feat" "$PROJHOME/Stage" "$CFGROOT/ahead" "$CFGROOT/feat" "$CFGROOT/stage"
+newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"; mkrepo Pre
+mkdir -p "$PROJHOME/Pre/.github"; echo '* @OWNER' > "$PROJHOME/Pre/.github/CODEOWNERS"; echo work > "$PROJHOME/Pre/agent.R"
+git -C "$PROJHOME/Pre" add agent.R
+run project Pre --token-from agent-old < /dev/null >/dev/null 2>&1
+check "agent's pre-staged file is not in the owner's commit" test "$(git -C "$PROJHOME/Pre" show --name-only --format= HEAD)" = ".github/CODEOWNERS"
+check "  and stays staged"                test "$(git -C "$PROJHOME/Pre" diff --cached --name-only)" = "agent.R"
+newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"; mkrepo Det
+git -C "$PROJHOME/Det" update-ref refs/remotes/origin/main HEAD; git -C "$PROJHOME/Det" checkout -q --detach
+mkdir -p "$PROJHOME/Det/.github"; echo '* @OWNER' > "$PROJHOME/Det/.github/CODEOWNERS"
+OUT=$(run project Det --token-from agent-old < /dev/null 2>&1); RC=$?
+check "detached HEAD: run completes"   test "$RC" -eq 0
+check "  WARNING, repo files skipped"  grep -q 'WARNING.*not on main' <<<"$OUT"
+check "  nothing committed"            test "$(git -C "$PROJHOME/Det" rev-list --count HEAD)" -eq 1
+rm -rf "$PROJHOME/Ahead" "$PROJHOME/Feat" "$PROJHOME/Stage" "$PROJHOME/Pre" "$PROJHOME/Det" "$CFGROOT/pre" "$CFGROOT/det" "$CFGROOT/ahead" "$CFGROOT/feat" "$CFGROOT/stage"
 unset AGENT_NEW_STOP_AFTER
 
 echo "== task 5b: vault scope exclusivity =="

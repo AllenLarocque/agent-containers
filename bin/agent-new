@@ -97,21 +97,22 @@ set_conf(){ # edit-in-place, never append duplicates
 }
 project_repo_files(){
   local cur; cur="$(git -C "$DIR" branch --show-current 2>/dev/null || true)"
-  if [ -n "$cur" ] && [ "$cur" != main ]; then
-    warn "$DIR is on branch '$cur', not main (the agent is working): skipping the repo-files step; the template files were committed on the first run"
+  if [ "$cur" != main ]; then # also a detached HEAD (empty) or a mid-rebase checkout
+    warn "$DIR is not on main (branch '${cur:-detached}'; the agent is working): skipping the repo-files step; the template files were committed on the first run"
     return
   fi
   if grep -q '@OWNER' "$DIR/.github/CODEOWNERS" 2>/dev/null; then
     say "CODEOWNERS: @OWNER -> @$OWNER"; sed -i "s/@OWNER/@$OWNER/" "$DIR/.github/CODEOWNERS"
   fi
   (cd "$DIR"
-   local f; for f in .github/CODEOWNERS .github/workflows/gitleaks.yml .gitignore; do
-     [ ! -e "$f" ] || git add "$f"
+   # every git call is limited to the template paths: whatever else the agent staged is not ours to commit
+   local f paths=(); for f in .github/CODEOWNERS .github/workflows/gitleaks.yml .gitignore; do
+     [ ! -e "$f" ] || { git add "$f"; paths+=("$f"); }
    done
-   if git diff --cached --quiet 2>/dev/null; then skip "repo files committed"
+   if [ "${#paths[@]}" -eq 0 ] || git diff --cached --quiet -- "${paths[@]}" 2>/dev/null; then skip "repo files committed"
    else
      say "committing .github/ and .gitignore"
-     git commit -q -m "chore: CODEOWNERS, gitleaks workflow, gitignore (agent-new)"
+     git commit -q -m "chore: CODEOWNERS, gitleaks workflow, gitignore (agent-new)" -- "${paths[@]}"
    fi
    # a push that failed last time is retried. Push only if the remote ref is missing or HEAD has
    # commits it lacks: a fetch from the container can move origin/main AHEAD of local main, and a
@@ -399,7 +400,7 @@ cmd_verify(){
         GIT_CONFIG_KEY_1=user.name GIT_CONFIG_VALUE_1="$mu" \
         GIT_CONFIG_KEY_2=user.email GIT_CONFIG_VALUE_2="$mu@users.noreply.github.com"
       # env identity outranks config: drop the owner's so the machine user is what gets recorded
-      unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+      unset BASH_ENV GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
     }
     say "cloning $VTARGET as $mu (temp, removed after)"
     (vgit_env; git clone -q "https://github.com/$VTARGET" "$tmp/repo") >/dev/null
