@@ -47,11 +47,14 @@ Invariants:
 ## 3. Interface
 
 ```
-agent-new project <folder> [--image gis|bio] [--public] [--no-research]
-                           [--t3 publish|1|0] [--token-from <vault>]
-agent-new protect <owner>/<repo> [--machine-user <user>] [--require <check>]...
-agent-new verify  <project> | <owner>/<repo>
+agent-new project <folder> [--image base|gis|bio] [--public] [--no-research]
+                           [--t3 publish|1|0] [--token-from <vault>] [--machine-user <user>]
+agent-new protect <owner>/<repo> [--machine-user <user>] [--vault <op-vault>] [--require <check>]...
+agent-new verify  <project> | <owner>/<repo> [--vault <op-vault>]
 ```
+
+`verify <owner>/<repo>` requires `--vault` (the project vault holding the machine user's
+`github-agent` token); `verify <project>` uses the running container's own login.
 
 - `project` — the full flow (§4). `<folder>` as in `agent-up init`: the host folder name under
   `~/GitHub/`, lowercased to form the project name. `--vault` is refused: the project always
@@ -83,8 +86,12 @@ Steps in order:
    `T3_CONNECT` in `project.conf` per flags (edit the existing lines, never append
    duplicates).
 4. **Repo files.** Replace `@OWNER` in `.github/CODEOWNERS` with the owner's login; commit
-   `.github/` + `.gitignore` and push (a failed push is retried on re-run). Ordering is load-bearing: this direct push happens
-   **before** the ruleset exists and gives gitleaks its first run.
+   `.github/CODEOWNERS`, `.github/workflows/gitleaks.yml` and `.gitignore` and push. The push
+   happens only if `origin/main` is missing or local `main` has commits it lacks (a failed push
+   is retried on re-run; a fetch that moved `origin/main` ahead is not pushed over). If the
+   checkout is not on `main` (the agent is working), the step is skipped with a warning. Ordering
+   is load-bearing: this direct push happens **before** the ruleset exists and gives gitleaks its
+   first run.
 5. **Vault (interactive).** Pause for `eval "$(op signin)"`, then the vault runbook §2 CLI
    sequence verbatim: create vault `agent-<project>`, 90-day read-only service account, token
    saved to the Personal vault, and the scoped `op vault list` self-check (must list exactly
