@@ -96,6 +96,8 @@ Steps in order:
    sequence verbatim: create vault `agent-<project>`, 90-day read-only service account, token
    saved to the Personal vault, and the scoped `op vault list` self-check (must list exactly
    the one vault). Skipped cleanly if the vault already exists.
+   Items are created from JSON on stdin (`op item create --vault V -`), so no secret is ever in
+   argv; needs op CLI >= 2.6.2.
 6. **GitHub token.** `--token-from <vault>` copies the `github-agent` item from another
    project's vault (the shared classic PAT); otherwise prompt with `read -rs` (printed on its
    own line, per the paste-block house rule) and create the item.

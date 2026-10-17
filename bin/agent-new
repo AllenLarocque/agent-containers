@@ -127,6 +127,18 @@ project_repo_files(){
      git push -u origin main || die "push failed: fix the cause, then re-run (re-running resumes from here)"
    else skip "main pushed"; fi)
 }
+json_esc(){ # $1 -> REPLY: JSON string body (no quotes); dies on control characters (tokens never have them)
+  [[ $1 =~ [[:cntrl:]] ]] && die "refusing to build JSON: a value contains a control character"
+  REPLY="${1//\\/\\\\}"; REPLY="${REPLY//\"/\\\"}"
+}
+# Secrets never go in argv: the item JSON goes to `op item create -` on stdin (op >= 2.6.2). Calling this function
+# with the secret as an argument is fine: bash functions and builtins start no process, so nothing shows in ps.
+op_create_secret(){ # $1 vault, $2 title, $3 field id+label, $4 secret (an API Credential item with one concealed field)
+  local t f s; json_esc "$2"; t="$REPLY"; json_esc "$3"; f="$REPLY"; json_esc "$4"; s="$REPLY"
+  printf '{"title": "%s", "category": "API_CREDENTIAL", "fields": [{"id": "%s", "label": "%s", "type": "CONCEALED", "value": "%s"}]}\n' \
+    "$t" "$f" "$f" "$s" | op item create --vault "$1" - >/dev/null || die "op item create failed for '$2' in vault $1"
+  s="" REPLY=""
+}
 project_vault(){
   say "1Password (interactive; 1password-project-vault.md). Signing in:"
   eval "$(op signin)"
@@ -137,7 +149,7 @@ project_vault(){
   else
     say "creating 90-day read-only service account for $VAULT"
     local tok; tok="$(op service-account create "$VAULT" --expires-in 90d --vault "$VAULT:read_items" --raw)"
-    op item create --vault Personal --category "API Credential" --title "$sa" "credential[concealed]=$tok" >/dev/null
+    op_create_secret Personal "$sa" credential "$tok"
     tok=""
     say "scope check: the service account must see ONLY $VAULT"
     unset OP_SERVICE_ACCOUNT_TOKEN
@@ -156,7 +168,7 @@ project_token(){
     say "paste the machine user's PAT (machine-user-and-rulesets.md step 3), then ENTER:"
     read -rs ghtok; echo
   fi
-  op item create --vault "$VAULT" --category "API Credential" --title github-agent "token[concealed]=$ghtok" >/dev/null
+  op_create_secret "$VAULT" github-agent token "$ghtok"
   ghtok=""
 }
 t3_port(){ # $1 project.conf -> T3_PORT as plain decimal (no leading zeros), validated

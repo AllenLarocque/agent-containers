@@ -70,8 +70,9 @@ case "$1 ${2:-}" in
     ;;
   "service-account create") echo "$3" > "$STATE/sa-vault"; echo fake-sa-token ;;
   "item get")           [ -f "$STATE/item-$3" ] ;;
-  "item create")        for a in "$@"; do case "$a" in --title) want=next ;; *) [ "${want:-}" = next ] && { touch "$STATE/item-$a"; want=; } ;; esac; done; true ;;
-  "read "*)             case "$*" in *"service account"*) [ -f "$STATE/op-sa-read-fail" ] && exit 1 ;; esac; echo fake-op-secret ;;
+  "item create")        n=$(ls "$STATE"/item-json-* 2>/dev/null | wc -l); cat > "$STATE/item-json-$((n+1))"
+                        t="$(sed -n 's/.*"title": *"\([^"]*\)".*/\1/p' "$STATE/item-json-$((n+1))")"; touch "$STATE/item-$t" ;;
+  "read "*)             case "$*" in *"service account"*) [ -f "$STATE/op-sa-read-fail" ] && exit 1 ;; esac; if [ -f "$STATE/read-value" ]; then cat "$STATE/read-value"; else echo fake-op-secret; fi ;;
 esac
 STUB
 chmod +x "$T/bin/gh" "$T/bin/op"
@@ -304,6 +305,30 @@ check "  vault created"           test -f "$STATE/vault"
 check "  sa item in Personal"     test -f "$STATE/item-agent-newproj service account"
 check "  github-agent item"       test -f "$STATE/item-github-agent"
 check "  token copied from --token-from vault" grep -q '^OP: read op://agent-old/github-agent/token' "$OPLOG"
+echo "== secrets stay off argv: items created from JSON on stdin =="
+SAJ="$(grep -l 'service account' "$STATE"/item-json-*)"; GHJ="$(grep -l '"github-agent"' "$STATE"/item-json-*)"
+check "  no secret in any op argv"       sh -c "! grep -q 'fake-sa-token\|fake-op-secret' '$OPLOG'"
+check "  stdin marker '-' in argv"        grep -q '^OP: item create --vault Personal -$' "$OPLOG"
+check "  github item also via '-'"        grep -q '^OP: item create --vault agent-newproj -$' "$OPLOG"
+check "  sa JSON: category"               grep -q '"category": "API_CREDENTIAL"' "$SAJ"
+check "  sa JSON: field id credential"    grep -q '"id": "credential"' "$SAJ"
+check "  sa JSON: concealed"              grep -q '"type": "CONCEALED"' "$SAJ"
+check "  sa JSON: token value"            grep -q 'fake-sa-token' "$SAJ"
+check "  github JSON: field id token"     grep -q '"id": "token"' "$GHJ"
+check "  github JSON: token value"        grep -q 'fake-op-secret' "$GHJ"
+newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"; rm -rf "$PROJHOME/EscProj" "$CFGROOT/escproj"
+printf '%s\n' 'ab"c\d' | run project EscProj >/dev/null 2>&1
+ESCJ="$(grep -l '"github-agent"' "$STATE"/item-json-* 2>/dev/null)"
+check "  quote/backslash escaped"         grep -qF 'ab\"c\\d' "$ESCJ"
+if command -v python3 >/dev/null; then
+  check "  escaped JSON parses (python3)" sh -c "python3 -c 'import json,sys; json.load(sys.stdin)' < '$ESCJ'"
+fi
+check "  pasted token not in argv"        sh -c "! grep -qF 'ab\"c' '$OPLOG'"
+newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"; rm -rf "$PROJHOME/CtlProj" "$CFGROOT/ctlproj"
+ctl(){ printf 'ab\001c\n' | run project CtlProj; }
+refuses "  control char in secret dies"   'control character' ctl
+check "  and no github item created"      test ! -f "$STATE/item-github-agent"
+rm -rf "$PROJHOME/EscProj" "$CFGROOT/escproj" "$PROJHOME/CtlProj" "$CFGROOT/ctlproj"
 : > "$GHLOG"; : > "$GITLOG"; : > "$AULOG"
 OUT=$(run project NewProj --token-from agent-old < /dev/null 2>&1); RC=$?
 check "re-run exits 0"            test "$RC" -eq 0

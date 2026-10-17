@@ -24,6 +24,8 @@ unset TOK
 OP_SERVICE_ACCOUNT_TOKEN="$(op read "op://Personal/agent-$P service account/credential")" op vault list
 ```
 
+(`agent-new` creates this item from JSON on stdin, `op item create --vault Personal -`, so the token never appears in argv; needs op CLI >= 2.6.2. The one-liner above is for manual use.)
+
 The last line must list ONLY `agent-<project>`. (Your personal vault is `Personal` on individual accounts, `Private` on some others: use the name `op vault list` shows.)
 
 **Or in the web UI:**
