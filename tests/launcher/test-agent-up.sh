@@ -946,12 +946,22 @@ if [ -n "${TEMPLATE_IMAGE:-}" ]; then
   # In real use the host user IS uid 1000 (spec §3.1) and the file stays 0600.
   chmod 644 "$CFG/.generated/rstudio-password"
   cp "$ROOT/tests/rstudio/fixture-Rprofile" "$P/.Rprofile"; cp "$ROOT/tests/rstudio/fixture.Rproj" "$P/demo.Rproj"
+  # CI-ONLY: GH_META_FIXTURE (the workflow's ONE authenticated api.github.com/meta fetch) is mounted
+  # read-only where init-firewall.sh takes it instead of fetching, so these containers (and their
+  # firewall re-runs) do not spend the runner's unauthenticated rate limit. Only in this test-owned
+  # override, which the render checks above never see; agent-up and the template never mount it.
+  OVR_VOLS="\"$ROOT/tests:/tests:ro\""; GH_META_BEHAV=0
+  if [ -n "${GH_META_FIXTURE:-}" ] && [ -f "$GH_META_FIXTURE" ] && [ -r "$GH_META_FIXTURE" ]; then
+    GH_META_ABS="$(cd "$(dirname "$GH_META_FIXTURE")" && pwd -P)/$(basename "$GH_META_FIXTURE")"
+    OVR_VOLS="$OVR_VOLS, \"$GH_META_ABS:/etc/firewall/github-meta.json:ro\""; GH_META_BEHAV=1
+    echo "NOTE: behavioural containers get the host-supplied GitHub meta ($GH_META_ABS)"
+  fi
   cat > "$T/override.yaml" <<OVR
 services:
   agent:
     image: $TEMPLATE_IMAGE
     mem_limit: 4g
-    volumes: ["$ROOT/tests:/tests:ro"]   # test scripts only (tests/rstudio)
+    volumes: [$OVR_VOLS]   # test scripts only (tests/rstudio)
 OVR
   dc(){ env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u COMPOSE_FILE HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" GH_TOKEN=dummy-in-container \
           docker compose --env-file "$CFG/project.conf" -f "$CFG/compose.yaml" -f "$CFG/.generated/env-passthrough.yaml" \
@@ -984,6 +994,10 @@ OVR
     for _ in $(seq 1 240); do curl -fsS -o /dev/null --max-time 3 "http://127.0.0.1:$T3P/" 2>/dev/null && break; sleep 2; done
     check "firewall initialised by the entrypoint" bash -c 'docker logs "$1" 2>&1 | grep -q "Firewall verification passed - CRAN reachable"' _ "$CID"
     diag "$CID" builder
+    if [ "$GH_META_BEHAV" = 1 ]; then
+      check "  ...with the host-supplied GitHub meta (no live fetch)" \
+        bash -c 'l="$(docker logs "$1" 2>&1)"; grep -q "^GitHub meta: from /etc/firewall/github-meta.json" <<<"$l" && ! grep -q "Fetching GitHub IP ranges" <<<"$l"' _ "$CID"
+    fi
     check "  ...and BEFORE agent-init and T3 started (log order)" \
       bash -c 'docker logs "$1" 2>&1 | grep -nE "Firewall verification passed - CRAN|\[agent-init\]|\[agent-t3\]" | head -n 1 | grep -q "Firewall verification"' _ "$CID"
     # The file is mode 600 owned by the CI runner (not UID 1000), so only root can read it.
@@ -1131,6 +1145,10 @@ OVR
     RP=$(sed -n 's/^T3_PORT=//p' "$RCFG/project.conf")
     for _ in $(seq 1 240); do curl -fsS -o /dev/null --max-time 3 "http://127.0.0.1:$RP/" 2>/dev/null && break; sleep 2; done
     diag "$RID" research
+    if [ "$GH_META_BEHAV" = 1 ]; then
+      check "research: firewall used the host-supplied GitHub meta (no live fetch)" \
+        bash -c 'l="$(docker logs "$1" 2>&1)"; grep -q "^GitHub meta: from /etc/firewall/github-meta.json" <<<"$l" && ! grep -q "Fetching GitHub IP ranges" <<<"$l"' _ "$RID"
+    fi
     check "research: firewall in research mode (read from the switch)" \
       bash -c 'docker logs "$1" 2>&1 | grep -q "^Profile: research" && docker logs "$1" 2>&1 | grep -q "Firewall verification passed - research"' _ "$RID"
     check "research: NO GH_TOKEN and no OP_* in the container (ambient owner secrets did not leak)" \
