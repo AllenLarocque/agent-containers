@@ -36,9 +36,11 @@ machine_user(){
   printf '%s' "$mu"
 }
 preflight_owner(){ # prints the owner login; dies if gh is absent/anonymous/the machine user
-  local who; who="$(gh api user --jq .login 2>/dev/null)" || die "gh is not logged in as you (gh auth login)"
+  local who mu
+  who="$(gh api user --jq .login 2>/dev/null)" || die "gh is not logged in as you (gh auth login)"
   [ -n "$who" ] || die "gh is not logged in as you (gh auth login)"
-  [ "$who" != "$(machine_user)" ] || die "gh is logged in as the machine user ($who): agent-new runs as the OWNER"
+  mu="$(machine_user)"
+  [ "$who" != "$mu" ] || die "gh is logged in as the machine user ($who): agent-new runs as the OWNER"
   printf '%s' "$who"
 }
 

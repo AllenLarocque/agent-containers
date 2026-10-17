@@ -45,6 +45,8 @@ refuses "no args -> usage" 'usage' run
 refuses "unknown subcommand -> usage" 'usage' run frobnicate
 refuses "protect without owner/repo" 'protect wants <owner>/<repo>' run protect lonely
 refuses "no MACHINE_USER anywhere" 'MACHINE_USER' run protect o/r
+OUT=$(run protect o/r 2>&1) && { echo "FAIL: no-machine-user run should exit non-zero"; fail=1; } || true
+check "  dies at the guard (nothing after runs)" bash -c "! grep -q 'not implemented' <<<\"\$0\"" "$OUT"
 printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
 newstate; echo agent-allen > "$STATE/login"
 refuses "gh logged in as the machine user" 'machine user' run protect o/r
