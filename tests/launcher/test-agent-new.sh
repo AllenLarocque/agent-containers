@@ -28,12 +28,13 @@ cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 echo "GH${GH_TOKEN:+(mu)}: $*" >> "$GHLOG"
 case "$*" in
-  "api user --jq .login") [ -s "$STATE/login" ] || exit 1; cat "$STATE/login" ;;
+  "api user --jq .login") if [ -n "${GH_TOKEN:-}" ]; then cat "$STATE/mu-login" 2>/dev/null || echo agent-allen
+                          else [ -s "$STATE/login" ] || exit 1; cat "$STATE/login"; fi ;;
   api\ repos/*/collaborators/*) [ -f "$STATE/collab" ] ;;
   api\ -X\ PUT\ repos/*/collaborators/*) touch "$STATE/invited" ;;
   "api /user/repository_invitations --jq"*) [ -n "${GH_TOKEN:-}" ] || exit 1; [ -f "$STATE/invited" ] && echo 42 ;;
   "api -X PATCH /user/repository_invitations/42") [ -n "${GH_TOKEN:-}" ] || exit 1; touch "$STATE/collab" ;;
-  "api repos/"*"/rulesets --jq"*) [ -f "$STATE/rulesets-list-fail" ] && { echo "HTTP 403: upgrade to Pro" >&2; exit 1; }; cat "$STATE/ruleset-id" 2>/dev/null; : ;;
+  "api repos/"*"/rulesets --jq"*) [ -f "$STATE/rulesets-list-fail" ] && { echo "HTTP 403: upgrade to Pro" >&2; exit 1; }; [ -f "$STATE/rulesets-stderr" ] && echo "warning: stray stderr line" >&2; cat "$STATE/ruleset-id" 2>/dev/null; : ;;
   "api -X POST repos/"*"/rulesets --input -") cat > "$STATE/ruleset-posted" ;;
   "api repos/"*"/rulesets/7 --jq"*) cat "$STATE/ruleset-norm" ;;
   "api repos/"*"/contents/.github/CODEOWNERS") [ -f "$STATE/has-codeowners" ] ;;
@@ -91,7 +92,9 @@ cat > "$T/bin/git" <<'STUB'
 #!/usr/bin/env bash
 echo "GIT: $*" >> "$GITLOG"
 case "$1" in
-  clone) mkdir -p "${@: -1}"; cd "${@: -1}" && "$REALGIT" init -q -b main && "$REALGIT" commit -q --allow-empty -m seed && "$REALGIT" remote add origin "https://github.com/x/y" ;;
+  clone) echo "GITENV: global=${GIT_CONFIG_GLOBAL:-} nosystem=${GIT_CONFIG_NOSYSTEM:-} count=${GIT_CONFIG_COUNT:-} helper=${GIT_CONFIG_VALUE_0:-} name=${GIT_CONFIG_VALUE_1:-} email=${GIT_CONFIG_VALUE_2:-}" >> "$GITLOG"
+         mkdir -p "${@: -1}"; cd "${@: -1}" && "$REALGIT" init -q -b main && "$REALGIT" commit -q --allow-empty -m seed && "$REALGIT" remote add origin "https://github.com/x/y" && "$REALGIT" update-ref refs/remotes/origin/main HEAD ;;
+  fetch) exit 0 ;;
   push)  [ -f "$STATE/push-fail-once" ] && { rm -f "$STATE/push-fail-once"; echo "remote: push rejected" >&2; exit 1; }
          "$REALGIT" rev-parse --git-dir >/dev/null 2>&1 && "$REALGIT" update-ref refs/remotes/origin/main HEAD; exit 0 ;;
   *)     exec "$REALGIT" "$@" ;;
@@ -168,6 +171,10 @@ newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
 echo 7 > "$STATE/ruleset-id"; echo "$EXPECT_NORM" > "$STATE/ruleset-norm"
 check "identical ruleset -> SKIP"          run protect allen/repo1 --vault agent-p1
 check "  nothing POSTed"                   test ! -f "$STATE/ruleset-posted"
+newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks" "$STATE/rulesets-stderr"
+echo 7 > "$STATE/ruleset-id"; echo "$EXPECT_NORM" > "$STATE/ruleset-norm"
+check "stray gh stderr on success is not the id" run protect allen/repo1 --vault agent-p1
+check "  still matched ruleset 7 (SKIP, no POST)" test ! -f "$STATE/ruleset-posted"
 newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
 echo 7 > "$STATE/ruleset-id"; echo 'active|RepositoryRole:5:always|deletion|pr:0:false:false:false|' > "$STATE/ruleset-norm"
 refuses "divergent ruleset -> refuse, no write" 'refusing to modify' run protect allen/repo1 --vault agent-p1
@@ -188,7 +195,9 @@ check "  build-test present in posted JSON" grep -q '"context": *"build-test"' "
 check "  gitleaks still present too"       grep -q '"context": *"gitleaks"' "$STATE/ruleset-posted"
 
 echo "== task 4: verify =="
+export AGENT_NEW_CHECK_TRIES=2 AGENT_NEW_CHECK_SLEEP=0
 plan_ok(){ cat > "$STATE/exec-plan" <<'PLAN'
+api user|0|agent-allen
 pr checks|0|gitleaks	pass
 pr merge --squash --admin|1|GraphQL: Repository rule violations found (mergePullRequest)
 pr merge|1|X Pull request #1 is not mergeable: the base branch policy prohibits the merge.
@@ -200,6 +209,15 @@ newstate; plan_ok
 VOUT=$(run verify p1 2>&1); VRC=$?
 check "gate passes on the canned refusals"   test "$VRC" -eq 0
 check "  all four refusals asserted"         test "$(grep -c 'OK (refused as expected)' <<<"$VOUT")" -eq 4
+check "  worktree from fresh origin/main"    grep -q 'DOCKER: exec -w /workspace p1-agent-1 bash -lc git fetch -q origin && git worktree add -f -B verify-ruleset /tmp/agent-new-verify origin/main' "$DLOG"
+check "  later commands run in the worktree" grep -q 'DOCKER: exec -w /tmp/agent-new-verify p1-agent-1 bash -lc git push -f -u origin verify-ruleset' "$DLOG"
+check "  never switches the owner's checkout" sh -c "! grep -q 'switch main' '$DLOG'"
+check "  worktree removed on exit"           grep -q 'DOCKER: exec -w /workspace p1-agent-1 git worktree remove --force /tmp/agent-new-verify' "$DLOG"
+check "  checks not retried when they report" test "$(grep -c 'pr checks' "$DLOG")" -eq 1
+newstate; plan_ok; sed -i 's/^api user|0|agent-allen/api user|0|allen/' "$STATE/exec-plan"
+refuses "container identity is the owner -> die" 'allen.*agent-allen|agent-allen.*allen' run verify p1
+check "  nothing pushed" sh -c "! grep -q 'git push' '$DLOG'"
+newstate; plan_ok
 newstate; cat > "$STATE/exec-plan" <<'PLAN'
 pr checks|1|no checks reported on the latest commit
 pr merge --squash --admin|1|GraphQL: Repository rule violations found (mergePullRequest)
@@ -207,10 +225,12 @@ pr merge|1|X Pull request #1 is not mergeable: the base branch policy prohibits 
 pr review --approve|1|failed to create review: GraphQL: Review Can not approve your own pull request
 push origin HEAD:main|1|remote: error: GH013: Repository rule violations found for refs/heads/main.
 PLAN
+sed -i '1i api user|0|agent-allen' "$STATE/exec-plan"
 VOUT=$(run verify p1 2>&1); VRC=$?
 check "no checks reported -> warns UNTESTED, continues" test "$VRC" -eq 0
 check "  UNTESTED warning shown"             grep -qi 'UNTESTED' <<<"$VOUT"
 check "  still asserts four refusals"        test "$(grep -c 'OK (refused as expected)' <<<"$VOUT")" -eq 4
+check "  checks retried AGENT_NEW_CHECK_TRIES times" test "$(grep -c 'pr checks' "$DLOG")" -eq 2
 newstate; cat > "$STATE/exec-plan" <<'PLAN'
 pr checks|1|gitleaks fail 10s
 pr merge --squash --admin|1|GraphQL: Repository rule violations found (mergePullRequest)
@@ -218,7 +238,9 @@ pr merge|1|X Pull request #1 is not mergeable: the base branch policy prohibits 
 pr review --approve|1|failed to create review: GraphQL: Review Can not approve your own pull request
 push origin HEAD:main|1|remote: error: GH013: Repository rule violations found for refs/heads/main.
 PLAN
+sed -i '1i api user|0|agent-allen' "$STATE/exec-plan"
 refuses "red check -> die, not UNTESTED warning" 'not green' run verify p1
+check "  worktree removed on a failing run"  grep -q 'git worktree remove --force /tmp/agent-new-verify' "$DLOG"
 newstate; plan_ok
 sed -i 's|^push origin HEAD:main.1.remote.*|push origin HEAD:main\|0\|pushed!|' "$STATE/exec-plan"
 refuses "push-to-main success -> GATE NOT BINDING" 'GATE NOT BINDING' run verify p1
@@ -229,8 +251,17 @@ newstate
 refuses "container not running" 'not running' sh -c 'echo > /dev/null; HOME='"$H"' AGENT_CONTAINERS_CONFIG='"$CFGROOT"' PATH='"$T"'/bin:$PATH '"$AN"' verify nosuch'
 refuses "repo mode without --vault refused" 'needs --vault' run verify allen/repo9
 export TMPDIR="$T/tmpdirs"; mkdir -p "$TMPDIR"
-refuses "repo mode: aborts in empty clone" 'not a git repository|fatal' run verify allen/repo9 --vault agent-p1
+newstate; echo allen > "$STATE/mu-login"
+refuses "repo mode: token resolving to the owner -> die" 'allen.*agent-allen' run verify allen/repo9 --vault agent-p1
+check "  nothing cloned"                     sh -c "! grep -q '^GIT: clone' '$GITLOG'"
+newstate
+refuses "repo mode: permissive stubs -> GATE NOT BINDING" 'GATE NOT BINDING' run verify allen/repo9 --vault agent-p1
 check "  temp clone cleaned up by EXIT trap" test -z "$(ls -A "$TMPDIR")"
+check "  clone is plain https"               grep -q '^GIT: clone .*https://github.com/allen/repo9 ' "$GITLOG"
+check "  git isolated from owner config"     grep -q 'GITENV: global=/dev/null nosystem=1 count=3 ' "$GITLOG"
+check "  helper is literal, token via env"   grep -qF 'helper=!f(){ echo username=x-access-token; echo "password=$GH_TOKEN"; }; f' "$GITLOG"
+check "  commit identity is the machine user" grep -q 'name=agent-allen email=agent-allen@users.noreply.github.com' "$GITLOG"
+check "  token never in argv"                sh -c "! grep -q fake-op-secret '$GITLOG' '$GHLOG'"
 check "trap freezes tmp at set time (immediate expansion)" grep -q "trap \"rm -rf '" "$AN"
 unset TMPDIR
 

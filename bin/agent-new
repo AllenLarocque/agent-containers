@@ -308,10 +308,12 @@ ruleset_norm_expected(){
 }
 protect_ruleset(){ # $1 owner/repo
   local repo="$1" id have
-  local out rc=0
-  out="$(gh api "repos/$repo/rulesets" --jq '.[] | select(.name=="protect-main") | .id' 2>&1)" || rc=$?
-  [ "$rc" -eq 0 ] || die "could not list rulesets on $repo (needs admin; private repos on GitHub Free have no rulesets): $out
+  local out rc=0 errf; errf="$(mktemp)"
+  # stdout only is parsed (a stray stderr line must not become the id); stderr shown on failure
+  out="$(gh api "repos/$repo/rulesets" --jq '.[] | select(.name=="protect-main") | .id' 2>"$errf")" || rc=$?
+  [ "$rc" -eq 0 ] || die "could not list rulesets on $repo (needs admin; private repos on GitHub Free have no rulesets): $out$(cat "$errf"; rm -f "$errf")
 re-running resumes from here."
+  rm -f "$errf"
   id="$(head -n1 <<<"$out")"
   if [ -z "$id" ]; then
     say "creating ruleset protect-main on $repo (machine-user-and-rulesets.md step 4)"
@@ -359,32 +361,59 @@ expect_refusal(){ # $1 label, $2 reason ERE, $3 command string (runs via RUN_IN)
 
 cmd_verify(){
   VTARGET="$1"
+  local mu; mu="$(machine_user)"
   if [[ "$VTARGET" == */* ]]; then
     [ -n "$VAULT" ] || die "verify <owner>/<repo> needs --vault <op-vault> (the project vault holding github-agent)"
     # trap value frozen at set time: an EXIT trap outlives this function's locals,
     # so deferred '$tmp' would be unbound under set -u. || true: a failing cleanup
     # must not overwrite the script's real exit status.
     local tmp; tmp="$(mktemp -d)"; trap "rm -rf '$tmp' || true" EXIT
-    say "cloning $VTARGET as $(machine_user) (temp, removed after)"
-    local tok; tok="$(mu_token)"
-    GH_TOKEN="$tok" gh repo clone "$VTARGET" "$tmp/repo" >/dev/null
-    RUN_IN(){ (cd "$tmp/repo" && GH_TOKEN="$tok" bash -lc "$1"); }
+    local tok who; tok="$(mu_token)"
+    who="$(GH_TOKEN="$tok" gh api user --jq .login)" || die "the machine-user token from op://$VAULT/github-agent/token does not work"
+    [ "$who" = "$mu" ] || die "the token in op://$VAULT/github-agent/token is for '$who', not the machine user '$mu': refusing to verify as the wrong identity"
+    # git isolated from the owner's config and credentials; the helper is single-quoted so git's
+    # shell expands $GH_TOKEN at run time (the token lives in the environment only, never argv/disk)
+    vgit_env(){
+      export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 GH_TOKEN="$tok" \
+        GIT_CONFIG_COUNT=3 \
+        GIT_CONFIG_KEY_0=credential.helper \
+        GIT_CONFIG_VALUE_0='!f(){ echo username=x-access-token; echo "password=$GH_TOKEN"; }; f' \
+        GIT_CONFIG_KEY_1=user.name GIT_CONFIG_VALUE_1="$mu" \
+        GIT_CONFIG_KEY_2=user.email GIT_CONFIG_VALUE_2="$mu@users.noreply.github.com"
+    }
+    say "cloning $VTARGET as $mu (temp, removed after)"
+    (vgit_env; git clone -q "https://github.com/$VTARGET" "$tmp/repo") >/dev/null
+    RUN_IN(){ (cd "$tmp/repo" && vgit_env && bash -lc "$1"); }
+    RUN_IN 'git fetch -q origin && git checkout -q -B verify-ruleset origin/main'
   else
-    local c="${VTARGET}-agent-1"
+    local c="${VTARGET}-agent-1" wd=/workspace who
     docker ps --format '{{.Names}}' | grep -qx "$c" || die "container $c is not running (agent-up up $VTARGET first)"
-    RUN_IN(){ docker exec -w /workspace "$c" bash -lc "$1"; }
+    RUN_IN(){ docker exec -w "$wd" "$c" bash -lc "$1"; }
+    who="$(RUN_IN 'gh api user --jq .login')" || die "gh in $c is not logged in"
+    [ "$who" = "$mu" ] || die "gh in $c is '$who', not the machine user '$mu': refusing to verify as the wrong identity"
+    # a temporary worktree: the owner's /workspace checkout (branch, index, files) is never touched
+    trap "docker exec -w /workspace '$c' git worktree remove --force /tmp/agent-new-verify || true" EXIT
+    RUN_IN 'git fetch -q origin && git worktree add -f -B verify-ruleset /tmp/agent-new-verify origin/main' >/dev/null
+    wd=/tmp/agent-new-verify
   fi
   say "verifying the merge gate (machine-user-and-rulesets.md step 6; a throwaway PR as the machine user)"
-  RUN_IN 'git switch -c verify-ruleset 2>/dev/null || git switch verify-ruleset' >/dev/null
   RUN_IN 'git commit --allow-empty -m "chore: verify ruleset"' >/dev/null
-  RUN_IN 'git push -u origin verify-ruleset' >/dev/null
+  # -f: replaces a leftover from an earlier run; the branch starts at origin/main, so the later
+  # push to main is a fast-forward and a refusal can only be the ruleset
+  RUN_IN 'git push -f -u origin verify-ruleset' >/dev/null
   local pr_out; pr_out="$(RUN_IN 'gh pr create --fill' 2>&1)" \
     || grep -q 'already exists' <<<"$pr_out" || die "could not open the verification PR: $pr_out"
   say "waiting for required checks on the verification PR"
-  local checks crc=0; checks="$(RUN_IN 'gh pr checks --watch' 2>&1)" || crc=$?
+  # CI may not have registered yet right after pr create: retry only on "no checks reported"
+  local checks crc tries="${AGENT_NEW_CHECK_TRIES:-6}" n=1
+  while :; do
+    crc=0; checks="$(RUN_IN 'gh pr checks --watch' 2>&1)" || crc=$?
+    [ "$crc" -ne 0 ] && grep -qi 'no checks reported' <<<"$checks" && [ "$n" -lt "$tries" ] || break
+    n=$((n+1)); sleep "${AGENT_NEW_CHECK_SLEEP:-10}"
+  done
   if [ "$crc" -ne 0 ]; then
     if grep -qi 'no checks reported' <<<"$checks"; then
-      warn "no required check reported yet: the required-check rule stays UNTESTED (re-run verify once CI exists)"
+      warn "no required check reported after $n tries: the required-check rule stays UNTESTED (re-run verify once CI exists)"
     else
       die "required checks are not green on the verification PR — fix CI first, then re-run verify: $(tail -n5 <<<"$checks")"
     fi
@@ -394,7 +423,6 @@ cmd_verify(){
   expect_refusal "approve own PR"      'approve your own'                 'gh pr review --approve'
   expect_refusal "push straight to main" 'GH013|repository rule'         'git push origin HEAD:main'
   expect_refusal "admin-merge own PR"  'rule violations|not.*admin'       'gh pr merge --squash --admin'
-  [[ "$VTARGET" == */* ]] || RUN_IN 'git switch main' >/dev/null
   say "GATE VERIFIED on $VTARGET. Approve-and-merge or close the verification PR in the browser (only your approval counts)."
 }
 
