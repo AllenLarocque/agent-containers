@@ -50,7 +50,8 @@ project_stop_after(){ [ "${AGENT_NEW_STOP_AFTER:-}" = "$1" ] && { say "stopping 
 project_repo(){ # creates/clones $REPO into $DIR, branch main
   if [ -d "$DIR/.git" ]; then
     local org; org="$(git -C "$DIR" remote get-url origin 2>/dev/null || true)"
-    case "$org" in *github.com[:/]"$REPO"|*github.com[:/]"$REPO".git) skip "clone exists at $DIR" ;;
+    case "$org" in
+      https://github.com/"$REPO"|https://github.com/"$REPO".git|git@github.com:"$REPO"|git@github.com:"$REPO".git) skip "clone exists at $DIR" ;;
       *) die "$DIR exists but its origin ($org) is not $REPO: refusing to adopt it" ;;
     esac
   elif gh repo view "$REPO" >/dev/null 2>&1; then
@@ -110,7 +111,7 @@ project_vault(){
     tok=""
     say "scope check: the service account must see ONLY $VAULT"
     unset OP_SERVICE_ACCOUNT_TOKEN
-    local seen; seen="$(OP_SERVICE_ACCOUNT_TOKEN="$(op read "op://Personal/$sa/credential")" op vault list 2>/dev/null | tail -n +0 | grep -v '^NAME\|^ID' | awk 'NF {print $NF}' | sort -u)" || true
+    local seen; seen="$(OP_SERVICE_ACCOUNT_TOKEN="$(op read "op://Personal/$sa/credential")" op vault list 2>/dev/null | grep -v '^NAME\|^ID' | awk 'NF {print $NF}' | sort -u)" || true
     [ "$seen" = "$VAULT" ] || warn "scoped vault list was '$seen', expected ONLY '$VAULT' — check the service account's vault access by hand"
   fi
 }

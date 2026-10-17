@@ -252,6 +252,8 @@ check "  no second repo create"   sh -c "! grep -q 'repo create' '$GHLOG'"
 check "  no push on re-run"       sh -c "! grep -q '^GIT: push' '$GITLOG'"
 mkdir -p "$PROJHOME/Decoy" && git -C "$PROJHOME/Decoy" init -q && git -C "$PROJHOME/Decoy" remote add origin https://github.com/other/thing
 refuses "existing folder with wrong origin refused" 'refusing to adopt' run project Decoy --token-from agent-old < /dev/null
+mkdir -p "$PROJHOME/Decoy2" && git -C "$PROJHOME/Decoy2" init -q && git -C "$PROJHOME/Decoy2" remote add origin "https://notgithub.com/allen/Decoy2"
+refuses "lookalike host refused" 'refusing to adopt' run project Decoy2 --token-from agent-old < /dev/null
 unset AGENT_NEW_STOP_AFTER
 
 echo "== task 5b: vault scope exclusivity =="
