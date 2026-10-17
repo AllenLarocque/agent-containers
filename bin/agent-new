@@ -4,6 +4,7 @@
 # sandbox with a project's read-only token; agent-new runs AS THE OWNER (gh repo admin, op
 # session) and automates docs/runbooks/new-project.md + machine-user-and-rulesets.md §2-4, §6.
 set -euo pipefail
+unset OP_SERVICE_ACCOUNT_TOKEN # agent-new acts as the owner; the SA token is only ever set explicitly, per command
 
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 CFG_ROOT="${AGENT_CONTAINERS_CONFIG:-$HOME/.config/agent-containers}"
@@ -25,6 +26,14 @@ USAGE
   exit 2
 }
 conf_get(){ sed -n "s/^$2=//p" "$1" | tail -n 1; }
+ts_port(){ # $1 project.conf -> the Tailscale Serve HTTPS port (override or formula), validated 1-65535; as in agent-up
+  local v t; v="$(conf_get "$1" TAILSCALE_HTTPS_PORT)"
+  if [ -n "$v" ]; then [[ $v =~ ^[0-9]{1,9}$ ]] && v="$((10#$v))"
+  else t="$(conf_get "$1" T3_PORT)"; [[ $t =~ ^[0-9]{1,9}$ ]] && v="$((8443 + 10#$t - 3774))" || v=""; fi
+  [[ $v =~ ^[0-9]+$ ]] && [ "$v" -ge 1 ] && [ "$v" -le 65535 ] \
+    || die "TAILSCALE_HTTPS_PORT='$v' for $1: must be a port 1-65535"
+  printf '%s' "$v"
+}
 normalise(){ printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9_-]/-/g; s/^[^a-z0-9]*//'; }
 
 MACHINE_USER_FLAG="" VAULT="" IMAGE="" VISIBILITY=private RESEARCH=1 T3MODE=publish TOKEN_FROM=""
@@ -72,7 +81,7 @@ project_config(){
     [ -n "$digest" ] || die "no digest for $img in $DIGESTS"
     say "pinning $img@$digest"
     sed -i "s/REPLACE_WITH_DIGEST_FROM_digests.md/${digest#sha256:}/" "$compose"
-    grep -q "$digest" "$compose" || sed -i "s|@.*$|@$digest|" "$compose"
+    grep -q "$digest" "$compose" || sed -i "/^[[:space:]]*image:.*spades-/ s|@.*$|@$digest|" "$compose"
   else skip "digest already pinned"; fi
   set_conf RESEARCH "$RESEARCH"; set_conf T3_CONNECT "$T3MODE"
 }
@@ -137,7 +146,7 @@ find_tailscale(){
 project_tailscale(){
   local conf="$CFG_ROOT/$PROJ/project.conf" t3 port ts
   t3="$(conf_get "$conf" T3_PORT)"
-  port="$(conf_get "$conf" TAILSCALE_HTTPS_PORT)"; port="${port:-$((8443 + t3 - 3774))}"
+  port="$(ts_port "$conf")"
   local cmd="tailscale serve --bg --https=$port $t3"
   if ts="$(find_tailscale)"; then
     if "$ts" serve status | grep -qE "127\.0\.0\.1:$t3([^0-9]|\$)"; then skip "tailscale serve mapping for $t3"
@@ -160,7 +169,7 @@ project_up(){
 }
 project_checklist(){
   local conf="$CFG_ROOT/$PROJ/project.conf" t3 port host
-  t3="$(conf_get "$conf" T3_PORT)"; port="$(conf_get "$conf" TAILSCALE_HTTPS_PORT)"; port="${port:-$((8443 + t3 - 3774))}"
+  t3="$(conf_get "$conf" T3_PORT)"; port="$(ts_port "$conf")"
   host="$(conf_get "$CFG_ROOT/agent-up.conf" TAILSCALE_HOST 2>/dev/null || true)"
   cat <<EOF
 agent-new: DONE. Interactive logins left (once each, inside the container):
@@ -182,6 +191,7 @@ $CFG_ROOT/$PROJ/allowlist as the project needs them, then: agent-up up $PROJ
 EOF
 }
 cmd_project(){
+  [ -z "$VAULT" ] || die "project always uses vault agent-<project> (project.env from agent-up init hard-codes it); drop --vault"
   OWNER="$(preflight_owner)"
   command -v op >/dev/null || die "op (1Password CLI) not found"
   command -v docker >/dev/null || die "docker not found"
@@ -242,7 +252,7 @@ NORM_JQ='[.enforcement,
  ((.rules[] | select(.type=="pull_request") | .parameters.allowed_merge_methods | sort | join(",")) // "")
 ] | join("|")'
 
-checks_sorted(){ printf '%s\n' "${REQUIRE_CHECKS[@]}" | sort -u; }
+checks_sorted(){ printf '%s\n' "${REQUIRE_CHECKS[@]}" | LC_ALL=C sort -u; }
 ruleset_json(){
   local checks="" c
   while IFS= read -r c; do checks+="{\"context\": \"$c\"},"; done < <(checks_sorted)

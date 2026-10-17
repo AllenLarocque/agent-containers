@@ -2,6 +2,8 @@
 # Tests for bin/agent-new (docs/specs/2026-10-15-agent-new-design.md). No real gh/op/git/docker:
 # all are stubs on PATH that log how they were called and replay canned responses from $STATE.
 set -uo pipefail
+# hermetic: the stubs assume the caller is not already authenticated as anyone
+unset GH_TOKEN GITHUB_TOKEN OP_SERVICE_ACCOUNT_TOKEN
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 AN="$ROOT/bin/agent-new"
 fail=0
@@ -50,7 +52,7 @@ STUB
 # ---- stub op: logs; grows state (vault/service-account/item) for project steps
 cat > "$T/bin/op" <<'STUB'
 #!/usr/bin/env bash
-echo "OP: $*" >> "$OPLOG"
+echo "OP${OP_SERVICE_ACCOUNT_TOKEN:+(sa)}: $*" >> "$OPLOG"
 case "$1 ${2:-}" in
   "signin ")            echo ":" ;;
   "vault get")          [ -f "$STATE/vault" ] ;;
@@ -296,5 +298,52 @@ printf 'https://host:8447 (tailnet only)\n|-- / proxy http://127.0.0.1:3778\n' >
 check "resume after tailscale failure"  run project NewProj --token-from agent-old < /dev/null
 check "  earlier steps all SKIPPED (no push)" sh -c "! grep -q '^GIT: push' '$GITLOG'"
 check "  later steps ran (up called)"   grep -q '^AU(tok): up newproj' "$AULOG"
+
+echo "== task 7: hardening =="
+export AGENT_NEW_STOP_AFTER=token
+newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
+OP_SERVICE_ACCOUNT_TOKEN=leftover run project InhTok --token-from agent-old < /dev/null >/dev/null 2>&1
+check "inherited SA token: no signin as the service account" sh -c "! grep -q '^OP(sa): signin' '$OPLOG'"
+check "  no vault create as the service account"            sh -c "! grep -q '^OP(sa): vault create' '$OPLOG'"
+check "  owner session did create the vault"                grep -q '^OP: vault create' "$OPLOG"
+unset AGENT_NEW_STOP_AFTER
+rm -rf "$PROJHOME/InhTok" "$CFGROOT/inhtok"
+
+newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
+LIVE_NORM='active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:true|R-CMD-check+gitleaks|refs:~DEFAULT_BRANCH/|strict:false|merge,rebase,squash'
+touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"; echo 7 > "$STATE/ruleset-id"; echo "$LIVE_NORM" > "$STATE/ruleset-norm"
+check "--require R-CMD-check matches C-sorted norm (default locale)" run protect allen/repo1 --vault agent-p1 --require R-CMD-check
+check "  and under en_US.utf8" env LC_ALL=en_US.utf8 HOME="$H" AGENT_CONTAINERS_CONFIG="$CFGROOT" PATH="$T/bin:$PATH" "$AN" protect allen/repo1 --vault agent-p1 --require R-CMD-check
+check "  nothing POSTed" test ! -f "$STATE/ruleset-posted"
+
+newstate
+refuses "project --vault refused" 'project always uses vault agent-<project>' run project NoVault --vault foo < /dev/null
+
+fullstate(){ newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
+  touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
+  printf 'https://host:8447 (tailnet only)\n|-- / proxy http://127.0.0.1:3778\n' > "$STATE/ts-status"; plan_ok; }
+rm -rf "$PROJHOME/NewProj" "$CFGROOT/newproj"
+fullstate
+run project NewProj --token-from agent-old < /dev/null >/dev/null 2>&1
+sed -i 's/^T3_PORT=.*/T3_PORT=03778/' "$CFGROOT/newproj/project.conf"; : > "$TSLOG"
+printf 'wrong\n' > "$STATE/ts-status"
+OUT=$(run project NewProj --token-from agent-old < /dev/null 2>&1) || true
+check "T3_PORT=03778 (leading zero) gives port 8447" grep -q -- '--https=8447' "$TSLOG"
+sed -i 's/^T3_PORT=.*/T3_PORT=3778/' "$CFGROOT/newproj/project.conf"
+printf 'TAILSCALE_HTTPS_PORT=abc\n' >> "$CFGROOT/newproj/project.conf"
+refuses "non-numeric TAILSCALE_HTTPS_PORT dies" 'must be a port 1-65535' run project NewProj --token-from agent-old < /dev/null
+sed -i 's/^TAILSCALE_HTTPS_PORT=.*/TAILSCALE_HTTPS_PORT=70000/' "$CFGROOT/newproj/project.conf"
+refuses "out-of-range TAILSCALE_HTTPS_PORT dies" 'must be a port 1-65535' run project NewProj --token-from agent-old < /dev/null
+rm -rf "$PROJHOME/NewProj" "$CFGROOT/newproj"
+
+newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
+export AGENT_NEW_STOP_AFTER=token
+mkdir -p "$CFGROOT/fbproj"; printf 'PROJECT=fbproj\nT3_PORT=3779\n' > "$CFGROOT/fbproj/project.conf"
+printf '# maintainer: me@example.com\nimage: ghcr.io/x/spades-gis@REPLACE_WITH_DIGEST\n' > "$CFGROOT/fbproj/compose.yaml"
+run project FbProj --token-from agent-old < /dev/null >/dev/null 2>&1
+check "digest fallback rewrites the image line"      grep -qx 'image: ghcr.io/x/spades-gis@sha256:aaa111' "$CFGROOT/fbproj/compose.yaml"
+check "  leaves an unrelated @ line untouched"       grep -qx '# maintainer: me@example.com' "$CFGROOT/fbproj/compose.yaml"
+unset AGENT_NEW_STOP_AFTER
+rm -rf "$PROJHOME/FbProj" "$CFGROOT/fbproj"
 
 [ "$fail" -eq 0 ] && echo "AGENT-NEW: ALL PASSED" || { echo "AGENT-NEW: FAILURES"; exit 1; }
