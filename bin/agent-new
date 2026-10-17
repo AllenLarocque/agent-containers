@@ -7,6 +7,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 CFG_ROOT="${AGENT_CONTAINERS_CONFIG:-$HOME/.config/agent-containers}"
+DIGESTS="${AGENT_NEW_DIGESTS:-$HERE/../digests.md}"
 
 say(){ printf 'agent-new: %s\n' "$*"; }
 skip(){ printf 'agent-new: SKIP (done): %s\n' "$*"; }
@@ -44,7 +45,111 @@ preflight_owner(){ # prints the owner login; dies if gh is absent/anonymous/the 
   printf '%s' "$who"
 }
 
-cmd_project(){ die "project: not implemented yet"; }
+project_stop_after(){ [ "${AGENT_NEW_STOP_AFTER:-}" = "$1" ] && { say "stopping after '$1' (test seam)"; exit 0; } || true; }
+
+project_repo(){ # creates/clones $REPO into $DIR, branch main
+  if [ -d "$DIR/.git" ]; then skip "clone exists at $DIR"
+  elif gh repo view "$REPO" >/dev/null 2>&1; then
+    say "repo $REPO exists: cloning to $DIR"; gh repo clone "$REPO" "$DIR" >/dev/null
+  else
+    say "creating $REPO ($VISIBILITY) and cloning to $DIR"
+    (cd "$(dirname "$DIR")" && gh repo create "$REPO" "--$VISIBILITY" --clone >/dev/null)
+  fi
+  (cd "$DIR" && [ "$(git branch --show-current)" = main ] || git branch -m "$(git branch --show-current)" main)
+}
+project_config(){
+  if [ -d "$CFG_ROOT/$PROJ" ]; then skip "config exists at $CFG_ROOT/$PROJ"
+  else say "agent-up init $DIR"; agent-up init "$DIR" ${IMAGE:+--image "$IMAGE"}; fi
+  local img digest compose="$CFG_ROOT/$PROJ/compose.yaml"
+  img="$(sed -n 's/^IMAGE=//p' "$CFG_ROOT/$PROJ/project.conf" | tail -n1)"; img="spades-${img:-gis}"
+  if grep -q REPLACE_WITH_DIGEST "$compose"; then
+    digest="$(awk -F'|' -v i=" $img " '$2==i {gsub(/[` ]/,"",$4); d=$4} END{print d}' "$DIGESTS")"
+    [ -n "$digest" ] || die "no digest for $img in $DIGESTS"
+    say "pinning $img@$digest"
+    sed -i "s/REPLACE_WITH_DIGEST_FROM_digests.md/${digest#sha256:}/" "$compose"
+    grep -q "$digest" "$compose" || sed -i "s|@.*$|@$digest|" "$compose"
+  else skip "digest already pinned"; fi
+  set_conf RESEARCH "$RESEARCH"; set_conf T3_CONNECT "$T3MODE"
+}
+set_conf(){ # edit-in-place, never append duplicates
+  local f="$CFG_ROOT/$PROJ/project.conf"
+  if grep -q "^$1=" "$f"; then
+    [ "$(conf_get "$f" "$1")" = "$2" ] && { skip "$1=$2"; return; }
+    sed -i "s/^$1=.*/$1=$2/" "$f"
+  else printf '%s=%s\n' "$1" "$2" >> "$f"; fi
+  say "project.conf: $1=$2"
+}
+project_repo_files(){
+  if grep -q '@OWNER' "$DIR/.github/CODEOWNERS" 2>/dev/null; then
+    say "CODEOWNERS: @OWNER -> @$OWNER"; sed -i "s/@OWNER/@$OWNER/" "$DIR/.github/CODEOWNERS"
+  fi
+  (cd "$DIR"
+   git add .github .gitignore 2>/dev/null || true
+   if git diff --cached --quiet 2>/dev/null; then skip "repo files committed"
+   else
+     say "committing + pushing .github/ and .gitignore (BEFORE the ruleset: gives gitleaks its first run)"
+     git commit -q -m "chore: CODEOWNERS, gitleaks workflow, gitignore (agent-new)"
+     git push -u origin main
+   fi)
+}
+project_vault(){
+  say "1Password (interactive; 1password-project-vault.md). Signing in:"
+  eval "$(op signin)"
+  if op vault get "$VAULT" >/dev/null 2>&1; then skip "vault $VAULT exists"
+  else say "creating vault $VAULT"; op vault create "$VAULT" >/dev/null; fi
+  local sa="$VAULT service account"
+  if op item get "$sa" --vault Personal >/dev/null 2>&1; then skip "service account saved in Personal"
+  else
+    say "creating 90-day read-only service account for $VAULT"
+    local tok; tok="$(op service-account create "$VAULT" --expires-in 90d --vault "$VAULT:read_items" --raw)"
+    op item create --vault Personal --category "API Credential" --title "$sa" "credential[concealed]=$tok" >/dev/null
+    tok=""
+    say "scope check: the service account must see ONLY $VAULT"
+    unset OP_SERVICE_ACCOUNT_TOKEN
+    local seen; seen="$(OP_SERVICE_ACCOUNT_TOKEN="$(op read "op://Personal/$sa/credential")" op vault list 2>&1)" || true
+    grep -q "$VAULT" <<<"$seen" || warn "scoped vault list did not show $VAULT — check the service account by hand"
+  fi
+}
+project_token(){
+  if op item get github-agent --vault "$VAULT" >/dev/null 2>&1; then skip "github-agent item in $VAULT"; return; fi
+  local ghtok
+  if [ -n "$TOKEN_FROM" ]; then
+    say "copying the machine user's PAT from $TOKEN_FROM (runbook: one classic PAT covers invited repos)"
+    unset OP_SERVICE_ACCOUNT_TOKEN
+    ghtok="$(op read "op://$TOKEN_FROM/github-agent/token")"
+  else
+    say "paste the machine user's PAT (machine-user-and-rulesets.md step 3), then ENTER:"
+    read -rs ghtok; echo
+  fi
+  op item create --vault "$VAULT" --category "API Credential" --title github-agent "token[concealed]=$ghtok" >/dev/null
+  ghtok=""
+}
+project_tailscale(){ die "not implemented"; }
+project_up(){ die "not implemented"; }
+project_checklist(){ die "not implemented"; }
+cmd_project(){
+  OWNER="$(preflight_owner)"
+  command -v op >/dev/null || die "op (1Password CLI) not found"
+  command -v docker >/dev/null || die "docker not found"
+  command -v agent-up >/dev/null || die "agent-up not on PATH (symlink $HERE/agent-up)"
+  local folder="$1"
+  PROJ="$(normalise "$(basename "$folder")")"
+  DIR="$HOME/GitHub/$(basename "$folder")"
+  REPO="$OWNER/$(basename "$folder")"
+  VAULT="${VAULT:-agent-$PROJ}"
+  say "project $PROJ: repo $REPO, folder $DIR, vault $VAULT, machine user $(machine_user)"
+  project_repo
+  project_config
+  project_repo_files
+  project_vault
+  project_token
+  project_stop_after token
+  cmd_protect "$REPO"
+  project_tailscale
+  project_up
+  cmd_verify "$PROJ"
+  project_checklist
+}
 
 mu_token(){ # machine-user PAT from the project vault; owner op session; ONE call's worth
   unset OP_SERVICE_ACCOUNT_TOKEN

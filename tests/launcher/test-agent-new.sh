@@ -37,15 +37,29 @@ case "$*" in
   "api repos/"*"/contents/.github/CODEOWNERS") [ -f "$STATE/has-codeowners" ] ;;
   "api repos/"*"/contents/.github/workflows/gitleaks.yml") [ -f "$STATE/has-gitleaks" ] ;;
   "api repos/"*"/actions/permissions/workflow --jq .can_approve_pull_request_reviews") cat "$STATE/actions-approve" 2>/dev/null || echo false ;;
+  "repo view "*) [ -f "$STATE/repo-exists" ] ;;
+  "repo create "*)
+    touch "$STATE/repo-exists"; mkdir -p "$STATE/created"
+    d="$(basename "$3")"
+    mkdir -p "$d" && (cd "$d" && "$REALGIT" init -q -b main && "$REALGIT" commit -q --allow-empty -m seed && "$REALGIT" remote add origin "https://github.com/x/y")
+    ;;
   "repo clone "*) mkdir -p "${*: -1}" ;;
   *) exit 0 ;;
 esac
 STUB
-# ---- stub op: logs; `op read` returns a fake secret
+# ---- stub op: logs; grows state (vault/service-account/item) for project steps
 cat > "$T/bin/op" <<'STUB'
 #!/usr/bin/env bash
 echo "OP: $*" >> "$OPLOG"
-case "$1" in read) echo fake-op-secret ;; signin) echo ":" ;; esac
+case "$1 ${2:-}" in
+  "signin ")            echo ":" ;;
+  "vault get")          [ -f "$STATE/vault" ] ;;
+  "vault create")       touch "$STATE/vault" ;;
+  "service-account create") echo fake-sa-token ;;
+  "item get")           [ -f "$STATE/item-$3" ] ;;
+  "item create")        for a in "$@"; do case "$a" in --title) want=next ;; *) [ "${want:-}" = next ] && { touch "$STATE/item-$a"; want=; } ;; esac; done; true ;;
+  "read "*)             echo fake-op-secret ;;
+esac
 STUB
 chmod +x "$T/bin/gh" "$T/bin/op"
 # ---- stub docker: logs; exec plan driven by $STATE/exec-plan
@@ -61,6 +75,36 @@ done < "$STATE/exec-plan"
 exit 0
 STUB
 chmod +x "$T/bin/docker"
+# ---- stub git: intercepts clone/push (log + simulate); everything else -> real git
+REALGIT="$(command -v git)"; export REALGIT
+# the sandboxed $H has no git identity configured; give the stub's seed commits one
+export GIT_AUTHOR_NAME=agent-new-test GIT_AUTHOR_EMAIL=agent-new-test@example.com
+export GIT_COMMITTER_NAME=agent-new-test GIT_COMMITTER_EMAIL=agent-new-test@example.com
+cat > "$T/bin/git" <<'STUB'
+#!/usr/bin/env bash
+echo "GIT: $*" >> "$GITLOG"
+case "$1" in
+  clone) mkdir -p "${@: -1}"; cd "${@: -1}" && "$REALGIT" init -q -b main && "$REALGIT" commit -q --allow-empty -m seed && "$REALGIT" remote add origin "https://github.com/x/y" ;;
+  push)  exit 0 ;;
+  *)     exec "$REALGIT" "$@" ;;
+esac
+STUB
+# ---- stub agent-up: logs; mimics `init` by materializing the config dir from fixtures
+cat > "$T/bin/agent-up" <<'STUB'
+#!/usr/bin/env bash
+echo "AU${OP_SERVICE_ACCOUNT_TOKEN:+(tok)}: $*" >> "$AULOG"
+if [ "$1" = init ]; then
+  p="$(basename "$2" | tr 'A-Z' 'a-z')"
+  mkdir -p "$AGENT_CONTAINERS_CONFIG/$p" "$2/.github/workflows"
+  printf 'image: ghcr.io/x/spades-gis@sha256:REPLACE_WITH_DIGEST_FROM_digests.md\n' > "$AGENT_CONTAINERS_CONFIG/$p/compose.yaml"
+  printf 'PROJECT=%s\nT3_PORT=3778\nT3_CONNECT=0\nRESEARCH=0\n' "$p" > "$AGENT_CONTAINERS_CONFIG/$p/project.conf"
+  printf '* @OWNER\n' > "$2/.github/CODEOWNERS"
+  touch "$2/.github/workflows/gitleaks.yml" "$2/.gitignore"
+fi
+STUB
+chmod +x "$T/bin/git" "$T/bin/agent-up"
+mkdir -p "$T/repo-root"
+printf '| image | tag | digest |\n|---|---|---|\n| spades-gis | 2026.10.12 | `sha256:aaa111` |\n| spades-bio | 2026.10.12 | `sha256:bbb222` |\n' > "$T/repo-root/digests.md"
 run(){ HOME="$H" AGENT_CONTAINERS_CONFIG="$CFGROOT" PATH="$T/bin:$PATH" "$AN" "$@"; }
 
 echo "== task 1: CLI and preflight =="
@@ -142,5 +186,31 @@ refuses "repo mode: aborts in empty clone" 'not a git repository|fatal' run veri
 check "  temp clone cleaned up by EXIT trap" test -z "$(ls -A "$TMPDIR")"
 check "trap freezes tmp at set time (immediate expansion)" grep -q "trap \"rm -rf '" "$AN"
 unset TMPDIR
+
+echo "== task 5: project steps 1-6 =="
+newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
+export AGENT_NEW_DIGESTS="$T/repo-root/digests.md"
+export AGENT_NEW_STOP_AFTER=token
+PROJHOME="$H/GitHub"; mkdir -p "$PROJHOME"
+check "fresh project run (stops after token)" run project NewProj --token-from agent-old < /dev/null
+check "  repo created"            grep -q '^GH: repo create allen/NewProj --private --clone' "$GHLOG"
+check "  agent-up init called"    grep -q '^AU: init' "$AULOG"
+check "  digest injected"         grep -q 'sha256:aaa111' "$CFGROOT/newproj/compose.yaml"
+check "  RESEARCH=1 single line"  test "$(grep -c '^RESEARCH=' "$CFGROOT/newproj/project.conf")" = 1
+check "  RESEARCH value 1"        grep -qx 'RESEARCH=1' "$CFGROOT/newproj/project.conf"
+check "  T3_CONNECT=publish"      grep -qx 'T3_CONNECT=publish' "$CFGROOT/newproj/project.conf"
+check "  CODEOWNERS replaced"     grep -qx '\* @allen' "$PROJHOME/NewProj/.github/CODEOWNERS"
+check "  pushed main"             grep -q '^GIT: push -u origin main' "$GITLOG"
+check "  vault created"           test -f "$STATE/vault"
+check "  sa item in Personal"     test -f "$STATE/item-agent-newproj service account"
+check "  github-agent item"       test -f "$STATE/item-github-agent"
+check "  token copied from --token-from vault" grep -q '^OP: read op://agent-old/github-agent/token' "$OPLOG"
+: > "$GHLOG"; : > "$GITLOG"; : > "$AULOG"
+OUT=$(run project NewProj --token-from agent-old < /dev/null 2>&1); RC=$?
+check "re-run exits 0"            test "$RC" -eq 0
+check "re-run: >=4 SKIP lines"    test "$(grep -c 'SKIP (done)' <<<"$OUT")" -ge 4
+check "  no second repo create"   sh -c "! grep -q 'repo create' '$GHLOG'"
+check "  no push on re-run"       sh -c "! grep -q '^GIT: push' '$GITLOG'"
+unset AGENT_NEW_STOP_AFTER
 
 [ "$fail" -eq 0 ] && echo "AGENT-NEW: ALL PASSED" || { echo "AGENT-NEW: FAILURES"; exit 1; }
