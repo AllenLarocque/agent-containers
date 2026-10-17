@@ -13,7 +13,7 @@ permissions).
 `<project>` is the project folder name, lowercased to `[a-z0-9_-]`. The container is
 `<project>-agent-1`.
 
-**Automated:** `agent-new project <folder>` performs steps 1–2 and 4–8 below and the gate verification, pausing for the 1Password sign-in and printing the interactive-login checklist. The steps below remain the reference (and the fallback when it can't).
+**Automated:** `agent-new project <folder>` performs steps 1–2, 4, 7 and 8 below and runs the 1Password sequence of step 3 with you (it pauses for `op signin`). Steps 5 (the project's allowlist) and 6 (the `spades.ai` clone) stay yours — the script only reminds you at the end, and `agent-up up` refuses to run without the clone. The steps below remain the reference (and the fallback when the script can't).
 
 ## Steps
 

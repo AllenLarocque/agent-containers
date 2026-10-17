@@ -461,7 +461,7 @@ jobs:
           TEMPLATE_IMAGE=spades-base:ci bash tests/launcher/test-agent-up.sh 2>&1 | tee /tmp/launcher-full.log
           # The FTP behavioural checks skip without nf_conntrack_ftp; on the runner it is loaded above.
           if grep -q '^SKIP: FTP behavioural checks' /tmp/launcher-full.log; then echo "::error::launcher FTP behavioural checks were skipped"; exit 1; fi
-      - name: draft — agent-new tests (stubs only)
+      - name: agent-new tests (stubs only)
         if: steps.mode.outputs.mode == 'full'
         run: bash tests/launcher/test-agent-new.sh
       - name: Acceptance (setupProject behind firewall, plain Rscript)
