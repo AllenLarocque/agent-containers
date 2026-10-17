@@ -158,7 +158,7 @@ expect_refusal(){ # $1 label, $2 reason ERE, $3 command string (runs via RUN_IN)
 cmd_verify(){
   VTARGET="$1"
   if [[ "$VTARGET" == */* ]]; then
-    local tmp; tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+    local tmp; tmp="$(mktemp -d)"; trap "rm -rf '$tmp'" EXIT
     say "cloning $VTARGET as $(machine_user) (temp, removed after)"
     local tok; tok="$(mu_token)"
     GH_TOKEN="$tok" gh repo clone "$VTARGET" "$tmp/repo" >/dev/null

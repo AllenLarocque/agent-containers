@@ -37,6 +37,7 @@ case "$*" in
   "api repos/"*"/contents/.github/CODEOWNERS") [ -f "$STATE/has-codeowners" ] ;;
   "api repos/"*"/contents/.github/workflows/gitleaks.yml") [ -f "$STATE/has-gitleaks" ] ;;
   "api repos/"*"/actions/permissions/workflow --jq .can_approve_pull_request_reviews") cat "$STATE/actions-approve" 2>/dev/null || echo false ;;
+  "repo clone "*) mkdir -p "${*: -1}" ;;
   *) exit 0 ;;
 esac
 STUB
@@ -136,5 +137,9 @@ sed -i 's|GH013[^|]*|! [rejected] main -> main (non-fast-forward)|' "$STATE/exec
 refuses "wrong refusal reason -> GATE NOT BINDING" 'GATE NOT BINDING' run verify p1
 newstate
 refuses "container not running" 'not running' sh -c 'echo > /dev/null; HOME='"$H"' AGENT_CONTAINERS_CONFIG='"$CFGROOT"' PATH='"$T"'/bin:$PATH '"$AN"' verify nosuch'
+export TMPDIR="$T/tmpdirs"; mkdir -p "$TMPDIR"
+refuses "repo mode: aborts in empty clone" '.' run verify allen/repo9 --vault agent-p1
+check "  temp clone cleaned up by EXIT trap" test -z "$(ls -A "$TMPDIR")"
+unset TMPDIR
 
 [ "$fail" -eq 0 ] && echo "AGENT-NEW: ALL PASSED" || { echo "AGENT-NEW: FAILURES"; exit 1; }
