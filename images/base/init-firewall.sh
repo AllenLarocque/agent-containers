@@ -14,7 +14,8 @@
 #   2. While building, only what setup needs is allowed: loopback, ESTABLISHED/RELATED, DNS to the
 #      upstream for the dnsmasq uid ONLY, and (temporarily) HTTPS to api.github.com's resolved IPs
 #      for the meta fetch. The temporary rules are removed after the fetch, and by an EXIT trap on
-#      any failure.
+#      any failure. When the host mounts /etc/firewall/github-meta.json (CI only), there is no fetch
+#      and no temporary rule: the ranges come from that file, checked exactly like fetched ones.
 #   3. Therefore ANY failure under set -e leaves the container closed. The final rules only ADD the
 #      T3 INPUT accept (gateway only), the RStudio INPUT accept (gateway only, only when the owner
 #      enabled it), the ipset ACCEPT, the T3 Connect tunnel ACCEPTs (only when the owner enabled it),
@@ -263,6 +264,22 @@ else
   echo "FTP: off"
 fi
 
+# GitHub meta supplied by the host (CI only, so dozens of test containers do not each spend the
+# unauthenticated api.github.com rate limit). Like the switches above it can only be a host mount:
+# /etc/firewall is root-owned. Production never mounts it, and then the ranges are fetched live
+# below. Its ranges pass exactly the same checks as fetched ones; anything malformed aborts here.
+GH_META_FILE=/etc/firewall/github-meta.json
+GH_META_FROM_FILE=0
+if [ -e "$GH_META_FILE" ] || [ -L "$GH_META_FILE" ]; then
+  [ -f "$GH_META_FILE" ] && [ ! -L "$GH_META_FILE" ] || { echo "ERROR: $GH_META_FILE must be a regular file"; exit 1; }
+  gh_ranges=$(cat "$GH_META_FILE")
+  if ! echo "$gh_ranges" | jq -e '.web and .api and .git' >/dev/null 2>&1; then
+    echo "ERROR: $GH_META_FILE is not GitHub meta JSON with web, api and git ranges"; exit 1
+  fi
+  GH_META_FROM_FILE=1
+  echo "GitHub meta: from $GH_META_FILE (supplied by the host; not fetched)"
+fi
+
 # The ORIGINAL upstream resolver. First run: /etc/resolv.conf (in Docker: 127.0.0.11 on user-defined
 # networks, the host's resolver on the default bridge). Re-run: resolv.conf already points at our own
 # dnsmasq, so use the value persisted on the first run.
@@ -409,17 +426,19 @@ iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -d "$UPSTREAM_DNS" -p udp --dport 53 -m owner --uid-owner "$DNSMASQ_UID" -j ACCEPT
 iptables -A OUTPUT -d "$UPSTREAM_DNS" -p tcp --dport 53 -m owner --uid-owner "$DNSMASQ_UID" -j ACCEPT
 
-# Temporary: HTTPS to api.github.com's current IPv4s so the meta fetch can run under default-deny.
-# Resolved with the dnsmasq uid (the only uid with upstream DNS), straight at the original resolver.
-mapfile -t SETUP_GH_IPS < <(setpriv --reuid="$DNSMASQ_UID" --regid="$DNSMASQ_GID" --clear-groups \
-  dig -r +short +time=3 +tries=2 A api.github.com @"$UPSTREAM_DNS" 2>/dev/null | grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' | sort -u || true)
-if [ "${#SETUP_GH_IPS[@]}" -eq 0 ]; then
-  echo "ERROR: could not resolve api.github.com (firewall left closed)"; exit 1
+if [ "$GH_META_FROM_FILE" = 0 ]; then
+  # Temporary: HTTPS to api.github.com's current IPv4s so the meta fetch can run under default-deny.
+  # Resolved with the dnsmasq uid (the only uid with upstream DNS), straight at the original resolver.
+  mapfile -t SETUP_GH_IPS < <(setpriv --reuid="$DNSMASQ_UID" --regid="$DNSMASQ_GID" --clear-groups \
+    dig -r +short +time=3 +tries=2 A api.github.com @"$UPSTREAM_DNS" 2>/dev/null | grep -E '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' | sort -u || true)
+  if [ "${#SETUP_GH_IPS[@]}" -eq 0 ]; then
+    echo "ERROR: could not resolve api.github.com (firewall left closed)"; exit 1
+  fi
+  for ip in "${SETUP_GH_IPS[@]}"; do
+    iptables -A OUTPUT -p tcp -d "$ip" --dport 443 -j ACCEPT
+  done
+  echo "Temporary setup rules: HTTPS to api.github.com at $(printf '%s ' "${SETUP_GH_IPS[@]}")"
 fi
-for ip in "${SETUP_GH_IPS[@]}"; do
-  iptables -A OUTPUT -p tcp -d "$ip" --dport 443 -j ACCEPT
-done
-echo "Temporary setup rules: HTTPS to api.github.com at $(printf '%s ' "${SETUP_GH_IPS[@]}")"
 
 ipset create allowed-domains hash:net
 if [ "$T3_CONNECT" = 1 ]; then
@@ -429,15 +448,30 @@ if [ "$FTP_ON" = 1 ]; then
   ipset create ftp-hosts hash:net   # the owner's FTP hosts' addresses ONLY (filled by dnsmasq; tcp 21 only)
 fi
 
-echo "Fetching GitHub IP ranges..."
-# --resolve pins curl to exactly the IPs allowed above.
-GH_RESOLVE="api.github.com:443:$(IFS=,; echo "${SETUP_GH_IPS[*]}")"
-gh_ranges=$(curl -q -sS --connect-timeout 10 --max-time 30 --resolve "$GH_RESOLVE" https://api.github.com/meta)
-if [ -z "$gh_ranges" ]; then
-  echo "ERROR: Failed to fetch GitHub IP ranges"; exit 1
-fi
-if ! echo "$gh_ranges" | jq -e '.web and .api and .git' >/dev/null; then
-  echo "ERROR: GitHub API response missing required fields"; exit 1
+if [ "$GH_META_FROM_FILE" = 0 ]; then
+  echo "Fetching GitHub IP ranges..."
+  # --resolve pins curl to exactly the IPs allowed above. The status code and the headers are kept,
+  # so a refusal (e.g. the unauthenticated rate limit: HTTP 403/429) is reported as what it is.
+  GH_RESOLVE="api.github.com:443:$(IFS=,; echo "${SETUP_GH_IPS[*]}")"
+  gh_hdrs=$(mktemp)
+  gh_out=$(curl -q -sS --connect-timeout 10 --max-time 30 --resolve "$GH_RESOLVE" -D "$gh_hdrs" \
+    -w '\n%{http_code}' https://api.github.com/meta) || gh_out=$'\n000'
+  gh_code=${gh_out##*$'\n'}; gh_ranges=${gh_out%$'\n'*}
+  gh_limit=$(awk -F': *' 'tolower($1)=="x-ratelimit-remaining"{gsub(/[^0-9]/,"",$2); print $2}' "$gh_hdrs")
+  gh_reset=$(awk -F': *' 'tolower($1)=="x-ratelimit-reset"{gsub(/[^0-9]/,"",$2); print $2}' "$gh_hdrs")
+  rm -f "$gh_hdrs"
+  if [ "$gh_code" = 000 ]; then
+    echo "ERROR: Failed to fetch GitHub IP ranges (no HTTP answer from api.github.com)"; exit 1
+  fi
+  if [ "$gh_code" != 200 ]; then
+    # GitHub's own message, as plain printable text, truncated: it is only logged.
+    gh_msg=$(echo "$gh_ranges" | jq -r '.message? // empty' 2>/dev/null | head -c 200 | tr -cd '[:print:]' || true)
+    echo "ERROR: api.github.com/meta answered HTTP $gh_code${gh_msg:+: $gh_msg}${gh_limit:+ (rate limit remaining: $gh_limit${gh_reset:+, resets $(date -u -d "@$gh_reset" +%H:%M:%SZ 2>/dev/null)})}"
+    exit 1
+  fi
+  if ! echo "$gh_ranges" | jq -e '.web and .api and .git' >/dev/null; then
+    echo "ERROR: GitHub API response missing required fields"; exit 1
+  fi
 fi
 
 echo "Processing GitHub IPs..."
