@@ -39,8 +39,10 @@ Invariants:
 - `agent-new` never pushes to `main` after the ruleset exists, never merges, never approves.
 - It never modifies an existing ruleset ("never weaken", house rule): drift is reported,
   changes are refused.
-- `tailscale funnel` is never invoked; a serve mapping whose status does not read
-  `(tailnet only)` is a hard error.
+- `tailscale funnel` is never invoked; the check is per mapping for this project's T3 port: a
+  mapping not reading `(tailnet only)`, or any Funnel mapping for that port, is a hard error.
+- An inherited `OP_SERVICE_ACCOUNT_TOKEN` is ignored (unset at start); the owner's `op` session
+  is used.
 
 ## 3. Interface
 
@@ -52,7 +54,8 @@ agent-new verify  <project> | <owner>/<repo>
 ```
 
 - `project` — the full flow (§4). `<folder>` as in `agent-up init`: the host folder name under
-  `~/GitHub/`, lowercased to form the project name.
+  `~/GitHub/`, lowercased to form the project name. `--vault` is refused: the project always
+  uses vault `agent-<project>`.
 - `protect` — GitHub wiring for any single repo the owner admins (§5). `project` calls it; it
   also stands alone for wiring module repos to an existing project (e.g. spades_harvesting
   phase 2).
@@ -80,7 +83,7 @@ Steps in order:
    `T3_CONNECT` in `project.conf` per flags (edit the existing lines, never append
    duplicates).
 4. **Repo files.** Replace `@OWNER` in `.github/CODEOWNERS` with the owner's login; commit
-   `.github/` + `.gitignore` and push. Ordering is load-bearing: this direct push happens
+   `.github/` + `.gitignore` and push (a failed push is retried on re-run). Ordering is load-bearing: this direct push happens
    **before** the ruleset exists and gives gitleaks its first run.
 5. **Vault (interactive).** Pause for `eval "$(op signin)"`, then the vault runbook §2 CLI
    sequence verbatim: create vault `agent-<project>`, 90-day read-only service account, token
@@ -95,7 +98,10 @@ Steps in order:
    `tailscale serve --bg --https=<port> <T3_PORT>` and assert `serve status` shows the mapping
    `(tailnet only)`; otherwise print the PowerShell command and wait for the owner to confirm.
 9. **Up.** Read the project's service-account token from the owner's Personal vault into the
-   environment of `agent-up up <project>` only; `agent-up up research` when `RESEARCH=1`.
+   environment of `agent-up up <project>` only. When `RESEARCH=1`, `agent-up up research` runs
+   **without** the token (and restarts research). If no research config exists, warn and
+   continue, telling the owner to run `agent-up init --profile research` then
+   `agent-up up research`; `agent-new` never creates it.
 10. **Gate.** The `verify` flow (§6). Only on a pass does the script declare success, then
     print: the interactive-login checklist (`claude`, `codex login --device-auth`, the
     `t3 connect` publish sequence when `T3_CONNECT=publish`), `agent-up pair <project>`, and
@@ -125,8 +131,12 @@ For one repo the owner admins:
 ## 6. The `verify` flow
 
 Runbook §6, mechanized, as the machine user (via `docker exec -w /workspace` on the project
-container, or a temp clone for a bare repo): throwaway branch → empty commit → push →
-`gh pr create` (must succeed) → wait for required checks green (`gh pr checks --watch`; if the
+container, or a temp clone for a bare repo): both modes first assert the acting identity is the
+machine user. Container mode works in a temporary worktree `/tmp/agent-new-verify` from a fresh
+`origin/main`, leaving the owner's checkout alone; repo mode clones over https with git isolated
+from the owner's git config. Then: throwaway branch (force-pushed) → empty commit → push →
+`gh pr create` (must succeed) → wait for required checks green (retrying while CI registers its checks, tunable via
+`AGENT_NEW_CHECK_TRIES` / `AGENT_NEW_CHECK_SLEEP`, then `gh pr checks --watch`; if the
 repo has no CI yet, note the required-check rule as untested and continue) → then assert each
 expected failure **by reason**, not just by exit code:
 

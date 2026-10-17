@@ -13,7 +13,7 @@ permissions).
 `<project>` is the project folder name, lowercased to `[a-z0-9_-]`. The container is
 `<project>-agent-1`.
 
-**Automated:** `agent-new project <folder>` performs steps 1–2, 4, 7 and 8 below and runs the 1Password sequence of step 3 with you (it pauses for `op signin`). Steps 5 (the project's allowlist) and 6 (the `spades.ai` clone) stay yours — the script only reminds you at the end, and `agent-up up` refuses to run without the clone. The steps below remain the reference (and the fallback when the script can't).
+**Automated:** `agent-new project <folder>` performs steps 1–2, 4, 7 and 8 below and runs the 1Password sequence of step 3 with you (it pauses for `op signin`). Steps 5 (the project's allowlist) and 6 (the `spades.ai` clone) stay yours — the script only reminds you at the end, and `agent-up up` refuses to run without the clone. The research container is started without the token; if it has no config yet the script warns and tells you to run `agent-up init --profile research` then `agent-up up research`. The steps below remain the reference (and the fallback when the script can't).
 
 ## Steps
 
