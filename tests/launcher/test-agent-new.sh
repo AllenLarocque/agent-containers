@@ -138,8 +138,9 @@ refuses "wrong refusal reason -> GATE NOT BINDING" 'GATE NOT BINDING' run verify
 newstate
 refuses "container not running" 'not running' sh -c 'echo > /dev/null; HOME='"$H"' AGENT_CONTAINERS_CONFIG='"$CFGROOT"' PATH='"$T"'/bin:$PATH '"$AN"' verify nosuch'
 export TMPDIR="$T/tmpdirs"; mkdir -p "$TMPDIR"
-refuses "repo mode: aborts in empty clone" '.' run verify allen/repo9 --vault agent-p1
+refuses "repo mode: aborts in empty clone" 'not a git repository|fatal' run verify allen/repo9 --vault agent-p1
 check "  temp clone cleaned up by EXIT trap" test -z "$(ls -A "$TMPDIR")"
+check "trap freezes tmp at set time (immediate expansion)" grep -q "trap \"rm -rf '" "$AN"
 unset TMPDIR
 
 [ "$fail" -eq 0 ] && echo "AGENT-NEW: ALL PASSED" || { echo "AGENT-NEW: FAILURES"; exit 1; }
