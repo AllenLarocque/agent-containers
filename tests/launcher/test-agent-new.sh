@@ -115,7 +115,8 @@ cat > "$T/bin/tailscale.exe" <<'STUB'
 #!/usr/bin/env bash
 echo "TS: $*" >> "$TSLOG"
 case "$1" in
-  serve) if [ "$2" = status ]; then cat "$STATE/ts-status" 2>/dev/null; else touch "$STATE/ts-served"; fi ;;
+  serve) if [ "$2" = status ]; then cat "$STATE/ts-status" 2>/dev/null; else touch "$STATE/ts-served"
+    [ -e "$STATE/ts-frozen" ] || printf 'https://host:%s (tailnet only)\n|-- / proxy http://127.0.0.1:%s\n' "${2#--https=}" "$4" >> "$STATE/ts-status"; fi ;;
 esac
 STUB
 chmod +x "$T/bin/tailscale.exe"
@@ -284,22 +285,22 @@ check "  up with token in env"       grep -q '^AU(tok): up newproj' "$AULOG"
 check "  research up too"            grep -q '^AU(tok): up research' "$AULOG"
 OUT=$(run project NewProj --token-from agent-old < /dev/null 2>&1)
 check "  checklist printed"          grep -q "codex login --device-auth" <<<"$OUT"
-fullstate; printf 'https://host:8447 Funnel on\n' > "$STATE/ts-status"
+fullstate; printf 'https://host:8447 (Funnel on)\n|-- / proxy http://127.0.0.1:3778\n' > "$STATE/ts-status"
 refuses "serve status without (tailnet only)" 'tailnet only' run project NewProj --token-from agent-old < /dev/null
 fullstate
 printf 'https://host:9999 (tailnet only)\n|-- / proxy http://127.0.0.1:37780\n' > "$STATE/ts-status"
 OUT=$(run project NewProj --token-from agent-old < /dev/null 2>&1) || true
 check "prefix port 37780 does not satisfy 3778 mapping" grep -q '^TS: serve --bg --https=8447 3778' "$TSLOG"
 fullstate
-rm -f "$STATE/ruleset-posted"; echo 'wrong' > "$STATE/ts-status"
+rm -f "$STATE/ruleset-posted"; echo 'wrong' > "$STATE/ts-status"; touch "$STATE/ts-frozen"
 OUT=$(run project NewProj --token-from agent-old < /dev/null 2>&1) && { echo "FAIL: resume setup should have died at tailscale"; fail=1; } || true
-printf 'https://host:8447 (tailnet only)\n|-- / proxy http://127.0.0.1:3778\n' > "$STATE/ts-status"
+rm -f "$STATE/ts-frozen"; printf 'https://host:8447 (tailnet only)\n|-- / proxy http://127.0.0.1:3778\n' > "$STATE/ts-status"
 : > "$GITLOG"
 check "resume after tailscale failure"  run project NewProj --token-from agent-old < /dev/null
 check "  earlier steps all SKIPPED (no push)" sh -c "! grep -q '^GIT: push' '$GITLOG'"
 check "  later steps ran (up called)"   grep -q '^AU(tok): up newproj' "$AULOG"
 
-echo "== task 7: hardening =="
+echo "== review fixes: hardening =="
 export AGENT_NEW_STOP_AFTER=token
 newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
 OP_SERVICE_ACCOUNT_TOKEN=leftover run project InhTok --token-from agent-old < /dev/null >/dev/null 2>&1
@@ -319,9 +320,6 @@ check "  nothing POSTed" test ! -f "$STATE/ruleset-posted"
 newstate
 refuses "project --vault refused" 'project always uses vault agent-<project>' run project NoVault --vault foo < /dev/null
 
-fullstate(){ newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
-  touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
-  printf 'https://host:8447 (tailnet only)\n|-- / proxy http://127.0.0.1:3778\n' > "$STATE/ts-status"; plan_ok; }
 rm -rf "$PROJHOME/NewProj" "$CFGROOT/newproj"
 fullstate
 run project NewProj --token-from agent-old < /dev/null >/dev/null 2>&1
@@ -329,6 +327,20 @@ sed -i 's/^T3_PORT=.*/T3_PORT=03778/' "$CFGROOT/newproj/project.conf"; : > "$TSL
 printf 'wrong\n' > "$STATE/ts-status"
 OUT=$(run project NewProj --token-from agent-old < /dev/null 2>&1) || true
 check "T3_PORT=03778 (leading zero) gives port 8447" grep -q -- '--https=8447' "$TSLOG"
+check "  and serve targets 3778" grep -q -- ' 3778$' "$TSLOG"
+sed -i 's/^T3_PORT=.*/T3_PORT=3778/' "$CFGROOT/newproj/project.conf"
+fullstate
+printf 'https://host:8447 (Funnel on)\n|-- / proxy http://127.0.0.1:3778\nhttps://host:9999 (tailnet only)\n|-- / proxy http://127.0.0.1:9999\n' > "$STATE/ts-status"
+refuses "this port public while another is tailnet-only dies" 'NEVER use Funnel' run project NewProj --token-from agent-old < /dev/null
+fullstate
+printf 'https://host:8447 (tailnet only)\n|-- / proxy http://127.0.0.1:3778\nhttps://host:9999 (Funnel on)\n|-- / proxy http://127.0.0.1:9999\n' > "$STATE/ts-status"
+check "this port tailnet-only, another Funnel passes" run project NewProj --token-from agent-old < /dev/null
+sed -i 's/^T3_PORT=.*/T3_PORT=03778/' "$CFGROOT/newproj/project.conf"
+fullstate
+printf 'https://host:8447 (tailnet only)\n|-- / proxy http://127.0.0.1:3778\n' > "$STATE/ts-status"; : > "$TSLOG"
+OUT=$(run project NewProj --token-from agent-old < /dev/null 2>&1) || true
+check "T3_PORT=03778: existing 3778 mapping recognised (SKIP)" grep -q 'SKIP (done): tailscale serve mapping for 3778' <<<"$OUT"
+check "  and no serve call made" sh -c "! grep -q '^TS: serve --bg' '$TSLOG'"
 sed -i 's/^T3_PORT=.*/T3_PORT=3778/' "$CFGROOT/newproj/project.conf"
 printf 'TAILSCALE_HTTPS_PORT=abc\n' >> "$CFGROOT/newproj/project.conf"
 refuses "non-numeric TAILSCALE_HTTPS_PORT dies" 'must be a port 1-65535' run project NewProj --token-from agent-old < /dev/null

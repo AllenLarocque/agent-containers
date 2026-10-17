@@ -138,6 +138,17 @@ project_token(){
   op item create --vault "$VAULT" --category "API Credential" --title github-agent "token[concealed]=$ghtok" >/dev/null
   ghtok=""
 }
+t3_port(){ # $1 project.conf -> T3_PORT as plain decimal (no leading zeros), validated
+  local t; t="$(conf_get "$1" T3_PORT)"
+  [[ $t =~ ^[0-9]{1,9}$ ]] && t="$((10#$t))" && [ "$t" -ge 1 ] && [ "$t" -le 65535 ] \
+    || die "T3_PORT='$t' in $1: must be a port 1-65535"
+  printf '%s' "$t"
+}
+# stdin: `tailscale serve status`; $1 T3 port. ok = >=1 block proxies to it and all are (tailnet only); public = any is not; none
+ts_state(){ awk -v p="$1" '
+  /^[^|[:space:]]/ { hdr=$0; next }
+  /proxy/ && match($0, "(127\\.0\\.0\\.1|localhost):" p "([^0-9]|$)") { n++; if (hdr !~ /\(tailnet only\)/) bad=1 }
+  END { print bad ? "public" : n ? "ok" : "none" }'; }
 find_tailscale(){
   command -v tailscale.exe 2>/dev/null && return 0
   [ -x '/mnt/c/Program Files/Tailscale/tailscale.exe' ] && printf '/mnt/c/Program Files/Tailscale/tailscale.exe' && return 0
@@ -145,14 +156,14 @@ find_tailscale(){
 }
 project_tailscale(){
   local conf="$CFG_ROOT/$PROJ/project.conf" t3 port ts
-  t3="$(conf_get "$conf" T3_PORT)"
+  t3="$(t3_port "$conf")"
   port="$(ts_port "$conf")"
   local cmd="tailscale serve --bg --https=$port $t3"
   if ts="$(find_tailscale)"; then
-    if "$ts" serve status | grep -qE "127\.0\.0\.1:$t3([^0-9]|\$)"; then skip "tailscale serve mapping for $t3"
+    if [ "$("$ts" serve status | ts_state "$t3")" != none ]; then skip "tailscale serve mapping for $t3"
     else say "adding the per-project Tailscale mapping: $cmd"; "$ts" serve --bg "--https=$port" "$t3" >/dev/null; fi
-    "$ts" serve status | grep -q "(tailnet only)" \
-      || die "tailscale serve status does not say (tailnet only): NEVER use Funnel; fix the mapping before continuing"
+    [ "$("$ts" serve status | ts_state "$t3")" = ok ] \
+      || die "tailscale serve status does not show $t3 as (tailnet only): NEVER use Funnel; fix the mapping before continuing"
   else
     say "no tailscale CLI found. Run ONCE in Windows PowerShell:  $cmd"
     read -r -p "agent-new: press ENTER when done (or Ctrl-C to abort) " _
@@ -168,8 +179,8 @@ project_up(){
   unset OP_SERVICE_ACCOUNT_TOKEN
 }
 project_checklist(){
-  local conf="$CFG_ROOT/$PROJ/project.conf" t3 port host
-  t3="$(conf_get "$conf" T3_PORT)"; port="$(ts_port "$conf")"
+  local conf="$CFG_ROOT/$PROJ/project.conf" port host
+  port="$(ts_port "$conf")"
   host="$(conf_get "$CFG_ROOT/agent-up.conf" TAILSCALE_HOST 2>/dev/null || true)"
   cat <<EOF
 agent-new: DONE. Interactive logins left (once each, inside the container):
