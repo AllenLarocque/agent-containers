@@ -125,7 +125,9 @@ push origin HEAD:main|1|remote: error: GH013: Repository rule violations found f
 PLAN
 }
 newstate; plan_ok
-check "gate passes on the canned refusals"    run verify p1
+VOUT=$(run verify p1 2>&1); VRC=$?
+check "gate passes on the canned refusals"   test "$VRC" -eq 0
+check "  all four refusals asserted"         test "$(grep -c 'OK (refused as expected)' <<<"$VOUT")" -eq 4
 newstate; plan_ok
 sed -i 's|^push origin HEAD:main.1.remote.*|push origin HEAD:main\|0\|pushed!|' "$STATE/exec-plan"
 refuses "push-to-main success -> GATE NOT BINDING" 'GATE NOT BINDING' run verify p1
