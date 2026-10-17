@@ -101,10 +101,16 @@ project_repo_files(){
    git add .github .gitignore 2>/dev/null || true
    if git diff --cached --quiet 2>/dev/null; then skip "repo files committed"
    else
-     say "committing + pushing .github/ and .gitignore (BEFORE the ruleset: gives gitleaks its first run)"
+     say "committing .github/ and .gitignore"
      git commit -q -m "chore: CODEOWNERS, gitleaks workflow, gitignore (agent-new)"
+   fi
+   # a push that failed last time is retried: compare with the remote ref, not with staged changes
+   # (no HEAD = fresh empty clone = nothing to push)
+   local head; head="$(git rev-parse -q --verify HEAD 2>/dev/null)" || head=""
+   if [ -n "$head" ] && [ "$head" != "$(git rev-parse -q --verify refs/remotes/origin/main 2>/dev/null)" ]; then
+     say "pushing main (BEFORE the ruleset: gives gitleaks its first run)"
      git push -u origin main
-   fi)
+   else skip "main pushed"; fi)
 }
 project_vault(){
   say "1Password (interactive; 1password-project-vault.md). Signing in:"
@@ -302,7 +308,11 @@ ruleset_norm_expected(){
 }
 protect_ruleset(){ # $1 owner/repo
   local repo="$1" id have
-  id="$(gh api "repos/$repo/rulesets" --jq '.[] | select(.name=="protect-main") | .id' 2>/dev/null | head -n1)"
+  local out rc=0
+  out="$(gh api "repos/$repo/rulesets" --jq '.[] | select(.name=="protect-main") | .id' 2>&1)" || rc=$?
+  [ "$rc" -eq 0 ] || die "could not list rulesets on $repo (needs admin; private repos on GitHub Free have no rulesets): $out
+re-running resumes from here."
+  id="$(head -n1 <<<"$out")"
   if [ -z "$id" ]; then
     say "creating ruleset protect-main on $repo (machine-user-and-rulesets.md step 4)"
     ruleset_json | gh api -X POST "repos/$repo/rulesets" --input - >/dev/null

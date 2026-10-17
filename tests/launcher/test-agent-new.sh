@@ -33,7 +33,7 @@ case "$*" in
   api\ -X\ PUT\ repos/*/collaborators/*) touch "$STATE/invited" ;;
   "api /user/repository_invitations --jq"*) [ -n "${GH_TOKEN:-}" ] || exit 1; [ -f "$STATE/invited" ] && echo 42 ;;
   "api -X PATCH /user/repository_invitations/42") [ -n "${GH_TOKEN:-}" ] || exit 1; touch "$STATE/collab" ;;
-  "api repos/"*"/rulesets --jq"*) cat "$STATE/ruleset-id" 2>/dev/null; : ;;
+  "api repos/"*"/rulesets --jq"*) [ -f "$STATE/rulesets-list-fail" ] && { echo "HTTP 403: upgrade to Pro" >&2; exit 1; }; cat "$STATE/ruleset-id" 2>/dev/null; : ;;
   "api -X POST repos/"*"/rulesets --input -") cat > "$STATE/ruleset-posted" ;;
   "api repos/"*"/rulesets/7 --jq"*) cat "$STATE/ruleset-norm" ;;
   "api repos/"*"/contents/.github/CODEOWNERS") [ -f "$STATE/has-codeowners" ] ;;
@@ -92,7 +92,8 @@ cat > "$T/bin/git" <<'STUB'
 echo "GIT: $*" >> "$GITLOG"
 case "$1" in
   clone) mkdir -p "${@: -1}"; cd "${@: -1}" && "$REALGIT" init -q -b main && "$REALGIT" commit -q --allow-empty -m seed && "$REALGIT" remote add origin "https://github.com/x/y" ;;
-  push)  exit 0 ;;
+  push)  [ -f "$STATE/push-fail-once" ] && { rm -f "$STATE/push-fail-once"; echo "remote: push rejected" >&2; exit 1; }
+         "$REALGIT" rev-parse --git-dir >/dev/null 2>&1 && "$REALGIT" update-ref refs/remotes/origin/main HEAD; exit 0 ;;
   *)     exec "$REALGIT" "$@" ;;
 esac
 STUB
@@ -159,6 +160,10 @@ check "no ruleset: POSTs one"              run protect allen/repo1 --vault agent
 check "  posted JSON names protect-main"   grep -q '"name": *"protect-main"' "$STATE/ruleset-posted"
 check "  bypass: admin, PRs only"          grep -q '"bypass_mode": *"pull_request"' "$STATE/ruleset-posted"
 check "  required check gitleaks"          grep -q '"context": *"gitleaks"' "$STATE/ruleset-posted"
+newstate; touch "$STATE/collab" "$STATE/rulesets-list-fail"
+refuses "rulesets list fails -> loud die" 'could not list rulesets' run protect allen/repo1 --vault agent-p1
+newstate; touch "$STATE/collab" "$STATE/rulesets-list-fail"
+refuses "  includes gh output" 'upgrade to Pro' run protect allen/repo1 --vault agent-p1
 newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
 echo 7 > "$STATE/ruleset-id"; echo "$EXPECT_NORM" > "$STATE/ruleset-norm"
 check "identical ruleset -> SKIP"          run protect allen/repo1 --vault agent-p1
@@ -253,6 +258,13 @@ check "re-run exits 0"            test "$RC" -eq 0
 check "re-run: >=4 SKIP lines"    test "$(grep -c 'SKIP (done)' <<<"$OUT")" -ge 4
 check "  no second repo create"   sh -c "! grep -q 'repo create' '$GHLOG'"
 check "  no push on re-run"       sh -c "! grep -q '^GIT: push' '$GITLOG'"
+echo "== review fixes: resumable repo files =="
+rm -rf "$PROJHOME/NewProj" "$CFGROOT/newproj"; newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
+touch "$STATE/push-fail-once"
+refuses "push fails once -> run dies" 'push rejected' run project NewProj --token-from agent-old < /dev/null
+: > "$GITLOG"
+check "re-run after failed push"  run project NewProj --token-from agent-old < /dev/null
+check "  push retried on re-run"  grep -q '^GIT: push' "$GITLOG"
 mkdir -p "$PROJHOME/Decoy" && git -C "$PROJHOME/Decoy" init -q && git -C "$PROJHOME/Decoy" remote add origin https://github.com/other/thing
 refuses "existing folder with wrong origin refused" 'refusing to adopt' run project Decoy --token-from agent-old < /dev/null
 mkdir -p "$PROJHOME/Decoy2" && git -C "$PROJHOME/Decoy2" init -q && git -C "$PROJHOME/Decoy2" remote add origin "https://notgithub.com/allen/Decoy2"
