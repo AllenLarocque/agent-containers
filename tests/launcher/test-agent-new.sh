@@ -103,6 +103,15 @@ if [ "$1" = init ]; then
 fi
 STUB
 chmod +x "$T/bin/git" "$T/bin/agent-up"
+# ---- stub tailscale.exe: logs; serve status replayed from $STATE/ts-status
+cat > "$T/bin/tailscale.exe" <<'STUB'
+#!/usr/bin/env bash
+echo "TS: $*" >> "$TSLOG"
+case "$1" in
+  serve) if [ "$2" = status ]; then cat "$STATE/ts-status" 2>/dev/null; else touch "$STATE/ts-served"; fi ;;
+esac
+STUB
+chmod +x "$T/bin/tailscale.exe"
 mkdir -p "$T/repo-root"
 printf '| image | tag | digest |\n|---|---|---|\n| spades-gis | 2026.10.12 | `sha256:aaa111` |\n| spades-bio | 2026.10.12 | `sha256:bbb222` |\n' > "$T/repo-root/digests.md"
 run(){ HOME="$H" AGENT_CONTAINERS_CONFIG="$CFGROOT" PATH="$T/bin:$PATH" "$AN" "$@"; }
@@ -212,5 +221,29 @@ check "re-run: >=4 SKIP lines"    test "$(grep -c 'SKIP (done)' <<<"$OUT")" -ge 
 check "  no second repo create"   sh -c "! grep -q 'repo create' '$GHLOG'"
 check "  no push on re-run"       sh -c "! grep -q '^GIT: push' '$GITLOG'"
 unset AGENT_NEW_STOP_AFTER
+
+echo "== task 6: project steps 7-10 =="
+fullstate(){ newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
+  touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
+  printf 'https://host:8447 (tailnet only)\n|-- / proxy http://127.0.0.1:9999\n' > "$STATE/ts-status"
+  plan_ok; }
+rm -rf "$PROJHOME/NewProj" "$CFGROOT/newproj"
+fullstate
+check "full project run"             run project NewProj --token-from agent-old < /dev/null
+check "  serve mapping with formula port" grep -q '^TS: serve --bg --https=8447 3778' "$TSLOG"
+check "  up with token in env"       grep -q '^AU(tok): up newproj' "$AULOG"
+check "  research up too"            grep -q '^AU(tok): up research' "$AULOG"
+OUT=$(run project NewProj --token-from agent-old < /dev/null 2>&1)
+check "  checklist printed"          grep -q "codex login --device-auth" <<<"$OUT"
+fullstate; printf 'https://host:8447 Funnel on\n' > "$STATE/ts-status"
+refuses "serve status without (tailnet only)" 'tailnet only' run project NewProj --token-from agent-old < /dev/null
+fullstate
+rm -f "$STATE/ruleset-posted"; echo 'wrong' > "$STATE/ts-status"
+OUT=$(run project NewProj --token-from agent-old < /dev/null 2>&1) && { echo "FAIL: resume setup should have died at tailscale"; fail=1; } || true
+printf 'https://host:8447 (tailnet only)\n|-- / proxy http://127.0.0.1:3778\n' > "$STATE/ts-status"
+: > "$GITLOG"
+check "resume after tailscale failure"  run project NewProj --token-from agent-old < /dev/null
+check "  earlier steps all SKIPPED (no push)" sh -c "! grep -q '^GIT: push' '$GITLOG'"
+check "  later steps ran (up called)"   grep -q '^AU(tok): up newproj' "$AULOG"
 
 [ "$fail" -eq 0 ] && echo "AGENT-NEW: ALL PASSED" || { echo "AGENT-NEW: FAILURES"; exit 1; }

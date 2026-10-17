@@ -124,9 +124,58 @@ project_token(){
   op item create --vault "$VAULT" --category "API Credential" --title github-agent "token[concealed]=$ghtok" >/dev/null
   ghtok=""
 }
-project_tailscale(){ die "not implemented"; }
-project_up(){ die "not implemented"; }
-project_checklist(){ die "not implemented"; }
+find_tailscale(){
+  command -v tailscale.exe 2>/dev/null && return 0
+  [ -x '/mnt/c/Program Files/Tailscale/tailscale.exe' ] && printf '/mnt/c/Program Files/Tailscale/tailscale.exe' && return 0
+  return 1
+}
+project_tailscale(){
+  local conf="$CFG_ROOT/$PROJ/project.conf" t3 port ts
+  t3="$(conf_get "$conf" T3_PORT)"
+  port="$(conf_get "$conf" TAILSCALE_HTTPS_PORT)"; port="${port:-$((8443 + t3 - 3774))}"
+  local cmd="tailscale serve --bg --https=$port $t3"
+  if ts="$(find_tailscale)"; then
+    if "$ts" serve status | grep -q "127.0.0.1:$t3"; then skip "tailscale serve mapping for $t3"
+    else say "adding the per-project Tailscale mapping: $cmd"; "$ts" serve --bg "--https=$port" "$t3" >/dev/null; fi
+    "$ts" serve status | grep -q "(tailnet only)" \
+      || die "tailscale serve status does not say (tailnet only): NEVER use Funnel; fix the mapping before continuing"
+  else
+    say "no tailscale CLI found. Run ONCE in Windows PowerShell:  $cmd"
+    read -r -p "agent-new: press ENTER when done (or Ctrl-C to abort) " _
+  fi
+}
+project_up(){
+  say "starting the container (token read into this one command's environment)"
+  unset OP_SERVICE_ACCOUNT_TOKEN
+  OP_SERVICE_ACCOUNT_TOKEN="$(op read "op://Personal/$VAULT service account/credential")" agent-up up "$PROJ"
+  if [ "$RESEARCH" = 1 ]; then
+    OP_SERVICE_ACCOUNT_TOKEN="$(op read "op://Personal/$VAULT service account/credential")" agent-up up research
+  fi
+  unset OP_SERVICE_ACCOUNT_TOKEN
+}
+project_checklist(){
+  local conf="$CFG_ROOT/$PROJ/project.conf" t3 port host
+  t3="$(conf_get "$conf" T3_PORT)"; port="$(conf_get "$conf" TAILSCALE_HTTPS_PORT)"; port="${port:-$((8443 + t3 - 3774))}"
+  host="$(conf_get "$CFG_ROOT/agent-up.conf" TAILSCALE_HOST 2>/dev/null || true)"
+  cat <<EOF
+agent-new: DONE. Interactive logins left (once each, inside the container):
+  agent-up shell $PROJ
+    claude                      # subscription login, then /exit
+    codex login --device-auth   # open the printed link on the host
+EOF
+  [ "$T3MODE" = publish ] && cat <<EOF
+    t3 connect --headless       # approve with the SAME T3 account the apps use; 'n' to any service prompt
+    t3 connect link --publish-only
+    t3 connect publish
+  then: agent-up up $PROJ       # (token in env again) so the publish link takes effect
+EOF
+  cat <<EOF
+  agent-up pair $PROJ           # pairing code for the apps
+  phone (Tailscale on): https://${host:-<machine>.<tailnet>.ts.net}:$port
+Close or approve-and-merge the verification PR in the browser. Allowlist extra domains in
+$CFG_ROOT/$PROJ/allowlist as the project needs them, then: agent-up up $PROJ
+EOF
+}
 cmd_project(){
   OWNER="$(preflight_owner)"
   command -v op >/dev/null || die "op (1Password CLI) not found"
