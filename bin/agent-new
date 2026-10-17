@@ -135,7 +135,7 @@ project_tailscale(){
   port="$(conf_get "$conf" TAILSCALE_HTTPS_PORT)"; port="${port:-$((8443 + t3 - 3774))}"
   local cmd="tailscale serve --bg --https=$port $t3"
   if ts="$(find_tailscale)"; then
-    if "$ts" serve status | grep -q "127.0.0.1:$t3"; then skip "tailscale serve mapping for $t3"
+    if "$ts" serve status | grep -qE "127\.0\.0\.1:$t3([^0-9]|\$)"; then skip "tailscale serve mapping for $t3"
     else say "adding the per-project Tailscale mapping: $cmd"; "$ts" serve --bg "--https=$port" "$t3" >/dev/null; fi
     "$ts" serve status | grep -q "(tailnet only)" \
       || die "tailscale serve status does not say (tailnet only): NEVER use Funnel; fix the mapping before continuing"

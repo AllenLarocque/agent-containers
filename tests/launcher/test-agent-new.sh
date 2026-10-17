@@ -238,6 +238,10 @@ check "  checklist printed"          grep -q "codex login --device-auth" <<<"$OU
 fullstate; printf 'https://host:8447 Funnel on\n' > "$STATE/ts-status"
 refuses "serve status without (tailnet only)" 'tailnet only' run project NewProj --token-from agent-old < /dev/null
 fullstate
+printf 'https://host:9999 (tailnet only)\n|-- / proxy http://127.0.0.1:37780\n' > "$STATE/ts-status"
+OUT=$(run project NewProj --token-from agent-old < /dev/null 2>&1) || true
+check "prefix port 37780 does not satisfy 3778 mapping" grep -q '^TS: serve --bg --https=8447 3778' "$TSLOG"
+fullstate
 rm -f "$STATE/ruleset-posted"; echo 'wrong' > "$STATE/ts-status"
 OUT=$(run project NewProj --token-from agent-old < /dev/null 2>&1) && { echo "FAIL: resume setup should have died at tailscale"; fail=1; } || true
 printf 'https://host:8447 (tailnet only)\n|-- / proxy http://127.0.0.1:3778\n' > "$STATE/ts-status"
