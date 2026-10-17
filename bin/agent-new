@@ -72,8 +72,73 @@ protect_collaborator(){ # $1 owner/repo
   fi
 }
 
+NORM_JQ='[.enforcement,
+ (.bypass_actors | map("\(.actor_type):\(.actor_id):\(.bypass_mode)") | sort | join(",")),
+ (.rules | map(.type) | sort | join(",")),
+ ((.rules[] | select(.type=="pull_request") | .parameters |
+   "pr:\(.required_approving_review_count):\(.dismiss_stale_reviews_on_push):\(.require_code_owner_review):\(.require_last_push_approval)") // "pr:-"),
+ ((.rules[] | select(.type=="required_status_checks") | .parameters.required_status_checks | map(.context) | sort | join("+")) // "")
+] | join("|")'
+
+checks_sorted(){ printf '%s\n' "${REQUIRE_CHECKS[@]}" | sort -u; }
+ruleset_json(){
+  local checks="" c
+  while IFS= read -r c; do checks+="{\"context\": \"$c\"},"; done < <(checks_sorted)
+  cat <<JSON
+{
+  "name": "protect-main", "target": "branch", "enforcement": "active",
+  "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}],
+  "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+  "rules": [
+    {"type": "deletion"},
+    {"type": "non_fast_forward"},
+    {"type": "pull_request", "parameters": {
+      "required_approving_review_count": 1, "dismiss_stale_reviews_on_push": true,
+      "require_code_owner_review": true, "require_last_push_approval": true,
+      "required_review_thread_resolution": false,
+      "allowed_merge_methods": ["merge", "squash", "rebase"]}},
+    {"type": "required_status_checks", "parameters": {
+      "strict_required_status_checks_policy": false,
+      "required_status_checks": [${checks%,}]}}
+  ]
+}
+JSON
+}
+ruleset_norm_expected(){
+  printf 'active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:true|%s' \
+    "$(checks_sorted | paste -sd+ -)"
+}
+protect_ruleset(){ # $1 owner/repo
+  local repo="$1" id have
+  id="$(gh api "repos/$repo/rulesets" --jq '.[] | select(.name=="protect-main") | .id' 2>/dev/null | head -n1)"
+  if [ -z "$id" ]; then
+    say "creating ruleset protect-main on $repo (machine-user-and-rulesets.md step 4)"
+    ruleset_json | gh api -X POST "repos/$repo/rulesets" --input - >/dev/null
+    return
+  fi
+  have="$(gh api "repos/$repo/rulesets/$id" --jq "$NORM_JQ")"
+  if [ "$have" = "$(ruleset_norm_expected)" ]; then
+    skip "ruleset protect-main on $repo matches the template"
+  else
+    warn "live:     $have"
+    warn "template: $(ruleset_norm_expected)"
+    die "ruleset protect-main on $repo differs from the template: refusing to modify it (never weaken). Edit it in the GitHub UI if the difference is intended."
+  fi
+}
+protect_warnings(){ # $1 owner/repo
+  local repo="$1"
+  gh api "repos/$repo/contents/.github/CODEOWNERS" >/dev/null 2>&1 \
+    || warn "$repo has no .github/CODEOWNERS: code-owner review cannot bind (copy project-template/repo/.github/, runbook step 2.2)"
+  gh api "repos/$repo/contents/.github/workflows/gitleaks.yml" >/dev/null 2>&1 \
+    || warn "$repo has no gitleaks workflow: the required check will never report (copy project-template/repo/.github/)"
+  [ "$(gh api "repos/$repo/actions/permissions/workflow" --jq .can_approve_pull_request_reviews 2>/dev/null)" = true ] \
+    && warn "$repo lets Actions approve PRs: turn it OFF (Settings -> Actions -> General, runbook step 2.3)" || true
+}
 cmd_protect(){
   protect_collaborator "$1"
+  protect_ruleset "$1"
+  protect_warnings "$1"
+  say "protect: done ($1)"
 }
 
 cmd_verify(){ die "verify: not implemented yet"; }

@@ -31,6 +31,12 @@ case "$*" in
   api\ -X\ PUT\ repos/*/collaborators/*) touch "$STATE/invited" ;;
   "api /user/repository_invitations --jq"*) [ -n "${GH_TOKEN:-}" ] || exit 1; [ -f "$STATE/invited" ] && echo 42 ;;
   "api -X PATCH /user/repository_invitations/42") [ -n "${GH_TOKEN:-}" ] || exit 1; touch "$STATE/collab" ;;
+  "api repos/"*"/rulesets --jq"*) cat "$STATE/ruleset-id" 2>/dev/null; : ;;
+  "api -X POST repos/"*"/rulesets --input -") cat > "$STATE/ruleset-posted" ;;
+  "api repos/"*"/rulesets/7 --jq"*) cat "$STATE/ruleset-norm" ;;
+  "api repos/"*"/contents/.github/CODEOWNERS") [ -f "$STATE/has-codeowners" ] ;;
+  "api repos/"*"/contents/.github/workflows/gitleaks.yml") [ -f "$STATE/has-gitleaks" ] ;;
+  "api repos/"*"/actions/permissions/workflow --jq .can_approve_pull_request_reviews") cat "$STATE/actions-approve" 2>/dev/null || echo false ;;
   *) exit 0 ;;
 esac
 STUB
@@ -70,5 +76,30 @@ newstate
 OUT=$(run protect allen/repo2 2>&1)
 check "no --vault: invite happens"           test -f "$STATE/invited"
 check "no --vault: WARNING to accept manually" grep -q 'WARNING.*accept the invitation' <<<"$OUT"
+
+echo "== task 3: protect / ruleset + warnings =="
+EXPECT_NORM='active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:true|gitleaks'
+newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
+check "no ruleset: POSTs one"              run protect allen/repo1 --vault agent-p1
+check "  posted JSON names protect-main"   grep -q '"name": *"protect-main"' "$STATE/ruleset-posted"
+check "  bypass: admin, PRs only"          grep -q '"bypass_mode": *"pull_request"' "$STATE/ruleset-posted"
+check "  required check gitleaks"          grep -q '"context": *"gitleaks"' "$STATE/ruleset-posted"
+newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
+echo 7 > "$STATE/ruleset-id"; echo "$EXPECT_NORM" > "$STATE/ruleset-norm"
+check "identical ruleset -> SKIP"          run protect allen/repo1 --vault agent-p1
+check "  nothing POSTed"                   test ! -f "$STATE/ruleset-posted"
+newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
+echo 7 > "$STATE/ruleset-id"; echo 'active|RepositoryRole:5:always|deletion|pr:0:false:false:false|' > "$STATE/ruleset-norm"
+refuses "divergent ruleset -> refuse, no write" 'refusing to modify' run protect allen/repo1 --vault agent-p1
+check "  nothing POSTed on refusal"        test ! -f "$STATE/ruleset-posted"
+newstate; touch "$STATE/collab"; echo true > "$STATE/actions-approve"
+OUT=$(run protect allen/repo1 --vault agent-p1 2>&1)
+check "warns: no CODEOWNERS"               grep -q 'WARNING.*CODEOWNERS' <<<"$OUT"
+check "warns: no gitleaks workflow"        grep -q 'WARNING.*gitleaks workflow' <<<"$OUT"
+check "warns: Actions can approve PRs"     grep -q 'WARNING.*approve' <<<"$OUT"
+newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
+check "--require build-test accepted"      run protect allen/repo1 --vault agent-p1 --require build-test
+check "  build-test present in posted JSON" grep -q '"context": *"build-test"' "$STATE/ruleset-posted"
+check "  gitleaks still present too"       grep -q '"context": *"gitleaks"' "$STATE/ruleset-posted"
 
 [ "$fail" -eq 0 ] && echo "AGENT-NEW: ALL PASSED" || { echo "AGENT-NEW: FAILURES"; exit 1; }
