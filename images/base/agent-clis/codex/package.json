@@ -3,6 +3,6 @@
   "private": true,
   "description": "Pinned OpenAI Codex CLI, installed at container start by agent-init.sh (npm ci verifies every tarball against the sha512 in package-lock.json). Bump: change the version here, run `npm install --package-lock-only` in this directory, rebuild.",
   "dependencies": {
-    "@openai/codex": "0.162.1"
+    "@openai/codex": "0.163.0"
   }
 }
