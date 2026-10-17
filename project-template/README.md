@@ -202,6 +202,25 @@ mapping predates this formula keeps it with `TAILSCALE_HTTPS_PORT=<port>` in its
 
 Retiring a project: `tailscale serve --https=<port> off` in PowerShell.
 
+**Keep the PC on the tailnet** (one time, Windows): tray icon → Preferences → **Run unattended**.
+Without it, Tailscale logs out when you sign out of Windows (and sometimes after an update), and
+the phone loses every project at once while notifications still arrive (they go through the T3
+relay, not Tailscale).
+
+**Phone can't connect?** Test each hop from the PC:
+1. WSL: `curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:<T3_PORT>/` should print `200`.
+2. PowerShell: ``curl.exe -sS -o NUL -w "%{http_code}`n" http://127.0.0.1:<T3_PORT>/`` should print
+   `200` (if step 1 passes but this fails, WSL's localhost forwarding is down).
+3. PowerShell: `tailscale status --self` must show the PC **online** with no "You are logged out"
+   health warning. If it says logged out, run `tailscale login` and open the printed link: the tray
+   icon can still say Connected, and `tailscale up` returns silently without logging in.
+   `tailscale serve status` must still list the project's port.
+4. The app says **"This client requires a newer server"**: the app (which auto-updates) speaks a
+   newer T3 protocol than the container's pinned T3 server. Every hop above works, and the server's
+   own web app at the same `https://…ts.net:<port>` address still works in the phone's browser. Fix:
+   bump `T3_VERSION` in `images/base/Dockerfile`, then pin the new digest and `agent-up up` each
+   project. Only protocol bumps cause this (the first was T3 0.1.0, 2026-10-15), not every release.
+
 ## Research container
 
 One **shared** container, `research`, does the web research for every project (spec §2.1). It has
