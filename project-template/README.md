@@ -189,7 +189,7 @@ TAILSCALE_HOST=<machine>.<tailnet>.ts.net
    `tailscale serve --bg --https=8442 3773`. Run it once in Windows PowerShell (Tailscale runs on the
    Windows host). The first time ever, Tailscale asks you to enable Serve and HTTPS certificates for
    the tailnet. `tailscale serve status` must say `(tailnet only)`. **Never use Funnel**: it makes T3
-   public. The mapping survives reboots.
+   public. The mapping survives reboots. (agent-new project runs this for you on WSL)
 2. `agent-up pair <project>` prints the addresses and a pairing code.
 3. In each app: Add environment, then the host and the pairing code. Desktop app on this PC:
    `http://localhost:<T3_PORT>`. Phone, with Tailscale on:
