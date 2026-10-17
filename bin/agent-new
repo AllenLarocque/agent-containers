@@ -146,7 +146,8 @@ t3_port(){ # $1 project.conf -> T3_PORT as plain decimal (no leading zeros), val
 }
 # stdin: `tailscale serve status`; $1 T3 port. ok = >=1 block proxies to it and all are (tailnet only); public = any is not; none
 ts_state(){ awk -v p="$1" '
-  /^[^|[:space:]]/ { hdr=$0; next }
+  /^[[:space:]]*$/ { hdr=""; next }
+  /^[[:space:]]*[^|[:space:]]/ { hdr=$0; next }
   /proxy/ && match($0, "(127\\.0\\.0\\.1|localhost):" p "([^0-9]|$)") { n++; if (hdr !~ /\(tailnet only\)/) bad=1 }
   END { print bad ? "public" : n ? "ok" : "none" }'; }
 find_tailscale(){

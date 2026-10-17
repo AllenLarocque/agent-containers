@@ -335,6 +335,16 @@ refuses "this port public while another is tailnet-only dies" 'NEVER use Funnel'
 fullstate
 printf 'https://host:8447 (tailnet only)\n|-- / proxy http://127.0.0.1:3778\nhttps://host:9999 (Funnel on)\n|-- / proxy http://127.0.0.1:9999\n' > "$STATE/ts-status"
 check "this port tailnet-only, another Funnel passes" run project NewProj --token-from agent-old < /dev/null
+fullstate
+printf 'https://host:9999 (tailnet only)\n|-- / proxy http://127.0.0.1:9999\n\n  https://h:2 (Funnel on)\n  |-- / proxy http://127.0.0.1:3778\n' > "$STATE/ts-status"
+refuses "indented Funnel header after a tailnet-only block dies" 'NEVER use Funnel' run project NewProj --token-from agent-old < /dev/null
+fullstate
+printf '# Funnel on:\n#     - https://other\n\nhttps://host:8447 (Funnel on)\n|-- /x proxy http://127.0.0.1:5000\n|-- / proxy http://127.0.0.1:3778\n' > "$STATE/ts-status"
+refuses "two handlers under one Funnel header (ours second) dies" 'NEVER use Funnel' run project NewProj --token-from agent-old < /dev/null
+fullstate
+printf 'https://host:8447 (tailnet only)\n|-- / proxy http://localhost:3778\n' > "$STATE/ts-status"; : > "$TSLOG"
+check "localhost:3778 under tailnet-only header passes" run project NewProj --token-from agent-old < /dev/null
+check "  and is recognised (no serve --bg)" sh -c "! grep -q '^TS: serve --bg' '$TSLOG'"
 sed -i 's/^T3_PORT=.*/T3_PORT=03778/' "$CFGROOT/newproj/project.conf"
 fullstate
 printf 'https://host:8447 (tailnet only)\n|-- / proxy http://127.0.0.1:3778\n' > "$STATE/ts-status"; : > "$TSLOG"
