@@ -45,7 +45,37 @@ preflight_owner(){ # prints the owner login; dies if gh is absent/anonymous/the 
 }
 
 cmd_project(){ die "project: not implemented yet"; }
-cmd_protect(){ die "protect: not implemented yet"; }
+
+mu_token(){ # machine-user PAT from the project vault; owner op session; ONE call's worth
+  unset OP_SERVICE_ACCOUNT_TOKEN
+  op read "op://$VAULT/github-agent/token"
+}
+
+protect_collaborator(){ # $1 owner/repo
+  local repo="$1" mu; mu="$(machine_user)"
+  if gh api "repos/$repo/collaborators/$mu" >/dev/null 2>&1; then
+    skip "$mu is a collaborator on $repo"; return
+  fi
+  say "inviting $mu to $repo (machine-user-and-rulesets.md step 2.1)"
+  gh api -X PUT "repos/$repo/collaborators/$mu" >/dev/null
+  if [ -n "$VAULT" ]; then
+    say "accepting the invitation as $mu (token read from op://$VAULT/github-agent/token for this step only)"
+    local tok inv
+    tok="$(mu_token)"
+    inv="$(GH_TOKEN="$tok" gh api /user/repository_invitations \
+           --jq ".[] | select(.repository.full_name==\"$repo\") | .id" | head -n1)"
+    [ -n "$inv" ] || die "no invitation for $repo visible to $mu (invite pending elsewhere?)"
+    GH_TOKEN="$tok" gh api -X PATCH "/user/repository_invitations/$inv" >/dev/null
+    tok=""
+  else
+    warn "no --vault given: accept the invitation as $mu yourself (https://github.com/$repo/invitations) or re-run with --vault agent-<project>"
+  fi
+}
+
+cmd_protect(){
+  protect_collaborator "$1"
+}
+
 cmd_verify(){ die "verify: not implemented yet"; }
 
 [ $# -ge 1 ] || usage

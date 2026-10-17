@@ -24,9 +24,13 @@ newstate(){ rm -rf "$STATE"; mkdir -p "$STATE"; : > "$GHLOG"; : > "$OPLOG"; : > 
 # ---- stub gh: logs every call; behavior driven by $STATE files (grown in later tasks)
 cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
-echo "GH(${GH_TOKEN:+mu}): $*" >> "$GHLOG"
+echo "GH${GH_TOKEN:+(mu)}: $*" >> "$GHLOG"
 case "$*" in
   "api user --jq .login") [ -s "$STATE/login" ] || exit 1; cat "$STATE/login" ;;
+  api\ repos/*/collaborators/*) [ -f "$STATE/collab" ] ;;
+  api\ -X\ PUT\ repos/*/collaborators/*) touch "$STATE/invited" ;;
+  "api /user/repository_invitations --jq"*) [ -n "${GH_TOKEN:-}" ] || exit 1; [ -f "$STATE/invited" ] && echo 42 ;;
+  "api -X PATCH /user/repository_invitations/42") [ -n "${GH_TOKEN:-}" ] || exit 1; touch "$STATE/collab" ;;
   *) exit 0 ;;
 esac
 STUB
@@ -52,5 +56,19 @@ newstate; echo agent-allen > "$STATE/login"
 refuses "gh logged in as the machine user" 'machine user' run protect o/r
 newstate; : > "$STATE/login"
 refuses "gh not logged in" 'not logged in' run protect o/r
+
+echo "== task 2: protect / collaborator =="
+newstate
+check "fresh: invite + accept as machine user" run protect allen/repo1 --vault agent-p1
+check "  invite was PUT as owner"            grep -q '^GH: api -X PUT repos/allen/repo1/collaborators/agent-allen' "$GHLOG"
+check "  accept listed+patched AS machine user" grep -q '^GH(mu): api -X PATCH /user/repository_invitations/42' "$GHLOG"
+check "  token came from the project vault"  grep -q '^OP: read op://agent-p1/github-agent/token' "$OPLOG"
+newstate; touch "$STATE/collab"
+check "re-run: collaborator -> SKIP"         run protect allen/repo1 --vault agent-p1
+check "  no second invite"                   test ! -f "$STATE/invited"
+newstate
+OUT=$(run protect allen/repo2 2>&1)
+check "no --vault: invite happens"           test -f "$STATE/invited"
+check "no --vault: WARNING to accept manually" grep -q 'WARNING.*accept the invitation' <<<"$OUT"
 
 [ "$fail" -eq 0 ] && echo "AGENT-NEW: ALL PASSED" || { echo "AGENT-NEW: FAILURES"; exit 1; }
