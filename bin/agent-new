@@ -141,7 +141,50 @@ cmd_protect(){
   say "protect: done ($1)"
 }
 
-cmd_verify(){ die "verify: not implemented yet"; }
+expect_refusal(){ # $1 label, $2 reason ERE, $3 command string (runs via RUN_IN)
+  local label="$1" re="$2" cmd="$3" out rc=0
+  out="$(RUN_IN "$cmd" 2>&1)" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf '%s\n' "$out" >&2
+    die "GATE NOT BINDING: '$label' SUCCEEDED on $VTARGET — stop, fix the ruleset before any real work"
+  fi
+  grep -Eqi -- "$re" <<<"$out" || {
+    printf '%s\n' "$out" >&2
+    die "GATE NOT BINDING: '$label' was refused, but not for the expected reason (/$re/) — investigate before trusting the gate"
+  }
+  say "OK (refused as expected): $label"
+}
+
+cmd_verify(){
+  VTARGET="$1"
+  if [[ "$VTARGET" == */* ]]; then
+    local tmp; tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' RETURN
+    say "cloning $VTARGET as $(machine_user) (temp, removed after)"
+    local tok; tok="$(mu_token)"
+    GH_TOKEN="$tok" gh repo clone "$VTARGET" "$tmp/repo" >/dev/null
+    RUN_IN(){ (cd "$tmp/repo" && GH_TOKEN="$tok" bash -lc "$1"); }
+  else
+    local c="${VTARGET}-agent-1"
+    docker ps --format '{{.Names}}' | grep -qx "$c" || die "container $c is not running (agent-up up $VTARGET first)"
+    RUN_IN(){ docker exec -w /workspace "$c" bash -lc "$1"; }
+  fi
+  say "verifying the merge gate (machine-user-and-rulesets.md step 6; a throwaway PR as the machine user)"
+  RUN_IN 'git switch -c verify-ruleset 2>/dev/null || git switch verify-ruleset' >/dev/null
+  RUN_IN 'git commit --allow-empty -m "chore: verify ruleset"' >/dev/null
+  RUN_IN 'git push -u origin verify-ruleset' >/dev/null
+  local pr_out; pr_out="$(RUN_IN 'gh pr create --fill' 2>&1)" \
+    || grep -q 'already exists' <<<"$pr_out" || die "could not open the verification PR: $pr_out"
+  say "waiting for required checks on the verification PR"
+  local checks; checks="$(RUN_IN 'gh pr checks --watch' 2>&1)" \
+    || warn "no required check reported yet: the required-check rule stays UNTESTED (re-run verify once CI exists)"
+  printf '%s\n' "$checks" | tail -n2
+  expect_refusal "merge own PR"        'base branch policy|review'        'gh pr merge --squash'
+  expect_refusal "approve own PR"      'approve your own'                 'gh pr review --approve'
+  expect_refusal "push straight to main" 'GH013|repository rule'         'git push origin HEAD:main'
+  expect_refusal "admin-merge own PR"  'rule violations|not.*admin'       'gh pr merge --squash --admin'
+  [[ "$VTARGET" == */* ]] || RUN_IN 'git switch main' >/dev/null
+  say "GATE VERIFIED on $VTARGET. Approve-and-merge or close the verification PR in the browser (only your approval counts)."
+}
 
 [ $# -ge 1 ] || usage
 sub="$1"; shift

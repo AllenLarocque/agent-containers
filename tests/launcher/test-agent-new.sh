@@ -47,6 +47,19 @@ echo "OP: $*" >> "$OPLOG"
 case "$1" in read) echo fake-op-secret ;; signin) echo ":" ;; esac
 STUB
 chmod +x "$T/bin/gh" "$T/bin/op"
+# ---- stub docker: logs; exec plan driven by $STATE/exec-plan
+cat > "$T/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+echo "DOCKER: $*" >> "$DLOG"
+if [ "$1" = ps ]; then printf 'p1-agent-1\nnewproj-agent-1\n'; exit 0; fi
+# docker exec -w /workspace <name> bash -lc CMD
+cmd="${@: -1}"
+while IFS='|' read -r marker rc out; do
+  case "$cmd" in *"$marker"*) printf '%s\n' "$out"; exit "$rc" ;; esac
+done < "$STATE/exec-plan"
+exit 0
+STUB
+chmod +x "$T/bin/docker"
 run(){ HOME="$H" AGENT_CONTAINERS_CONFIG="$CFGROOT" PATH="$T/bin:$PATH" "$AN" "$@"; }
 
 echo "== task 1: CLI and preflight =="
@@ -101,5 +114,25 @@ newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
 check "--require build-test accepted"      run protect allen/repo1 --vault agent-p1 --require build-test
 check "  build-test present in posted JSON" grep -q '"context": *"build-test"' "$STATE/ruleset-posted"
 check "  gitleaks still present too"       grep -q '"context": *"gitleaks"' "$STATE/ruleset-posted"
+
+echo "== task 4: verify =="
+plan_ok(){ cat > "$STATE/exec-plan" <<'PLAN'
+pr checks|0|gitleaks	pass
+pr merge --squash --admin|1|GraphQL: Repository rule violations found (mergePullRequest)
+pr merge|1|X Pull request #1 is not mergeable: the base branch policy prohibits the merge.
+pr review --approve|1|failed to create review: GraphQL: Review Can not approve your own pull request
+push origin HEAD:main|1|remote: error: GH013: Repository rule violations found for refs/heads/main.
+PLAN
+}
+newstate; plan_ok
+check "gate passes on the canned refusals"    run verify p1
+newstate; plan_ok
+sed -i 's|^push origin HEAD:main.1.remote.*|push origin HEAD:main\|0\|pushed!|' "$STATE/exec-plan"
+refuses "push-to-main success -> GATE NOT BINDING" 'GATE NOT BINDING' run verify p1
+newstate; plan_ok
+sed -i 's|GH013[^|]*|! [rejected] main -> main (non-fast-forward)|' "$STATE/exec-plan"
+refuses "wrong refusal reason -> GATE NOT BINDING" 'GATE NOT BINDING' run verify p1
+newstate
+refuses "container not running" 'not running' sh -c 'echo > /dev/null; HOME='"$H"' AGENT_CONTAINERS_CONFIG='"$CFGROOT"' PATH='"$T"'/bin:$PATH '"$AN"' verify nosuch'
 
 [ "$fail" -eq 0 ] && echo "AGENT-NEW: ALL PASSED" || { echo "AGENT-NEW: FAILURES"; exit 1; }
