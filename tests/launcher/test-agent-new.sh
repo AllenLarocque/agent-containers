@@ -41,7 +41,7 @@ case "$*" in
   "repo create "*)
     touch "$STATE/repo-exists"; mkdir -p "$STATE/created"
     d="$(basename "$3")"
-    mkdir -p "$d" && (cd "$d" && "$REALGIT" init -q -b main && "$REALGIT" commit -q --allow-empty -m seed && "$REALGIT" remote add origin "https://github.com/x/y")
+    mkdir -p "$d" && (cd "$d" && "$REALGIT" init -q -b main && "$REALGIT" commit -q --allow-empty -m seed && "$REALGIT" remote add origin "https://github.com/$3")
     ;;
   "repo clone "*) mkdir -p "${*: -1}" ;;
   *) exit 0 ;;
@@ -55,7 +55,12 @@ case "$1 ${2:-}" in
   "signin ")            echo ":" ;;
   "vault get")          [ -f "$STATE/vault" ] ;;
   "vault create")       touch "$STATE/vault" ;;
-  "service-account create") echo fake-sa-token ;;
+  "vault list")
+    printf 'ID    NAME\n'
+    [ -f "$STATE/sa-vault" ] && printf 'v1    %s\n' "$(cat "$STATE/sa-vault")"
+    [ -f "$STATE/vault-list-extra" ] && printf 'v2    %s\n' "$(cat "$STATE/vault-list-extra")"
+    ;;
+  "service-account create") echo "$3" > "$STATE/sa-vault"; echo fake-sa-token ;;
   "item get")           [ -f "$STATE/item-$3" ] ;;
   "item create")        for a in "$@"; do case "$a" in --title) want=next ;; *) [ "${want:-}" = next ] && { touch "$STATE/item-$a"; want=; } ;; esac; done; true ;;
   "read "*)             echo fake-op-secret ;;
@@ -145,7 +150,7 @@ check "no --vault: invite happens"           test -f "$STATE/invited"
 check "no --vault: WARNING to accept manually" grep -q 'WARNING.*accept the invitation' <<<"$OUT"
 
 echo "== task 3: protect / ruleset + warnings =="
-EXPECT_NORM='active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:true|gitleaks'
+EXPECT_NORM='active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:true|gitleaks|refs:~DEFAULT_BRANCH/|strict:false|merge,rebase,squash'
 newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
 check "no ruleset: POSTs one"              run protect allen/repo1 --vault agent-p1
 check "  posted JSON names protect-main"   grep -q '"name": *"protect-main"' "$STATE/ruleset-posted"
@@ -159,6 +164,11 @@ newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
 echo 7 > "$STATE/ruleset-id"; echo 'active|RepositoryRole:5:always|deletion|pr:0:false:false:false|' > "$STATE/ruleset-norm"
 refuses "divergent ruleset -> refuse, no write" 'refusing to modify' run protect allen/repo1 --vault agent-p1
 check "  nothing POSTed on refusal"        test ! -f "$STATE/ruleset-posted"
+newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
+echo 7 > "$STATE/ruleset-id"
+echo 'active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:true|gitleaks|refs:~DEFAULT_BRANCH/refs/heads/main|strict:false|merge,rebase,squash' > "$STATE/ruleset-norm"
+refuses "conditions-only drift -> refuse, no write" 'refusing to modify' run protect allen/repo1 --vault agent-p1
+check "  nothing POSTed on conditions drift" test ! -f "$STATE/ruleset-posted"
 newstate; touch "$STATE/collab"; echo true > "$STATE/actions-approve"
 OUT=$(run protect allen/repo1 --vault agent-p1 2>&1)
 check "warns: no CODEOWNERS"               grep -q 'WARNING.*CODEOWNERS' <<<"$OUT"
@@ -182,6 +192,25 @@ newstate; plan_ok
 VOUT=$(run verify p1 2>&1); VRC=$?
 check "gate passes on the canned refusals"   test "$VRC" -eq 0
 check "  all four refusals asserted"         test "$(grep -c 'OK (refused as expected)' <<<"$VOUT")" -eq 4
+newstate; cat > "$STATE/exec-plan" <<'PLAN'
+pr checks|1|no checks reported on the latest commit
+pr merge --squash --admin|1|GraphQL: Repository rule violations found (mergePullRequest)
+pr merge|1|X Pull request #1 is not mergeable: the base branch policy prohibits the merge.
+pr review --approve|1|failed to create review: GraphQL: Review Can not approve your own pull request
+push origin HEAD:main|1|remote: error: GH013: Repository rule violations found for refs/heads/main.
+PLAN
+VOUT=$(run verify p1 2>&1); VRC=$?
+check "no checks reported -> warns UNTESTED, continues" test "$VRC" -eq 0
+check "  UNTESTED warning shown"             grep -qi 'UNTESTED' <<<"$VOUT"
+check "  still asserts four refusals"        test "$(grep -c 'OK (refused as expected)' <<<"$VOUT")" -eq 4
+newstate; cat > "$STATE/exec-plan" <<'PLAN'
+pr checks|1|gitleaks fail 10s
+pr merge --squash --admin|1|GraphQL: Repository rule violations found (mergePullRequest)
+pr merge|1|X Pull request #1 is not mergeable: the base branch policy prohibits the merge.
+pr review --approve|1|failed to create review: GraphQL: Review Can not approve your own pull request
+push origin HEAD:main|1|remote: error: GH013: Repository rule violations found for refs/heads/main.
+PLAN
+refuses "red check -> die, not UNTESTED warning" 'not green' run verify p1
 newstate; plan_ok
 sed -i 's|^push origin HEAD:main.1.remote.*|push origin HEAD:main\|0\|pushed!|' "$STATE/exec-plan"
 refuses "push-to-main success -> GATE NOT BINDING" 'GATE NOT BINDING' run verify p1
@@ -190,6 +219,7 @@ sed -i 's|GH013[^|]*|! [rejected] main -> main (non-fast-forward)|' "$STATE/exec
 refuses "wrong refusal reason -> GATE NOT BINDING" 'GATE NOT BINDING' run verify p1
 newstate
 refuses "container not running" 'not running' sh -c 'echo > /dev/null; HOME='"$H"' AGENT_CONTAINERS_CONFIG='"$CFGROOT"' PATH='"$T"'/bin:$PATH '"$AN"' verify nosuch'
+refuses "repo mode without --vault refused" 'needs --vault' run verify allen/repo9
 export TMPDIR="$T/tmpdirs"; mkdir -p "$TMPDIR"
 refuses "repo mode: aborts in empty clone" 'not a git repository|fatal' run verify allen/repo9 --vault agent-p1
 check "  temp clone cleaned up by EXIT trap" test -z "$(ls -A "$TMPDIR")"
@@ -220,7 +250,22 @@ check "re-run exits 0"            test "$RC" -eq 0
 check "re-run: >=4 SKIP lines"    test "$(grep -c 'SKIP (done)' <<<"$OUT")" -ge 4
 check "  no second repo create"   sh -c "! grep -q 'repo create' '$GHLOG'"
 check "  no push on re-run"       sh -c "! grep -q '^GIT: push' '$GITLOG'"
+mkdir -p "$PROJHOME/Decoy" && git -C "$PROJHOME/Decoy" init -q && git -C "$PROJHOME/Decoy" remote add origin https://github.com/other/thing
+refuses "existing folder with wrong origin refused" 'refusing to adopt' run project Decoy --token-from agent-old < /dev/null
 unset AGENT_NEW_STOP_AFTER
+
+echo "== task 5b: vault scope exclusivity =="
+newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
+export AGENT_NEW_STOP_AFTER=token
+OUT=$(run project VaultOk --token-from agent-old < /dev/null 2>&1)
+check "normal scope: no scope warning"  bash -c '! grep -q "scoped vault list" <<<"$0"' "$OUT"
+newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
+echo other-vault > "$STATE/vault-list-extra"
+OUT=$(run project VaultWarn --token-from agent-old < /dev/null 2>&1); RC=$?
+check "extra vault visible -> scope WARNING, not die" grep -q "expected ONLY 'agent-vaultwarn'" <<<"$OUT"
+check "  run still completes (warn, not die)"          test "$RC" -eq 0
+unset AGENT_NEW_STOP_AFTER
+rm -rf "$PROJHOME/VaultOk" "$CFGROOT/vaultok" "$PROJHOME/VaultWarn" "$CFGROOT/vaultwarn"
 
 echo "== task 6: project steps 7-10 =="
 fullstate(){ newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"

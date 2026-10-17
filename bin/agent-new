@@ -48,14 +48,18 @@ preflight_owner(){ # prints the owner login; dies if gh is absent/anonymous/the 
 project_stop_after(){ [ "${AGENT_NEW_STOP_AFTER:-}" = "$1" ] && { say "stopping after '$1' (test seam)"; exit 0; } || true; }
 
 project_repo(){ # creates/clones $REPO into $DIR, branch main
-  if [ -d "$DIR/.git" ]; then skip "clone exists at $DIR"
+  if [ -d "$DIR/.git" ]; then
+    local org; org="$(git -C "$DIR" remote get-url origin 2>/dev/null || true)"
+    case "$org" in *github.com[:/]"$REPO"|*github.com[:/]"$REPO".git) skip "clone exists at $DIR" ;;
+      *) die "$DIR exists but its origin ($org) is not $REPO: refusing to adopt it" ;;
+    esac
   elif gh repo view "$REPO" >/dev/null 2>&1; then
     say "repo $REPO exists: cloning to $DIR"; gh repo clone "$REPO" "$DIR" >/dev/null
   else
     say "creating $REPO ($VISIBILITY) and cloning to $DIR"
     (cd "$(dirname "$DIR")" && gh repo create "$REPO" "--$VISIBILITY" --clone >/dev/null)
   fi
-  (cd "$DIR" && [ "$(git branch --show-current)" = main ] || git branch -m "$(git branch --show-current)" main)
+  (cd "$DIR" && { [ "$(git branch --show-current)" = main ] || git branch -m "$(git branch --show-current)" main; })
 }
 project_config(){
   if [ -d "$CFG_ROOT/$PROJ" ]; then skip "config exists at $CFG_ROOT/$PROJ"
@@ -106,8 +110,8 @@ project_vault(){
     tok=""
     say "scope check: the service account must see ONLY $VAULT"
     unset OP_SERVICE_ACCOUNT_TOKEN
-    local seen; seen="$(OP_SERVICE_ACCOUNT_TOKEN="$(op read "op://Personal/$sa/credential")" op vault list 2>&1)" || true
-    grep -q "$VAULT" <<<"$seen" || warn "scoped vault list did not show $VAULT — check the service account by hand"
+    local seen; seen="$(OP_SERVICE_ACCOUNT_TOKEN="$(op read "op://Personal/$sa/credential")" op vault list 2>/dev/null | tail -n +0 | grep -v '^NAME\|^ID' | awk 'NF {print $NF}' | sort -u)" || true
+    [ "$seen" = "$VAULT" ] || warn "scoped vault list was '$seen', expected ONLY '$VAULT' — check the service account's vault access by hand"
   fi
 }
 project_token(){
@@ -231,7 +235,10 @@ NORM_JQ='[.enforcement,
  (.rules | map(.type) | sort | join(",")),
  ((.rules[] | select(.type=="pull_request") | .parameters |
    "pr:\(.required_approving_review_count):\(.dismiss_stale_reviews_on_push):\(.require_code_owner_review):\(.require_last_push_approval)") // "pr:-"),
- ((.rules[] | select(.type=="required_status_checks") | .parameters.required_status_checks | map(.context) | sort | join("+")) // "")
+ ((.rules[] | select(.type=="required_status_checks") | .parameters.required_status_checks | map(.context) | sort | join("+")) // ""),
+ ((.conditions.ref_name | "refs:\(.include|sort|join(","))/\(.exclude|sort|join(","))") // "refs:-"),
+ ((.rules[] | select(.type=="required_status_checks") | .parameters | "strict:\(.strict_required_status_checks_policy)") // "strict:-"),
+ ((.rules[] | select(.type=="pull_request") | .parameters.allowed_merge_methods | sort | join(",")) // "")
 ] | join("|")'
 
 checks_sorted(){ printf '%s\n' "${REQUIRE_CHECKS[@]}" | sort -u; }
@@ -259,7 +266,7 @@ ruleset_json(){
 JSON
 }
 ruleset_norm_expected(){
-  printf 'active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:true|%s' \
+  printf 'active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:true|%s|refs:~DEFAULT_BRANCH/|strict:false|merge,rebase,squash' \
     "$(checks_sorted | paste -sd+ -)"
 }
 protect_ruleset(){ # $1 owner/repo
@@ -312,6 +319,7 @@ expect_refusal(){ # $1 label, $2 reason ERE, $3 command string (runs via RUN_IN)
 cmd_verify(){
   VTARGET="$1"
   if [[ "$VTARGET" == */* ]]; then
+    [ -n "$VAULT" ] || die "verify <owner>/<repo> needs --vault <op-vault> (the project vault holding github-agent)"
     # trap value frozen at set time: an EXIT trap outlives this function's locals,
     # so deferred '$tmp' would be unbound under set -u. || true: a failing cleanup
     # must not overwrite the script's real exit status.
@@ -332,8 +340,14 @@ cmd_verify(){
   local pr_out; pr_out="$(RUN_IN 'gh pr create --fill' 2>&1)" \
     || grep -q 'already exists' <<<"$pr_out" || die "could not open the verification PR: $pr_out"
   say "waiting for required checks on the verification PR"
-  local checks; checks="$(RUN_IN 'gh pr checks --watch' 2>&1)" \
-    || warn "no required check reported yet: the required-check rule stays UNTESTED (re-run verify once CI exists)"
+  local checks crc=0; checks="$(RUN_IN 'gh pr checks --watch' 2>&1)" || crc=$?
+  if [ "$crc" -ne 0 ]; then
+    if grep -qi 'no checks reported' <<<"$checks"; then
+      warn "no required check reported yet: the required-check rule stays UNTESTED (re-run verify once CI exists)"
+    else
+      die "required checks are not green on the verification PR — fix CI first, then re-run verify: $(tail -n5 <<<"$checks")"
+    fi
+  fi
   printf '%s\n' "$checks" | tail -n2
   expect_refusal "merge own PR"        'base branch policy|review'        'gh pr merge --squash'
   expect_refusal "approve own PR"      'approve your own'                 'gh pr review --approve'
