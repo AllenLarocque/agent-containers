@@ -215,6 +215,11 @@ relay, not Tailscale).
    health warning. If it says logged out, run `tailscale login` and open the printed link: the tray
    icon can still say Connected, and `tailscale up` returns silently without logging in.
    `tailscale serve status` must still list the project's port.
+4. The app says **"This client requires a newer server"**: the app (which auto-updates) speaks a
+   newer T3 protocol than the container's pinned T3 server. Every hop above works, and the server's
+   own web app at the same `https://…ts.net:<port>` address still works in the phone's browser. Fix:
+   bump `T3_VERSION` in `images/base/Dockerfile`, then pin the new digest and `agent-up up` each
+   project. Only protocol bumps cause this (the first was T3 0.1.0, 2026-10-15), not every release.
 
 ## Research container
 
