@@ -282,9 +282,16 @@ fullstate
 check "full project run"             run project NewProj --token-from agent-old < /dev/null
 check "  serve mapping with formula port" grep -q '^TS: serve --bg --https=8447 3778' "$TSLOG"
 check "  up with token in env"       grep -q '^AU(tok): up newproj' "$AULOG"
-check "  research up too"            grep -q '^AU(tok): up research' "$AULOG"
+check "  no research config: no research up"  sh -c "! grep -q 'up research' '$AULOG'"
 OUT=$(run project NewProj --token-from agent-old < /dev/null 2>&1)
 check "  checklist printed"          grep -q "codex login --device-auth" <<<"$OUT"
+check "  WARNING: research has no container yet"  grep -q "WARNING: .*research" <<<"$OUT"
+check "  checklist mentions agent-up init --profile research"  grep -q "no container yet: agent-up init --profile research" <<<"${OUT#*DONE}"
+mkdir -p "$CFGROOT/research"; : > "$AULOG"
+check "research config exists: run completes"  run project NewProj --token-from agent-old < /dev/null
+check "  research up WITHOUT the token"   grep -q '^AU: up research' "$AULOG"
+check "  no token-bearing research up"    sh -c "! grep -q 'AU(tok): up research' '$AULOG'"
+rmdir "$CFGROOT/research"
 fullstate; printf 'https://host:8447 (Funnel on)\n|-- / proxy http://127.0.0.1:3778\n' > "$STATE/ts-status"
 refuses "serve status without (tailnet only)" 'tailnet only' run project NewProj --token-from agent-old < /dev/null
 fullstate

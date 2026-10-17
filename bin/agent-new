@@ -175,7 +175,12 @@ project_up(){
   unset OP_SERVICE_ACCOUNT_TOKEN
   OP_SERVICE_ACCOUNT_TOKEN="$(op read "op://Personal/$VAULT service account/credential")" agent-up up "$PROJ"
   if [ "$RESEARCH" = 1 ]; then
-    OP_SERVICE_ACCOUNT_TOKEN="$(op read "op://Personal/$VAULT service account/credential")" agent-up up research
+    if [ -d "$CFG_ROOT/research" ]; then
+      say "restarting research so it mounts this project's exchange folder (no token passed)"
+      env -u OP_SERVICE_ACCOUNT_TOKEN agent-up up research
+    else
+      warn "research is on, but there is no research container yet: run 'agent-up init --profile research', then 'agent-up up research'"
+    fi
   fi
   unset OP_SERVICE_ACCOUNT_TOKEN
 }
@@ -188,6 +193,9 @@ agent-new: DONE. Interactive logins left (once each, inside the container):
   agent-up shell $PROJ
     claude                      # subscription login, then /exit
     codex login --device-auth   # open the printed link on the host
+EOF
+  [ "$RESEARCH" = 1 ] && [ ! -d "$CFG_ROOT/research" ] && cat <<EOF
+  research is on but has no container yet: agent-up init --profile research, then agent-up up research
 EOF
   [ "$T3MODE" = publish ] && cat <<EOF
     t3 connect --headless       # approve with the SAME T3 account the apps use; 'n' to any service prompt
