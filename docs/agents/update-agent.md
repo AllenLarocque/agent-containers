@@ -291,8 +291,9 @@ exact titles from "Repo constants": `update: OS security fix (no version changes
 `update: T3 release failed verification (no version changes)` for a verification failure.
 For each kind present:
 - If an open issue with that exact title exists (step 1; its body is in
-  `/tmp/update-work/issue-<i>.md`): if its body already reports every current item of that kind, change nothing; otherwise refresh its body in place (step 6, issue). Never
-  open a duplicate.
+  `/tmp/update-work/issue-<i>.md`): if its body already reports every current item of that kind,
+  change nothing; otherwise refresh its body in place (step 6, issue). Never open
+  a duplicate.
 - If none is open: check the most recently closed one with that title,
   `gh api 'repos/AllenLarocque/agent-containers/issues?state=closed&sort=updated&direction=desc&per_page=100' --jq '.[] | select(.pull_request == null and .title == "<exact title>") | .number' | head -n 1`;
   if it prints a number `<i>`, save its body with
