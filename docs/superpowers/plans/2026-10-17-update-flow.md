@@ -31,15 +31,17 @@
 
 ---
 
-### Task 1: `agent-up busy <project>` (busy scan)
+### Task 1: `agent-up busy <project>... | --all` (busy scan)
 
 **Files:**
-- Modify: `bin/agent-up` (new helper `busy_scan`, new `cmd_busy`, usage line, dispatch)
+- Modify: `bin/agent-up` (new helpers `busy_scan` and `project_names`, new `cmd_busy`, usage line, dispatch)
 - Test: `tests/launcher/test-agent-up.sh` (extend the docker stub; new section `# ---- busy`)
 
 **Interfaces:**
 - Produces: `busy_scan <container>` → prints one line per finding, `BUSY: <what>` or `IDLE: <what>`; returns 0 when nothing is busy, 1 when anything is busy. Not running → prints nothing, returns 0.
+- Produces: `project_names` → every project name under `$CFG_ROOT/*/project.conf`, one per line, alphabetical, with the project whose `PROJECT_DIR` is the clone root (`$HERE/..`) moved last. Task 2 uses the same order.
 - Produces: `agent-up busy <project>` → runs `busy_scan` on `<name>-agent-1`, same output and exit status.
+- Produces: `agent-up busy --all` (or several names) → scans every project from `project_names` **in parallel** (one background `busy_scan` per running container, output to a temp file, `wait`, then printed in order), so the whole check takes one sample interval, not one per project. Output per project: a `== <name>` header, then its `BUSY:`/`IDLE:` lines, or `not running`. Last line: `Busy: <name>, <name>` or `Nothing busy.` Exit 1 if any project is busy, else 0. Unknown project name → die, as elsewhere.
 
 Detection (two `ps` snapshots `AGENT_UP_BUSY_SAMPLE` seconds apart, default `5`; tests use `0`), via `docker exec <c> ps -eo pid=,ppid=,etimes=,cputimes=,comm=,args=`:
 - `Rscript` → always `BUSY: Rscript <args, first 80 chars> (running <h>h<m>m)`.
@@ -54,10 +56,13 @@ Detection (two `ps` snapshots `AGENT_UP_BUSY_SAMPLE` seconds apart, default `5`;
   - `check "busy: idle rsession -> IDLE, exit 0"` (rsession cputime unchanged) and output has `IDLE: idle R session (rsession)`.
   - `refuses "busy: claude with a child -> BUSY" 'agent may be mid-task'` (a `bash` line whose ppid is claude's pid).
   - `check "busy: stopped container -> nothing, exit 0"` with `RUNNING` file = 0.
+  - `busy --all` with three projects (one busy, one idle, one stopped; the stub's ps snapshots keyed per container, e.g. `$T/ps.<c>.1`/`.2`): exit 1; headers in `project_names` order; `not running` for the stopped one; last line `Busy: <the busy one>`.
+  - `busy --all` with all idle → exit 0, last line `Nothing busy.`
+  - `project_names` puts the clone-root project last even when it sorts first.
 - [ ] **Step 2: Run** `bash tests/launcher/test-agent-up.sh 2>&1 | grep -E '^FAIL|busy'` → the new cases FAIL (unknown command).
-- [ ] **Step 3: Implement** `busy_scan` and `cmd_busy` in `bin/agent-up`; usage line `agent-up busy <project>   is R work or an agent running? (exit 1 = busy)`.
+- [ ] **Step 3: Implement** `busy_scan`, `project_names` and `cmd_busy` in `bin/agent-up`; usage line `agent-up busy --all | <project>...   is R work or an agent running? (exit 1 = busy)`.
 - [ ] **Step 4: Run** the full suite → `ALL PASSED` (or the file's existing success line), and shellcheck clean.
-- [ ] **Step 5: Commit** `feat(agent-up): busy <project> — running R work or an agent mid-task`.
+- [ ] **Step 5: Commit** `feat(agent-up): busy --all | <project> — running R work or an agent mid-task`.
 
 ### Task 2: `agent-up update --all | <project>...` and the longer pair wait
 
@@ -66,12 +71,12 @@ Detection (two `ps` snapshots `AGENT_UP_BUSY_SAMPLE` seconds apart, default `5`;
 - Test: `tests/launcher/test-agent-up.sh` (new section `# ---- update`; stub `op read`, stub `sleep` for the pair-wait test)
 
 **Interfaces:**
-- Consumes: `busy_scan` (Task 1).
+- Consumes: `busy_scan`, `project_names` (Task 1).
 - Produces: `digest_for <image-name> <digests.md>` → prints `sha256:<64hex>` from the row `| <image-name> | <tag> | \`sha256:…\` |`, or nothing.
 - Produces: `t3_protocol_of <container>` → the `T3_PROTOCOL` value from `docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}'`, or empty.
 - Produces: `agent-up update --all` / `agent-up update <project>...`; exit 0 only if every project ended updated, current, or skipped by the owner's choice.
 
-Flow per project (configs = every `$CFG_ROOT/*/project.conf`; order: alphabetical, then the agent-containers project last):
+Flow per project (projects and order from `project_names`):
 1. Image = the `image:` line in `compose.yaml` (`…/<image-name>@sha256:…`). No row in `$HERE/../digests.md` → `SKIP (image <name> not in digests.md)`. Same digest → `current`.
 2. Not running (`docker inspect -f {{.State.Running}}` ≠ true) → read token (builders), rewrite digest, report `updated, not started`; no restart, no pairing.
 3. Running → `busy_scan`; if busy, print its lines and ask `[s]kip / [r]estart anyway / [q]uit (default s): ` reading stdin; EOF/empty → skip. `q` → stop the run, summary printed.
@@ -112,7 +117,7 @@ Flow per project (configs = every `$CFG_ROOT/*/project.conf`; order: alphabetica
 **Interfaces:** Produces `ENV T3_PROTOCOL=<int>` (Task 2 reads it; Task 5's prompt bumps it).
 
 - [ ] **Step 1:** add the check; run → FAIL.
-- [ ] **Step 2:** add the ENV and the docs (the update day, in order: merge the update PR → merge the digests PR → `git pull` in the clone → `agent-up update --all` → re-add environments it lists → update the apps).
+- [ ] **Step 2:** add the ENV and the docs (the update day, in order: merge the update PR → merge the digests PR → `git pull` in the clone → optionally `agent-up busy --all` to see what's running → `agent-up update --all` → re-add environments it lists → update the apps).
 - [ ] **Step 3:** run the suite → pass.
 - [ ] **Step 4: Commit** `feat(image): T3_PROTOCOL marker; docs: the update day`.
 
