@@ -1222,6 +1222,8 @@ echo 0 > "$T/RUNNING"
 bout="$(au busy "$NAME" 2>&1)" && rc=0 || rc=$?
 check "busy: stopped container -> nothing, exit 0" test "$rc" -eq 0 -a -z "$bout"
 rm -f "$T/RUNNING"
+rm -f "$T/ps.$BC".*
+refuses "busy: running container whose ps prints nothing -> BUSY (fail closed), exit 1" 'BUSY: cannot inspect processes \(docker exec ps failed\)' au busy "$NAME"
 refuses "busy: unknown project" 'no config for' au busy nosuch
 refuses "busy: no arguments prints usage" 'usage:' au busy
 
@@ -1240,6 +1242,7 @@ check "  ...headers in project_names order, 'not running' for the stopped one" \
 check "  ...last line names the busy project" test "$(tail -n 1 <<<"$aout")" = "Busy: pa"
 check "  ...pb's idle agent is listed under its header" grep -qxF "IDLE: agent idle (claude)" <<<"$aout"
 printf '%s\n' "$BASEPS" | snap pa-agent-1 1; printf '%s\n' "$BASEPS" | snap pa-agent-1 2
+printf '%s\n' "$BASEPS" | snap pb-agent-1 1; printf '%s\n' "$BASEPS" | snap pb-agent-1 2
 aout="$(au busy --all 2>&1)" && rc=0 || rc=$?
 check "busy --all: all idle -> exit 0" test "$rc" -eq 0
 check "  ...last line is 'Nothing busy.'" test "$(tail -n 1 <<<"$aout")" = "Nothing busy."
