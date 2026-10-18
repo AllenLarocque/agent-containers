@@ -4,7 +4,7 @@ on:
     branches: [main]
     paths: ["images/**", "scripts/build-publish.sh", "scripts/render-digests.sh", ".github/workflows/publish.yml"]
   schedule:
-    - cron: "17 9 * * 1"        # Mondays: rebuild for OS security patches -> digest PR
+    - cron: "17 9 * * 1"        # Mondays: rebuild + test for OS patches; no digests PR (they ride with the next bundle)
   workflow_dispatch:
 permissions:
   contents: write
@@ -37,8 +37,10 @@ jobs:
         env:
           TAG: ${{ steps.tag.outputs.tag }}
         run: scripts/build-publish.sh ghcr.io/allenlarocque "$TAG" digests.md
+      # The Monday OS-patch rebuild builds and tests only; its patches ride along with the next update bundle.
       - uses: peter-evans/create-pull-request@v7
         id: cpr
+        if: github.event_name != 'schedule'
         with:
           branch: chore/digests-${{ steps.tag.outputs.tag }}
           title: "chore: image digests ${{ steps.tag.outputs.tag }}"
