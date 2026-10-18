@@ -34,6 +34,11 @@ AMBIENT=()    # extra (hostile) environment for a call
 cat > "$T/bin/op" <<'STUB'
 #!/usr/bin/env bash
 echo "OP: $*" >> "$OPLOG"
+if [ "${1-}" = read ]; then   # op read "op://Personal/agent-<n> service account/credential"
+  n="${2#op://Personal/agent-}"; n="${n%% service account/*}"
+  [ ! -f "$(dirname "$OPLOG")/OPREAD_FAIL_$n" ] || exit 1
+  echo "sat-$n"; exit 0
+fi
 while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
 shift
 GH_TOKEN=fake-secret-value-123 exec "$@"
@@ -56,6 +61,13 @@ case "$*" in
     sd="$(dirname "$DLOG")"; n=$(( $(cat "$sd/pair.count" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$sd/pair.count"
     if [ -f "$sd/PAIR_FAILS" ] && [ "$n" -le "$(cat "$sd/PAIR_FAILS")" ]; then exit 1; fi
     echo "token=fakeTok_123" ;;
+  "inspect -f {{range .Config.Env}}{{println .}}{{end}} "*)
+    sd="$(dirname "$DLOG")"; [ ! -f "$sd/proto.$4" ] || echo "T3_PROTOCOL=$(cat "$sd/proto.$4")" ;;
+  "exec -u agent "*" t3 --version") echo "0.9.9" ;;
+  "compose "*" up -d"*)   # a test can make one project's `up` fail, or move its protocol marker
+    sd="$(dirname "$DLOG")"; pn="$*"; pn="${pn#*-p }"; pn="${pn%% *}"
+    [ ! -f "$sd/UPFAIL.$pn" ] || exit 1
+    [ ! -f "$sd/proto.$pn-agent-1.new" ] || cp "$sd/proto.$pn-agent-1.new" "$sd/proto.$pn-agent-1" ;;
   "exec -u agent "*" claude --version") echo "9.9.9 (Claude Code)" ;;
   "exec -u agent "*" codex --version") echo "codex-cli 8.8.8" ;;
 esac
@@ -1254,6 +1266,125 @@ mkdir -p "$BR/aa"; printf 'PROJECT=aa\nPROJECT_DIR=%s/\n' "$ROOT/bin/.." > "$BR/
 check "project_names: the clone-root project goes last even when it sorts first" \
   test "$(au busy --all 2>&1 | grep '^==' | tr '\n' ' ')" = "== pa == pb == pc == aa "
 rm -f "$T/RUNNING.pc-agent-1"; AMBIENT=()
+
+# ---- update: agent-up update --all | <project>... (owner-run; moves projects to the digests in digests.md)
+UR="$T/upd-cfg"; mkdir -p "$UR"
+OLD1=$(printf '1%.0s' $(seq 64))
+GISD=$(printf 'c%.0s' $(seq 64)); BASED=$(printf 'b%.0s' $(seq 64))
+cat > "$T/digests.md" <<DIGESTS
+# Image digests
+
+| image | tag | digest |
+|---|---|---|
+| spades-base | 2026.10.17-x | \`sha256:$BASED\` |
+| spades-gis | 2026.10.17-x | \`sha256:$GISD\` |
+DIGESTS
+uenv(){ AMBIENT=(AGENT_UP_BUSY_SAMPLE=0 AGENT_CONTAINERS_CONFIG="$UR" AGENT_UP_DIGESTS="$T/digests.md" AGENT_UP_SKIP_GIT_CHECK=1); }
+ucfg(){ echo "$UR/$1/compose.yaml"; }
+uset(){ # $1 project, $2 image path, $3 digest hex: rewrite the compose image line
+  sed -i -E "s|^( *image: *).*|\1$2@sha256:$3|" "$(ucfg "$1")"; }
+uidle(){ printf '%s\n' "$BASEPS" | snap "$1-agent-1" 1; printf '%s\n' "$BASEPS" | snap "$1-agent-1" 2; }
+ubusy(){ { printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 Rscript       Rscript x.R'; } | snap "$1-agent-1" 1
+         { printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 Rscript       Rscript x.R'; } | snap "$1-agent-1" 2; }
+uup(){ grep -cE "^ARGS: compose .* -p $1 up -d" "$DLOG" || true; }
+ureset(){ for pn in "$@"; do uset "$pn" ghcr.io/allenlarocque/spades-gis "$OLD1"; uidle "$pn"; done; : > "$DLOG"; : > "$OPLOG"; }
+uenv
+for pn in alpha beta; do
+  mkdir -p "$T/upd-$pn"; au init "$T/upd-$pn" --name "$pn" >/dev/null
+done
+au init --profile research --image base >/dev/null
+ureset alpha beta; uset research ghcr.io/allenlarocque/spades-base "$OLD1"; uidle research
+rm -f "$T"/RUNNING*
+uout="$(au update --all </dev/null 2>&1)" && rc=0 || rc=$?
+check "update --all: exit 0 when all three updated" test "$rc" -eq 0
+check "  ...builders' compose digest rewritten" bash -c 'grep -qx "    image: ghcr.io/allenlarocque/spades-gis@sha256:$2" "$1/alpha/compose.yaml" && grep -qx "    image: ghcr.io/allenlarocque/spades-gis@sha256:$2" "$1/beta/compose.yaml"' _ "$UR" "$GISD"
+check "  ...research digest rewritten (spades-base)" grep -qx "    image: ghcr.io/allenlarocque/spades-base@sha256:$BASED" "$(ucfg research)"
+check "  ...compose.yaml keeps its mode (600)" test "$(stat -c %a "$(ucfg alpha)")" = 600
+check "  ...an up call per project" test "$(uup alpha)$(uup beta)$(uup research)" = 111
+check "  ...builder up got the token only in its environment (OPTOK: sat-alpha)" \
+  bash -c 'grep -A2 -E "^ARGS: compose .* -p alpha up -d" "$1" | grep -qx "OPTOK: sat-alpha"' _ "$DLOG"
+check "  ...and sat-beta for beta" bash -c 'grep -A2 -E "^ARGS: compose .* -p beta up -d" "$1" | grep -qx "OPTOK: sat-beta"' _ "$DLOG"
+check "  ...research up got no token (<unset>)" bash -c 'grep -A2 -E "^ARGS: compose .* -p research up -d" "$1" | grep -qx "OPTOK: <unset>"' _ "$DLOG"
+check "  ...the token never appears in a docker ARGS line" bash -c '! grep -E "^ARGS:.*sat-" "$1"' _ "$DLOG"
+check "  ...nor in the update output" bash -c '! grep -q "sat-" <<<"$1"' _ "$uout"
+check "  ...summary lists versions (t3 0.9.9)" grep -q "0.9.9" <<<"$uout"
+check "  ...ends with the phone/desktop reminder" test "$(tail -n 1 <<<"$uout")" = "Now update the T3 apps on your phone and desktop (and turn their auto-update back off if an update turned it on)."
+check "  ...no marker on the old containers: 'unknown' heading printed" \
+  grep -qxF "Can't tell whether these need re-pairing (no protocol marker on the old container); if the app still connects, ignore:" <<<"$uout"
+
+# order: the project whose PROJECT_DIR is this clone goes last
+mkdir -p "$T/upd-zz"; au init "$T/upd-zz" --name aaa-self >/dev/null
+sed -i "s|^PROJECT_DIR=.*|PROJECT_DIR=$ROOT|" "$UR/aaa-self/project.conf"
+ureset alpha beta aaa-self
+uout="$(au update alpha aaa-self beta </dev/null 2>&1)" || true   # its own up is refused (the clone may not be mounted): still last
+check "update: the clone-root project runs last (result order)" \
+  test "$(grep -oE '^agent-up: [a-z-]+: (updated|FAILED)' <<<"$uout" | awk '{print $2}' | tr '\n' ' ')" = "alpha: beta: aaa-self: "
+rm -rf "$UR/aaa-self"
+
+# already current / stopped
+: > "$DLOG"
+uset alpha ghcr.io/allenlarocque/spades-gis "$GISD"
+uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: already-current project -> 'current', exit 0, no up" bash -c '[ "$1" -eq 0 ] && grep -q "current" <<<"$2" && [ "$3" -eq 0 ]' _ "$rc" "$uout" "$(uup alpha)"
+ureset alpha
+echo 0 > "$T/RUNNING.alpha-agent-1"
+uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: stopped project -> digest rewritten, 'updated, not started'" bash -c '[ "$1" -eq 0 ] && grep -q "updated, not started" <<<"$2" && grep -q "sha256:$3" "$4"' _ "$rc" "$uout" "$GISD" "$(ucfg alpha)"
+check "  ...no up, and no token read" bash -c '[ "$(grep -c " up -d" "$1")" -eq 0 ] && ! grep -q "^OP: read" "$2"' _ "$DLOG" "$OPLOG"
+rm -f "$T/RUNNING.alpha-agent-1"
+
+# busy: skip on EOF, restart on 'r', quit on 'q'
+ureset alpha beta; ubusy alpha
+uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: busy project with EOF on stdin -> skipped, exit 0" bash -c '[ "$1" -eq 0 ] && grep -q "BUSY: Rscript" <<<"$2" && grep -q "skipped" <<<"$2"' _ "$rc" "$uout"
+check "  ...compose unchanged, no up" bash -c 'grep -q "sha256:$2" "$1" && [ "$3" -eq 0 ]' _ "$(ucfg alpha)" "$OLD1" "$(uup alpha)"
+uout="$(printf 'r\n' | au update alpha 2>&1)" && rc=0 || rc=$?
+check "update: busy project, answer r -> restarted (digest rewritten, up called)" bash -c '[ "$1" -eq 0 ] && grep -q "sha256:$2" "$3" && [ "$4" -eq 1 ]' _ "$rc" "$GISD" "$(ucfg alpha)" "$(uup alpha)"
+ureset alpha beta; ubusy alpha
+uout="$(printf 'q\n' | au update alpha beta 2>&1)" && rc=0 || rc=$?
+check "update: answer q stops the run (beta untouched), summary still printed" bash -c '[ "$1" -eq 0 ] && grep -q "sha256:$2" "$3" && grep -q "^project" <<<"$4"' _ "$rc" "$OLD1" "$(ucfg beta)" "$uout"
+
+# token unreadable / up failure
+touch "$T/OPREAD_FAIL_alpha"; ureset alpha beta
+uout="$(au update alpha beta </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: token unreadable -> NOT UPDATED, exit non-zero" bash -c '[ "$1" -ne 0 ] && grep -qF "NOT UPDATED (could not read op://Personal/agent-alpha service account/credential; run: agent-up up alpha)" <<<"$2"' _ "$rc" "$uout"
+check "  ...compose unchanged, no up for it; the other project updated" bash -c 'grep -q "sha256:$2" "$1" && [ "$3" -eq 0 ] && grep -q "sha256:$4" "$5" && [ "$6" -eq 1 ]' _ "$(ucfg alpha)" "$OLD1" "$(uup alpha)" "$GISD" "$(ucfg beta)" "$(uup beta)"
+rm -f "$T/OPREAD_FAIL_alpha"
+touch "$T/UPFAIL.alpha"; ureset alpha beta
+uout="$(au update alpha beta </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: a failing up -> FAILED, exit non-zero" bash -c '[ "$1" -ne 0 ] && grep -qF "FAILED (agent-up up alpha; docker logs alpha-agent-1)" <<<"$2"' _ "$rc" "$uout"
+check "  ...the later project is still updated" bash -c 'grep -q "sha256:$2" "$1"' _ "$(ucfg beta)" "$GISD"
+rm -f "$T/UPFAIL.alpha"
+
+# re-pair markers: unknown (old empty, new 2), yes (1 -> 2), no (2 -> 2)
+ureset alpha beta; rm -f "$T"/proto.* "$T/pair.count"; echo 2 > "$T/proto.alpha-agent-1.new"
+uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: old container without marker, new with 2 -> 'unknown' heading and pairing code" bash -c 'grep -qF "Can'"'"'t tell whether these need re-pairing" <<<"$1" && grep -qF "pairing code: fakeTok_123" <<<"$1"' _ "$uout"
+ureset alpha beta; rm -f "$T"/proto.* "$T/pair.count"
+echo 1 > "$T/proto.alpha-agent-1"; echo 2 > "$T/proto.alpha-agent-1.new"; echo 2 > "$T/proto.beta-agent-1"; echo 2 > "$T/proto.beta-agent-1.new"
+uout="$(au update alpha beta </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: marker 1 -> 2 pairs alpha ('yes'); 2 -> 2 does not pair beta" bash -c 'grep -qF "T3 Code for '"'"'alpha'"'"'" <<<"$1" && ! grep -qF "T3 Code for '"'"'beta'"'"'" <<<"$1" && [ "$(grep -c "agent-t3 pair" "$2")" -eq 1 ]' _ "$uout" "$DLOG"
+check "  ...no 'Can't tell' heading when nothing is unknown" bash -c '! grep -qF "Can'"'"'t tell" <<<"$1"' _ "$uout"
+rm -f "$T"/proto.* "$T/pair.count"
+
+# an image not in digests.md
+ureset alpha; uset alpha ghcr.io/x/custom "$OLD1"; cp "$(ucfg alpha)" "$T/alpha.compose.before"
+uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: image not in digests.md -> SKIP (image custom not in digests.md), non-zero, file unchanged" \
+  bash -c '[ "$1" -ne 0 ] && grep -qF "SKIP (image custom not in digests.md)" <<<"$2" && cmp -s "$3" "$4" && [ "$5" -eq 0 ]' _ "$rc" "$uout" "$(ucfg alpha)" "$T/alpha.compose.before" "$(uup alpha)"
+refuses "update: unknown project" 'no config for' au update nosuch
+refuses "update: no arguments prints usage" 'usage:' au update
+
+# the git guard: a clone not on main is refused (the test-only override is off)
+GC="$T/gitclone"; mkdir -p "$GC/bin" "$GC/project-template"; cp "$AU" "$GC/bin/agent-up"; git -C "$GC" init -q -b side; git -C "$GC" -c user.email=t@t -c user.name=t commit -q --allow-empty -m x
+refuses "update: refuses when the clone is not on main" "pull main in .* first: digests.md is not current" \
+  env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" PATH="$T/dstub:$T/bin:$PATH" AGENT_CONTAINERS_CONFIG="$UR" AGENT_UP_DIGESTS="$T/digests.md" "$GC/bin/agent-up" update --all
+
+# pair: the default wait is 180 s (the first start after an image update installs the CLIs)
+AMBIENT=(); mkdir -p "$T/fastsleep"; printf '#!/bin/sh\nexit 0\n' > "$T/fastsleep/sleep"; chmod +x "$T/fastsleep/sleep"
+echo 1000 > "$T/PAIR_FAILS"; rm -f "$T/pair.count"
+refuses "pair: default wait is 180 s" "did not answer within 180 s" env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/fastsleep:$T/dstub:$T/bin:$PATH" "$AU" pair "$NAME"
+rm -f "$T/PAIR_FAILS" "$T/pair.count"
 
 # ---- END OF SECTIONS (later tasks insert above this line)
 [ "$fail" -eq 0 ] && echo "LAUNCHER: ALL PASSED" || { echo "LAUNCHER: FAILURES"; exit 1; }

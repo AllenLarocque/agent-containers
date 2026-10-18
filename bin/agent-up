@@ -23,6 +23,7 @@ usage:
   agent-up rstudio <project>             print the RStudio Server address, user and password (RSTUDIO=1)
   agent-up status|stop|down <project>
   agent-up busy --all | <project>...     is R work or an agent running? (exit 1 = busy)
+  agent-up update --all | <project>...   move projects to the digests in digests.md (asks before restarting a busy one)
 USAGE
   exit 2
 }
@@ -774,8 +775,8 @@ cmd_pair(){
   check_t3_port "$cfg"
   check_ts_port "$cfg"
   port="$(conf_get "$cfg/project.conf" T3_PORT)"
-  local wait="${AGENT_UP_PAIR_WAIT:-60}" waited=0
-  [[ $wait =~ ^[1-9][0-9]*$ ]] || wait=60
+  local wait="${AGENT_UP_PAIR_WAIT:-180}" waited=0
+  [[ $wait =~ ^[1-9][0-9]*$ ]] || wait=180
   [ "$(docker inspect -f '{{.State.Running}}' "$name-agent-1" 2>/dev/null)" = true ] \
     || die "could not mint a pairing token (is '$name' running? agent-up status $name)"
   until tok="$(docker exec -u agent "$name-agent-1" agent-t3 pair "$(hostname)" 2>/dev/null)"; do
@@ -842,17 +843,17 @@ busy_scan(){ # $1 container -> BUSY:/IDLE: lines; exit 1 if anything is busy, 0 
   ! grep -q '^BUSY:' <<<"$out"
 }
 project_names(){ # every project name, alphabetical, the project living in this clone last
-  local root conf d pd names=() self=""
+  local root conf d pd names=() selves=()
   root="$(cd "$HERE/.." && pwd -P)"
   for conf in "$CFG_ROOT"/*/project.conf; do
     [ -f "$conf" ] || continue
     d="$(basename "$(dirname "$conf")")"
     pd="$(conf_get "$conf" PROJECT_DIR)"
-    pd="$(cd "$pd" 2>/dev/null && pwd -P || printf '%s' "$pd")"
-    if [ "$pd" = "$root" ]; then self="$d"; else names+=("$d"); fi
+    [ -z "$pd" ] || pd="$(cd "$pd" 2>/dev/null && pwd -P || printf '%s' "$pd")"   # empty (research): not a path, never "here"
+    if [ -n "$pd" ] && [ "$pd" = "$root" ]; then selves+=("$d"); else names+=("$d"); fi
   done
   [ "${#names[@]}" -eq 0 ] || printf '%s\n' "${names[@]}" | LC_ALL=C sort
-  [ -z "$self" ] || printf '%s\n' "$self"
+  [ "${#selves[@]}" -eq 0 ] || printf '%s\n' "${selves[@]}" | LC_ALL=C sort
 }
 cmd_busy(){
   [ $# -ge 1 ] || usage
@@ -883,6 +884,119 @@ cmd_busy(){
   if [ "${#busy[@]}" -gt 0 ]; then echo "Busy: $(IFS=,; echo "${busy[*]}" | sed 's/,/, /g')"; return 1; fi
   echo "Nothing busy."
 }
+digest_for(){ # $1 image name, $2 digests.md -> sha256:<64 hex> from its table row, or nothing
+  awk -F'|' -v n="$1" '{ a = $2; gsub(/[ \t]/, "", a); d = $4; gsub(/[ \t`]/, "", d)
+    if (a == n && d ~ /^sha256:[0-9a-f]{64}$/) { print d; exit } }' "$2"
+}
+t3_protocol_of(){ # $1 container -> its T3_PROTOCOL value, or nothing
+  { docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$1" </dev/null 2>/dev/null || true; } | sed -n 's/^T3_PROTOCOL=//p' | head -n 1
+}
+cli_lines(){ # $1 container -> "<name>: <version>" per agent CLI this clone knows (as agent-up status prints them)
+  local conf tool name bin ver
+  for conf in "$HERE"/../images/base/agent-clis/*/install.conf; do
+    tool="$(basename "$(dirname "$conf")")"; name="$(conf_get "$conf" NAME)"; bin="$(conf_get "$conf" BIN)"
+    if ver="$(docker exec -u agent "$1" "$bin" --version 2>/dev/null </dev/null)" && [ -n "$ver" ]; then
+      echo "$name: $ver"
+    else
+      echo "$name: MISSING or container not running (install log: docker logs $1 | grep install-$tool)"
+    fi
+  done
+}
+update_guard(){ # the digests.md in this clone must be current: on main, not behind origin/main
+  local clone="$HERE/.."
+  [ "${AGENT_UP_SKIP_GIT_CHECK:-}" != 1 ] || return 0
+  git -C "$clone" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  [ "$(git -C "$clone" rev-parse --abbrev-ref HEAD 2>/dev/null)" = main ] || die "pull main in $clone first: digests.md is not current"
+  if git -C "$clone" fetch -q origin main </dev/null 2>/dev/null; then
+    [ "$(git -C "$clone" rev-list --count HEAD..FETCH_HEAD 2>/dev/null || echo 0)" -eq 0 ] || die "pull main in $clone first: digests.md is not current"
+  else
+    echo "agent-up: WARNING: could not fetch origin main; digests.md may not be current" >&2
+  fi
+}
+cmd_update(){
+  [ $# -ge 1 ] || usage
+  local all=() names=() n cfg wanted=" " digests="${AGENT_UP_DIGESTS:-$HERE/../digests.md}"
+  mapfile -t all < <(project_names)
+  if [ "$1" = --all ]; then
+    [ $# -eq 1 ] || usage
+    names=("${all[@]}")
+    [ "${#names[@]}" -gt 0 ] || die "no projects in $CFG_ROOT"
+  else
+    for n in "$@"; do cfg="$(cfg_dir "$n")"; wanted="$wanted$(basename "$cfg") "; done
+    for n in "${all[@]}"; do [[ $wanted == *" $n "* ]] && names+=("$n"); done   # project_names order: the clone's own project last
+  fi
+  [ -f "$digests" ] || die "no digests.md at $digests"
+  update_guard
+  unset OP_SERVICE_ACCOUNT_TOKEN   # `op read` uses the owner's own session, never a project's token
+  local rc=0 res ver rep quit=0 c img name_img old new tok oldp newp ans bs cur pairs=() unknowns=()
+  local rows=()
+  for n in "${names[@]}"; do
+    if [ "$quit" = 1 ]; then rows+=("$n|not reached (you quit)|-|-"); continue; fi
+    cfg="$CFG_ROOT/$n"; c="$n-agent-1"; res=""; ver="-"; rep="-"
+    # The image line: <registry>/<name>@sha256:<64 hex>
+    cur="$(sed -nE 's/^[[:space:]]*image:[[:space:]]*([^[:space:]]+)@(sha256:[0-9a-f]{64})[[:space:]]*$/\1 \2/p' "$cfg/compose.yaml" | head -n 1)"
+    img="${cur% *}"; old="${cur#* }"; name_img="${img##*/}"
+    if [ -z "$cur" ]; then res="SKIP (no pinned image: line in compose.yaml)"; rc=1
+    elif new="$(digest_for "$name_img" "$digests")"; [ -z "$new" ]; then res="SKIP (image $name_img not in digests.md)"; rc=1
+    elif [ "$new" = "$old" ]; then res="current"
+    elif ! is_running "$c"; then
+      rewrite_digest "$cfg/compose.yaml" "$new"; res="updated, not started"
+    else
+      if ! bs="$(busy_scan "$c" </dev/null)"; then
+        echo "== $n is busy:"; printf '%s\n' "$bs"
+        printf '%s: [s]kip / [r]estart anyway / [q]uit (default s): ' "$n"
+        ans=""; read -r ans || ans=""
+        case "$ans" in
+          r|R) ;;
+          q|Q) quit=1; res="not reached (you quit)" ;;
+          *) res="skipped (busy)" ;;
+        esac
+      fi
+      if [ -z "$res" ]; then
+        tok=""
+        if [ "$(profile "$cfg")" != research ]; then
+          tok="$(op read "op://Personal/agent-$n service account/credential" </dev/null 2>/dev/null)" || tok=""
+          [ -n "$tok" ] || { res="NOT UPDATED (could not read op://Personal/agent-$n service account/credential; run: agent-up up $n)"; rc=1; }
+        fi
+        if [ -z "$res" ]; then
+          oldp="$(t3_protocol_of "$c")"
+          rewrite_digest "$cfg/compose.yaml" "$new"
+          if [ "$(profile "$cfg")" = research ]; then
+            env -u OP_SERVICE_ACCOUNT_TOKEN "$0" up "$n" </dev/null || res="FAILED"
+          else
+            OP_SERVICE_ACCOUNT_TOKEN="$tok" "$0" up "$n" </dev/null || res="FAILED"
+          fi
+          tok=""
+          if [ "$res" = FAILED ]; then res="FAILED (agent-up up $n; docker logs $c)"; rc=1
+          else
+            res="updated"; newp="$(t3_protocol_of "$c")"
+            ver="t3 $(docker exec -u agent "$c" t3 --version 2>/dev/null </dev/null || echo '?'); $(cli_lines "$c" | sed 's/ (install log:.*//' | paste -sd';' - | sed 's/;/; /g')"
+            if [ -z "$oldp" ]; then rep=unknown; unknowns+=("$n")
+            elif [ "$oldp" != "$newp" ]; then rep=yes; pairs+=("$n")
+            else rep=no; fi
+          fi
+        fi
+      fi
+    fi
+    echo "agent-up: $n: $res"
+    rows+=("$n|$res|$ver|$rep")
+  done
+  echo
+  { echo "project|result|versions|re-pair"; printf '%s\n' "${rows[@]}"; } | column -t -s'|'
+  echo
+  for n in "${pairs[@]}"; do "$0" pair "$n" </dev/null || { echo "agent-up: could not pair '$n' (agent-up pair $n)" >&2; rc=1; }; done
+  if [ "${#unknowns[@]}" -gt 0 ]; then
+    echo "Can't tell whether these need re-pairing (no protocol marker on the old container); if the app still connects, ignore:"
+    for n in "${unknowns[@]}"; do "$0" pair "$n" </dev/null || { echo "agent-up: could not pair '$n' (agent-up pair $n)" >&2; rc=1; }; done
+  fi
+  echo "Now update the T3 apps on your phone and desktop (and turn their auto-update back off if an update turned it on)."
+  return "$rc"
+}
+rewrite_digest(){ # $1 compose.yaml, $2 sha256:<64 hex>: only the image: line's digest changes (temp file + mv, same mode)
+  local tmp; tmp="$(mktemp "$1.XXXXXX")"
+  sed -E "s|^([[:space:]]*image:[[:space:]]*[^[:space:]]+@)sha256:[0-9a-f]{64}|\1$2|" "$1" > "$tmp"
+  chmod --reference="$1" "$tmp"; mv "$tmp" "$1"
+}
 cmd_compose(){ # $1 compose subcommand, $2 project
   local sub="$1"; shift
   [ $# -eq 1 ] || usage
@@ -893,15 +1007,7 @@ cmd_compose(){ # $1 compose subcommand, $2 project
 cmd_status(){
   cmd_compose ps "$@"
   # One line per agent CLI this clone knows (images/base/agent-clis/<tool>/install.conf).
-  local c ver conf tool name bin; c="$(basename "$(cfg_dir "$1")")-agent-1"
-  for conf in "$HERE"/../images/base/agent-clis/*/install.conf; do
-    tool="$(basename "$(dirname "$conf")")"; name="$(conf_get "$conf" NAME)"; bin="$(conf_get "$conf" BIN)"
-    if ver="$(docker exec -u agent "$c" "$bin" --version 2>/dev/null)" && [ -n "$ver" ]; then
-      echo "$name: $ver"
-    else
-      echo "$name: MISSING or container not running (install log: docker logs $c | grep install-$tool)"
-    fi
-  done
+  cli_lines "$(basename "$(cfg_dir "$1")")-agent-1"
   local cfg rd d; cfg="$(cfg_dir "$1")"
   if [ "$(profile "$cfg")" = research ]; then
     rd="$(research_dir "$cfg")"
@@ -928,6 +1034,7 @@ case "$cmd" in
   shell)  cmd_shell "$@" ;;
   pair)   cmd_pair "$@" ;;
   rstudio) cmd_rstudio "$@" ;;
+  update) cmd_update "$@" ;;
   busy)   cmd_busy "$@" ;;
   status) cmd_status "$@" ;;
   stop)   cmd_compose stop "$@" ;;
