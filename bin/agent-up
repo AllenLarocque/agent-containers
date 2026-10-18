@@ -842,18 +842,23 @@ busy_scan(){ # $1 container -> BUSY:/IDLE: lines; exit 1 if anything is busy, 0 
   [ -z "$out" ] || printf '%s\n' "$out"
   ! grep -q '^BUSY:' <<<"$out"
 }
-project_names(){ # every project name, alphabetical, the project living in this clone last
-  local root conf d pd names=() selves=()
-  root="$(cd "$HERE/.." && pwd -P)"
+repo_slug(){ # $1 dir -> its origin as lower-case owner/repo (github.com forms: git@, https://, ssh://); nothing if not a git clone or no origin
+  local u; u="$(git -C "$1" remote get-url origin </dev/null 2>/dev/null)" || return 0
+  u="$(printf '%s' "$u" | tr 'A-Z' 'a-z' | sed -E 's#^(ssh://)?(git@|[^/@]+@)?(https?://)?(www\.)?github\.com[:/]+##; s#/+$##; s#\.git$##')"
+  [[ $u =~ ^[a-z0-9_.-]+/[a-z0-9_.-]+$ ]] && printf '%s' "$u"
+  return 0
+}
+project_names(){ # every project name, alphabetical, projects whose PROJECT_DIR is a clone of this launcher's own GitHub repo last
+  local conf d pd me names=() lasts=()   # (a project may not mount the launcher clone itself: check_mounts refuses, so match by origin)
+  me="$(repo_slug "$HERE/..")"
   for conf in "$CFG_ROOT"/*/project.conf; do
     [ -f "$conf" ] || continue
     d="$(basename "$(dirname "$conf")")"
-    pd="$(conf_get "$conf" PROJECT_DIR)"
-    [ -z "$pd" ] || pd="$(cd "$pd" 2>/dev/null && pwd -P || printf '%s' "$pd")"   # empty (research): not a path, never "here"
-    if [ -n "$pd" ] && [ "$pd" = "$root" ]; then selves+=("$d"); else names+=("$d"); fi
+    pd="$(conf_get "$conf" PROJECT_DIR)"   # empty (research): not a path, never last
+    if [ -n "$me" ] && [ -n "$pd" ] && [ -d "$pd" ] && [ "$(repo_slug "$pd")" = "$me" ]; then lasts+=("$d"); else names+=("$d"); fi
   done
   [ "${#names[@]}" -eq 0 ] || printf '%s\n' "${names[@]}" | LC_ALL=C sort
-  [ "${#selves[@]}" -eq 0 ] || printf '%s\n' "${selves[@]}" | LC_ALL=C sort
+  [ "${#lasts[@]}" -eq 0 ] || printf '%s\n' "${lasts[@]}" | LC_ALL=C sort
 }
 cmd_busy(){
   [ $# -ge 1 ] || usage
@@ -967,7 +972,7 @@ cmd_update(){
             OP_SERVICE_ACCOUNT_TOKEN="$tok" "$0" up "$n" </dev/null || res="FAILED"
           fi
           tok=""
-          if [ "$res" = FAILED ]; then res="FAILED (agent-up up $n; docker logs $c)"; rc=1
+          if [ "$res" = FAILED ]; then res="FAILED (compose already on the new digest; fix, then: agent-up up $n; logs: docker logs $c)"; rc=1
           else
             res="updated"; newp="$(t3_protocol_of "$c")"
             ver="t3 $(docker exec -u agent "$c" t3 --version 2>/dev/null </dev/null || echo '?'); $(cli_lines "$c" | sed 's/ (install log:.*//' | paste -sd';' - | sed 's/;/; /g')"

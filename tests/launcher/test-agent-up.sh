@@ -1262,9 +1262,24 @@ check "  ...last line is 'Nothing busy.'" test "$(tail -n 1 <<<"$aout")" = "Noth
 { printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 Rscript       Rscript x.R'; } | snap pa-agent-1 2
 printf '%s\n' "$BASEPS" | snap pb-agent-1 1; printf '%s\n' "$BASEPS" | snap pb-agent-1 2
 refuses "busy pa pb: several names behave like --all" '== pa' au busy pa pb
-mkdir -p "$BR/aa"; printf 'PROJECT=aa\nPROJECT_DIR=%s/\n' "$ROOT/bin/.." > "$BR/aa/project.conf"
-check "project_names: the clone-root project goes last even when it sorts first" \
-  test "$(au busy --all 2>&1 | grep '^==' | tr '\n' ' ')" = "== pa == pb == pc == aa "
+# A launcher clone fixture (a copy of agent-up with an ssh-form origin) and a startable project whose
+# PROJECT_DIR is a SEPARATE clone of the same GitHub repo (https form, other case): it goes last.
+LC="$T/lclone"; mkdir -p "$LC/bin" "$LC/images/base"; cp "$AU" "$LC/bin/agent-up"; cp -r "$ROOT/project-template" "$LC/"; cp -r "$ROOT/images/base/agent-clis" "$LC/images/base/"
+git -C "$LC" init -q; git -C "$LC" remote add origin git@github.com:allenlarocque/Agent-Containers.git
+SELFREPO="$T/selfrepo"; mkdir -p "$SELFREPO"; git -C "$SELFREPO" init -q; git -C "$SELFREPO" remote add origin https://github.com/AllenLarocque/agent-containers.git
+auc(){ ( cd "$LC" && env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/dstub:$T/bin:$PATH" "${AMBIENT[@]}" "$LC/bin/agent-up" "$@" ); }
+mkdir -p "$BR/aa"; printf 'PROJECT=aa\nPROJECT_DIR=%s\n' "$SELFREPO" > "$BR/aa/project.conf"
+mkdir -p "$BR/research"; printf 'PROJECT=research\nPROFILE=research\n' > "$BR/research/project.conf"   # empty PROJECT_DIR must not count as "here" (cwd is the clone)
+NOTGIT="$T/notgit"; mkdir -p "$NOTGIT"; mkdir -p "$BR/ab"; printf 'PROJECT=ab\nPROJECT_DIR=%s\n' "$NOTGIT" > "$BR/ab/project.conf"
+OTHERREPO="$T/otherrepo"; mkdir -p "$OTHERREPO"; git -C "$OTHERREPO" init -q; git -C "$OTHERREPO" remote add origin ssh://git@github.com/someone/else.git; mkdir -p "$BR/ac"; printf 'PROJECT=ac\nPROJECT_DIR=%s\n' "$OTHERREPO" > "$BR/ac/project.conf"
+check "project_names: the project cloned from this repo goes last even when it sorts first (origin match; not-git, other-origin and empty PROJECT_DIR stay in order)" \
+  test "$(auc busy --all 2>&1 | grep '^==' | tr '\n' ' ')" = "== ab == ac == pa == pb == pc == research == aa "
+git -C "$LC" remote remove origin
+check "project_names: a launcher clone without origin -> nothing goes last" \
+  test "$(auc busy --all 2>&1 | grep '^==' | tr '\n' ' ')" = "== aa == ab == ac == pa == pb == pc == research "
+git -C "$LC" remote add origin ssh://git@github.com/AllenLarocque/agent-containers.git
+check "project_names: ssh:// origin form matches too" \
+  test "$(auc busy --all 2>&1 | grep '^==' | tr '\n' ' ')" = "== ab == ac == pa == pb == pc == research == aa "
 rm -f "$T/RUNNING.pc-agent-1"; AMBIENT=()
 
 # ---- update: agent-up update --all | <project>... (owner-run; moves projects to the digests in digests.md)
@@ -1312,13 +1327,13 @@ check "  ...ends with the phone/desktop reminder" test "$(tail -n 1 <<<"$uout")"
 check "  ...no marker on the old containers: 'unknown' heading printed" \
   grep -qxF "Can't tell whether these need re-pairing (no protocol marker on the old container); if the app still connects, ignore:" <<<"$uout"
 
-# order: the project whose PROJECT_DIR is this clone goes last
+# order: a startable project whose PROJECT_DIR is another clone of this repo goes last; research (empty PROJECT_DIR) does not
 mkdir -p "$T/upd-zz"; au init "$T/upd-zz" --name aaa-self >/dev/null
-sed -i "s|^PROJECT_DIR=.*|PROJECT_DIR=$ROOT|" "$UR/aaa-self/project.conf"
-ureset alpha beta aaa-self
-uout="$(au update alpha aaa-self beta </dev/null 2>&1)" || true   # its own up is refused (the clone may not be mounted): still last
-check "update: the clone-root project runs last (result order)" \
-  test "$(grep -oE '^agent-up: [a-z-]+: (updated|FAILED)' <<<"$uout" | awk '{print $2}' | tr '\n' ' ')" = "alpha: beta: aaa-self: "
+sed -i "s|^PROJECT_DIR=.*|PROJECT_DIR=$SELFREPO|" "$UR/aaa-self/project.conf"
+ureset alpha beta aaa-self research; uset research ghcr.io/allenlarocque/spades-base "$OLD1"
+uout="$(auc update --all </dev/null 2>&1)" && rc=0 || rc=$?
+check "update --all: the project cloned from this repo runs last, and its up succeeds (research is not mistaken for it)" \
+  test "$rc" -eq 0 -a "$(grep -oE '^agent-up: [a-z-]+: (updated|FAILED)' <<<"$uout" | awk '{print $2}' | tr '\n' ' ')" = "alpha: beta: research: aaa-self: "
 rm -rf "$UR/aaa-self"
 
 # already current / stopped
@@ -1352,7 +1367,7 @@ check "  ...compose unchanged, no up for it; the other project updated" bash -c 
 rm -f "$T/OPREAD_FAIL_alpha"
 touch "$T/UPFAIL.alpha"; ureset alpha beta
 uout="$(au update alpha beta </dev/null 2>&1)" && rc=0 || rc=$?
-check "update: a failing up -> FAILED, exit non-zero" bash -c '[ "$1" -ne 0 ] && grep -qF "FAILED (agent-up up alpha; docker logs alpha-agent-1)" <<<"$2"' _ "$rc" "$uout"
+check "update: a failing up -> FAILED, exit non-zero" bash -c '[ "$1" -ne 0 ] && grep -qF "FAILED (compose already on the new digest; fix, then: agent-up up alpha; logs: docker logs alpha-agent-1)" <<<"$2"' _ "$rc" "$uout"
 check "  ...the later project is still updated" bash -c 'grep -q "sha256:$2" "$1"' _ "$(ucfg beta)" "$GISD"
 rm -f "$T/UPFAIL.alpha"
 
