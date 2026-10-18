@@ -46,7 +46,12 @@ cat > "$T/dstub/docker" <<'STUB'
   echo "OPTOK: ${OP_SERVICE_ACCOUNT_TOKEN-<unset>}"
 } >> "$DLOG"
 case "$*" in
-  "inspect -f {{.State.Running}} "*) if [ -f "$(dirname "$DLOG")/RUNNING" ] && [ "$(cat "$(dirname "$DLOG")/RUNNING")" = 0 ]; then echo false; else echo true; fi ;;
+  "inspect -f {{.State.Running}} "*)
+    sd="$(dirname "$DLOG")"
+    if { [ -f "$sd/RUNNING" ] && [ "$(cat "$sd/RUNNING")" = 0 ]; } || { [ -f "$sd/RUNNING.$4" ] && [ "$(cat "$sd/RUNNING.$4")" = 0 ]; }; then echo false; else echo true; fi ;;
+  "exec "*" ps -eo pid=,ppid=,etimes=,cputimes=,comm=,args=")   # first call: $sd/ps.<c>.1, second: .2 (per container: busy --all scans in parallel)
+    sd="$(dirname "$DLOG")"; n=$(( $(cat "$sd/ps.$2.count" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$sd/ps.$2.count"
+    cat "$sd/ps.$2.$n" 2>/dev/null || true ;;
   *"agent-t3 pair"*)
     sd="$(dirname "$DLOG")"; n=$(( $(cat "$sd/pair.count" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$sd/pair.count"
     if [ -f "$sd/PAIR_FAILS" ] && [ "$n" -le "$(cat "$sd/PAIR_FAILS")" ]; then exit 1; fi
@@ -1185,6 +1190,67 @@ OVR
 else
   echo "SKIP: behavioural sandbox checks (set TEMPLATE_IMAGE to a built image; CI does)"
 fi
+
+# ---- busy: is R work or an agent running? (two ps snapshots per container)
+BC="$NAME-agent-1"
+snap(){ # $1 container, $2 snapshot number (1|2), stdin = ps -eo pid=,ppid=,etimes=,cputimes=,comm=,args= lines
+  cat > "$T/ps.$1.$2"; rm -f "$T/ps.$1.count"; }
+BASEPS='    1     0  9000   2 t3             t3 serve --port 3773
+  300     1  8000   5 claude         claude --dangerously-skip-permissions'
+AMBIENT=(AGENT_UP_BUSY_SAMPLE=0)
+printf '%s\n' "$BASEPS" | snap "$BC" 1; printf '%s\n' "$BASEPS" | snap "$BC" 2
+bout="$(au busy "$NAME" 2>&1)" && rc=0 || rc=$?
+check "busy: nothing running -> exit 0" test "$rc" -eq 0
+check "  ...reports the idle agent" grep -qxF "IDLE: agent idle (claude)" <<<"$bout"
+{ printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 Rscript       /usr/lib/R/bin/Rscript /workspace/run.R --long'; } | snap "$BC" 1
+{ printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 Rscript       /usr/lib/R/bin/Rscript /workspace/run.R --long'; } | snap "$BC" 2
+refuses "busy: Rscript -> BUSY" 'BUSY: Rscript /workspace/run.R --long \(running 2h1m\)' au busy "$NAME"
+{ printf '%s\n' "$BASEPS"; echo '  500     1  100  100 R              /usr/lib/R/bin/exec/R --no-save'; } | snap "$BC" 1
+{ printf '%s\n' "$BASEPS"; echo '  500     1  103  103 R              /usr/lib/R/bin/exec/R --no-save'; } | snap "$BC" 2
+refuses "busy: R using CPU -> BUSY" 'BUSY: .*R' au busy "$NAME"
+{ printf '%s\n' "$BASEPS"; echo '  600     1  100   50 rsession       /usr/lib/rstudio-server/bin/rsession'; } | snap "$BC" 1
+{ printf '%s\n' "$BASEPS"; echo '  600     1  103   50 rsession       /usr/lib/rstudio-server/bin/rsession'; } | snap "$BC" 2
+bout="$(au busy "$NAME" 2>&1)" && rc=0 || rc=$?
+check "busy: idle rsession -> IDLE, exit 0" test "$rc" -eq 0
+check "  ...says idle R session (rsession)" grep -qxF "IDLE: idle R session (rsession)" <<<"$bout"
+printf '%s\n' "$BASEPS" | snap "$BC" 1
+{ printf '%s\n' "$BASEPS"; echo '  700   300  5    0 bash           bash -c sleep 100'; } | snap "$BC" 2
+refuses "busy: claude with a child -> BUSY" 'agent may be mid-task \(claude, pid 300\)' au busy "$NAME"
+printf '%s\n' "$BASEPS" | snap "$BC" 1; printf '%s\n' "$BASEPS" | sed 's/ 5 claude/ 8 claude/' | snap "$BC" 2
+refuses "busy: claude using CPU -> BUSY" 'agent may be mid-task' au busy "$NAME"
+echo 0 > "$T/RUNNING"
+bout="$(au busy "$NAME" 2>&1)" && rc=0 || rc=$?
+check "busy: stopped container -> nothing, exit 0" test "$rc" -eq 0 -a -z "$bout"
+rm -f "$T/RUNNING"
+refuses "busy: unknown project" 'no config for' au busy nosuch
+refuses "busy: no arguments prints usage" 'usage:' au busy
+
+# busy --all / project_names: a private config root with three projects (+ one living in this clone)
+BR="$T/busy-cfg"; mkdir -p "$BR"
+for pn in pa pb pc; do mkdir -p "$BR/$pn"; printf 'PROJECT=%s\nPROJECT_DIR=%s\n' "$pn" "$T/elsewhere-$pn" > "$BR/$pn/project.conf"; done
+AMBIENT=(AGENT_UP_BUSY_SAMPLE=0 AGENT_CONTAINERS_CONFIG="$BR")
+{ printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 Rscript       Rscript x.R'; } | snap pa-agent-1 1
+{ printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 Rscript       Rscript x.R'; } | snap pa-agent-1 2
+printf '%s\n' "$BASEPS" | snap pb-agent-1 1; printf '%s\n' "$BASEPS" | snap pb-agent-1 2
+echo 0 > "$T/RUNNING.pc-agent-1"
+aout="$(au busy --all 2>&1)" && rc=0 || rc=$?
+check "busy --all: exit 1 when one project is busy" test "$rc" -eq 1
+check "  ...headers in project_names order, 'not running' for the stopped one" \
+  test "$(grep -E '^(==|not running)' <<<"$aout" | tr '\n' '|')" = "== pa|== pb|== pc|not running|"
+check "  ...last line names the busy project" test "$(tail -n 1 <<<"$aout")" = "Busy: pa"
+check "  ...pb's idle agent is listed under its header" grep -qxF "IDLE: agent idle (claude)" <<<"$aout"
+printf '%s\n' "$BASEPS" | snap pa-agent-1 1; printf '%s\n' "$BASEPS" | snap pa-agent-1 2
+aout="$(au busy --all 2>&1)" && rc=0 || rc=$?
+check "busy --all: all idle -> exit 0" test "$rc" -eq 0
+check "  ...last line is 'Nothing busy.'" test "$(tail -n 1 <<<"$aout")" = "Nothing busy."
+{ printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 Rscript       Rscript x.R'; } | snap pa-agent-1 1
+{ printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 Rscript       Rscript x.R'; } | snap pa-agent-1 2
+printf '%s\n' "$BASEPS" | snap pb-agent-1 1; printf '%s\n' "$BASEPS" | snap pb-agent-1 2
+refuses "busy pa pb: several names behave like --all" '== pa' au busy pa pb
+mkdir -p "$BR/aa"; printf 'PROJECT=aa\nPROJECT_DIR=%s/\n' "$ROOT/bin/.." > "$BR/aa/project.conf"
+check "project_names: the clone-root project goes last even when it sorts first" \
+  test "$(au busy --all 2>&1 | grep '^==' | tr '\n' ' ')" = "== pa == pb == pc == aa "
+rm -f "$T/RUNNING.pc-agent-1"; AMBIENT=()
 
 # ---- END OF SECTIONS (later tasks insert above this line)
 [ "$fail" -eq 0 ] && echo "LAUNCHER: ALL PASSED" || { echo "LAUNCHER: FAILURES"; exit 1; }
