@@ -215,7 +215,7 @@ relay, not Tailscale).
    health warning. If it says logged out, run `tailscale login` and open the printed link: the tray
    icon can still say Connected, and `tailscale up` returns silently without logging in.
    `tailscale serve status` must still list the project's port.
-4. The app says **"This client requires a newer server"**: the app (which auto-updates) speaks a
+4. The app says **"This client requires a newer server"**: the app (if it auto-updated) speaks a
    newer T3 protocol than the container's pinned T3 server. Every hop above works, and the server's
    own web app at the same `https://…ts.net:<port>` address still works in the phone's browser. Fix:
    do the update day below (`agent-up update --all`), then update the T3 apps. Only protocol changes
@@ -236,7 +236,9 @@ relay, not Tailscale).
    (default skip). It prints a summary table.
 5. If it lists pairing codes (T3 protocol changed), re-add each environment in the T3 app with
    its code. "Can't tell" means an old container without the marker: re-pair if the app complains.
-6. Now update the T3 apps.
+   A code is valid 10 minutes; for a fresh one at any time, run `bin/agent-up pair <project>`.
+6. Now update the T3 apps. If the last line is a WARNING instead (projects skipped, failed or not
+   reached are still on the old image), finish them first with `bin/agent-up update <project>...`.
 
 ## Research container
 
@@ -444,7 +446,7 @@ helper and the set are gone.
 | Action | Steps |
 |---|---|
 | New project | [docs/runbooks/new-project.md](../docs/runbooks/new-project.md) |
-| Upgrade the image (update day) | see [Update day](#update-day) below |
+| Upgrade the image (update day) | see [Update day](#update-day) above |
 | Change the allowlist | edit `~/.config/agent-containers/<project>/allowlist`; `agent-up up <project>` |
 | Change a secret | edit it in 1Password; `agent-up up <project>` (the env is fixed at container creation) |
 | Attach | VS Code → **Dev Containers: Attach to Running Container…** → `<project>-agent-1`, or `agent-up shell <project>` |

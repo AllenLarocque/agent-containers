@@ -85,6 +85,9 @@ gh api 'repos/AllenLarocque/agent-containers/issues?state=open&per_page=100' \
   --jq '.[] | select(.pull_request == null) | select(.title == "update: OS security fix (no version changes)" or .title == "update: T3 release failed verification (no version changes)") | "\(.number)\t\(.title)"'
 ```
 
+For each number `<i>` it prints, save that issue's body:
+`gh api repos/AllenLarocque/agent-containers/issues/<i> --jq .body > /tmp/update-work/issue-<i>.md`.
+
 ## Step 2: candidates
 
 ```sh
@@ -125,8 +128,10 @@ rules).
   packages the images install (the `apt-get install` lines in `images/*/Dockerfile`, plus core
   packages such as libc6, openssl, sudo, openssh, curl, git). The only source to try is
   GitHub-hosted:
-  `gh api 'repos/canonical/ubuntu-security-notices/commits?since=<date>T00:00:00Z&per_page=100'`
-  (then read the changed notice files it lists). If that repo or its data is not available, or you
+  `gh api --paginate 'repos/canonical/ubuntu-security-notices/commits?since=<date>T00:00:00Z&per_page=100'`
+  (every page, not just the first 100 commits; then read the changed notice files it lists). If the
+  listing stops partway (an error after some pages), write in the note
+  `Ubuntu security notices: not fully checked (commit listing incomplete)` and say how far it got. If that repo or its data is not available, or you
   cannot tell which notices apply, do not search elsewhere: write in the note
   `Ubuntu security notices: not checked (no source reachable on the allowlist)`.
   Routine OS patches ride along with every bundle; they matter only if serious and relevant.
@@ -285,12 +290,14 @@ happens only for security items: a serious relevant OS hole and/or a T3 verifica
 exact titles from "Repo constants": `update: OS security fix (no version changes)` for an OS hole,
 `update: T3 release failed verification (no version changes)` for a verification failure.
 For each kind present:
-- If an open issue with that exact title exists (step 1): if its body already reports every current
-  item of that kind, change nothing; otherwise refresh its body in place (step 6, issue). Never
+- If an open issue with that exact title exists (step 1; its body is in
+  `/tmp/update-work/issue-<i>.md`): if its body already reports every current item of that kind, change nothing; otherwise refresh its body in place (step 6, issue). Never
   open a duplicate.
 - If none is open: check the most recently closed one with that title,
   `gh api 'repos/AllenLarocque/agent-containers/issues?state=closed&sort=updated&direction=desc&per_page=100' --jq '.[] | select(.pull_request == null and .title == "<exact title>") | .number' | head -n 1`;
-  if its body already covers every current item of that kind, the owner has seen it: post nothing
+  if it prints a number `<i>`, save its body with
+  `gh api repos/AllenLarocque/agent-containers/issues/<i> --jq .body > /tmp/update-work/issue-<i>.md`;
+  if that body already covers every current item of that kind, the owner has seen it: post nothing
   for this kind. Otherwise open the issue (step 6, issue).
 Write the issue body per step 7 ("Issue body"). Then step 9.
 
@@ -348,7 +355,9 @@ this repo). Exactly these five parts, in this order:
 - Steps: merge this PR; merge the digests PR the `publish` workflow then opens; `git pull` on the
   host; run `bin/agent-up update --all` (it checks for busy R work first and prints pairing codes
   only where the T3 protocol changed); re-add environments only if it tells you to; then update the
-  T3 phone and desktop apps (not before).
+  T3 phone and desktop apps (not before). On your first `agent-up update` (containers started
+  before the `T3_PROTOCOL` marker existed), it cannot compare protocols and prints a pairing code
+  for every project under "Can't tell"; re-add an environment only if its app no longer connects.
 
 ### What's new
 **T3 <pin> → <new>**
