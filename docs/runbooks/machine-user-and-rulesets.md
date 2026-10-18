@@ -77,7 +77,8 @@ Repo → Settings → Rules → Rulesets → New ruleset → **New branch rulese
 4. Tick:
    - **Restrict deletions**
    - **Block force pushes**
-   - **Require a pull request before merging**, with: Required approvals = **1**; **Dismiss stale pull request approvals when new commits are pushed**; **Require review from Code Owners**; **Require approval of the most recent reviewable push**
+   - **Require a pull request before merging**, with: Required approvals = **1**; **Dismiss stale pull request approvals when new commits are pushed**; **Require review from Code Owners**. Leave **Require approval of the most recent reviewable push** OFF.
+     *Why off: you are the only code owner and the bot cannot approve, so this rule only blocks you from approving a PR after you pushed to it yourself. "Dismiss stale approvals" plus "Code Owners" already mean your approval must be of the final commit.*
    - **Require status checks to pass** → Add checks → `build-test` and `gitleaks` (both are jobs in this repo's `ci.yml`; selectable after CI has run once). Project repos get their own `gitleaks` workflow from `agent-up init`.
 5. Create.
 

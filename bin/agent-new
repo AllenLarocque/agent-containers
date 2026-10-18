@@ -323,7 +323,7 @@ ruleset_json(){
     {"type": "non_fast_forward"},
     {"type": "pull_request", "parameters": {
       "required_approving_review_count": 1, "dismiss_stale_reviews_on_push": true,
-      "require_code_owner_review": true, "require_last_push_approval": true,
+      "require_code_owner_review": true, "require_last_push_approval": false,
       "required_review_thread_resolution": false,
       "allowed_merge_methods": ["merge", "squash", "rebase"]}},
     {"type": "required_status_checks", "parameters": {
@@ -334,7 +334,7 @@ ruleset_json(){
 JSON
 }
 ruleset_norm_expected(){
-  printf 'active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:true|%s|refs:~DEFAULT_BRANCH/|strict:false|merge,rebase,squash' \
+  printf 'active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:false|%s|refs:~DEFAULT_BRANCH/|strict:false|merge,rebase,squash' \
     "$(checks_sorted | paste -sd+ -)"
 }
 protect_ruleset(){ # $1 owner/repo

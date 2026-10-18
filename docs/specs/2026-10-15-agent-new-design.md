@@ -128,8 +128,8 @@ For one repo the owner admins:
 3. **Ruleset.** If no ruleset named `protect-main` exists, create it via
    `gh api POST /repos/<r>/rulesets` from a canned JSON template: enforcement active; bypass =
    Repository admin role, mode `pull_request`; target = default branch; restrict deletions;
-   block force pushes; pull request rule (1 approval, dismiss stale, code-owner review, last
-   push approval); required status checks from `--require` (default `gitleaks` — the API
+   block force pushes; pull request rule (1 approval, dismiss stale, code-owner review; NO last
+   push approval, see the runbook §4); required status checks from `--require` (default `gitleaks` — the API
    accepts check contexts that have not run yet, so there is no wait). If `protect-main`
    exists: diff the live rules against the template, print the drift, and **refuse to touch
    it**.

@@ -164,12 +164,13 @@ check "no --vault: invite happens"           test -f "$STATE/invited"
 check "no --vault: WARNING to accept manually" grep -q 'WARNING.*accept the invitation' <<<"$OUT"
 
 echo "== task 3: protect / ruleset + warnings =="
-EXPECT_NORM='active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:true|gitleaks|refs:~DEFAULT_BRANCH/|strict:false|merge,rebase,squash'
+EXPECT_NORM='active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:false|gitleaks|refs:~DEFAULT_BRANCH/|strict:false|merge,rebase,squash'
 newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
 check "no ruleset: POSTs one"              run protect allen/repo1 --vault agent-p1
 check "  posted JSON names protect-main"   grep -q '"name": *"protect-main"' "$STATE/ruleset-posted"
 check "  bypass: admin, PRs only"          grep -q '"bypass_mode": *"pull_request"' "$STATE/ruleset-posted"
 check "  required check gitleaks"          grep -q '"context": *"gitleaks"' "$STATE/ruleset-posted"
+check "  no last-push approval (owner may approve after editing the branch)" grep -q '"require_last_push_approval": *false' "$STATE/ruleset-posted"
 newstate; touch "$STATE/collab" "$STATE/rulesets-list-fail"
 refuses "rulesets list fails -> loud die" 'could not list rulesets' run protect allen/repo1 --vault agent-p1
 newstate; touch "$STATE/collab" "$STATE/rulesets-list-fail"
@@ -188,8 +189,12 @@ refuses "divergent ruleset -> refuse, no write" 'refusing to modify' run protect
 check "  nothing POSTed on refusal"        test ! -f "$STATE/ruleset-posted"
 newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
 echo 7 > "$STATE/ruleset-id"
-echo 'active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:true|gitleaks|refs:~DEFAULT_BRANCH/refs/heads/main|strict:false|merge,rebase,squash' > "$STATE/ruleset-norm"
+echo 'active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:false|gitleaks|refs:~DEFAULT_BRANCH/refs/heads/main|strict:false|merge,rebase,squash' > "$STATE/ruleset-norm"
 refuses "conditions-only drift -> refuse, no write" 'refusing to modify' run protect allen/repo1 --vault agent-p1
+newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
+echo 7 > "$STATE/ruleset-id"; echo "${EXPECT_NORM/pr:1:true:true:false/pr:1:true:true:true}" > "$STATE/ruleset-norm"
+refuses "older ruleset with last-push approval -> drift reported, no write" 'refusing to modify' run protect allen/repo1 --vault agent-p1
+check "  nothing POSTed on last-push drift" test ! -f "$STATE/ruleset-posted"
 check "  nothing POSTed on conditions drift" test ! -f "$STATE/ruleset-posted"
 newstate; touch "$STATE/collab"; echo true > "$STATE/actions-approve"
 OUT=$(run protect allen/repo1 --vault agent-p1 2>&1)
@@ -450,7 +455,7 @@ unset AGENT_NEW_STOP_AFTER
 rm -rf "$PROJHOME/InhTok" "$CFGROOT/inhtok"
 
 newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
-LIVE_NORM='active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:true|R-CMD-check+gitleaks|refs:~DEFAULT_BRANCH/|strict:false|merge,rebase,squash'
+LIVE_NORM='active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:false|R-CMD-check+gitleaks|refs:~DEFAULT_BRANCH/|strict:false|merge,rebase,squash'
 touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"; echo 7 > "$STATE/ruleset-id"; echo "$LIVE_NORM" > "$STATE/ruleset-norm"
 check "--require R-CMD-check matches C-sorted norm (default locale)" run protect allen/repo1 --vault agent-p1 --require R-CMD-check
 check "  and under en_US.utf8" env LC_ALL=en_US.utf8 HOME="$H" AGENT_CONTAINERS_CONFIG="$CFGROOT" PATH="$T/bin:$PATH" "$AN" protect allen/repo1 --vault agent-p1 --require R-CMD-check
