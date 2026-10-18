@@ -398,7 +398,9 @@ cmd_verify(){
     # trap value frozen at set time: an EXIT trap outlives this function's locals,
     # so deferred '$tmp' would be unbound under set -u. || true: a failing cleanup
     # must not overwrite the script's real exit status.
-    local tmp; tmp="$(mktemp -d)"; trap "rm -rf '$tmp' || true" EXIT
+    local tmp; tmp="$(mktemp -d)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmp' || true" EXIT
     local tok who; tok="$(mu_token)"
     who="$(GH_TOKEN="$tok" gh api user --jq .login)" || die "the machine-user token from op://$VAULT/github-agent/token does not work"
     [ "$who" = "$mu" ] || die "the token in op://$VAULT/github-agent/token is for '$who', not the machine user '$mu': refusing to verify as the wrong identity"
@@ -429,6 +431,7 @@ cmd_verify(){
       || die "/workspace in $c is on verify-ruleset (left by an older agent-new): run 'git switch main' in the container, then re-run"
     # a temporary worktree: the owner's /workspace checkout (branch, index, files) is never touched.
     # The worktree goes first: a branch checked out in it cannot be deleted.
+    # shellcheck disable=SC2064 # expand now on purpose: the locals are gone when the EXIT trap runs
     trap "docker exec -w /workspace '$c' git worktree remove --force /tmp/agent-new-verify 2>/dev/null || true; docker exec -w /workspace '$c' git branch -D verify-ruleset 2>/dev/null || true" EXIT
     RUN_IN 'git worktree remove --force /tmp/agent-new-verify 2>/dev/null; git worktree prune; rm -rf /tmp/agent-new-verify' >/dev/null
     RUN_IN 'git fetch -q origin && git worktree add -f -B verify-ruleset /tmp/agent-new-verify origin/main' >/dev/null

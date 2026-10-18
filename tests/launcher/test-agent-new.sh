@@ -348,10 +348,11 @@ mkdir -p "$PROJHOME/Decoy2" && git -C "$PROJHOME/Decoy2" init -q && git -C "$PRO
 refuses "lookalike host refused" 'refusing to adopt' run project Decoy2 --token-from agent-old < /dev/null
 echo "== review fixes: re-run after the agent started =="
 mkrepo(){ # $1 name: an existing clone of allen/$1 with project config, one commit
-  rm -rf "$PROJHOME/$1" "$CFGROOT/$(echo "$1" | tr A-Z a-z)"
-  mkdir -p "$PROJHOME/$1" "$CFGROOT/$(echo "$1" | tr A-Z a-z)"
-  printf 'PROJECT=x\nT3_PORT=3790\n' > "$CFGROOT/$(echo "$1" | tr A-Z a-z)/project.conf"
-  printf 'image: ghcr.io/x/spades-gis@sha256:aaa111\n' > "$CFGROOT/$(echo "$1" | tr A-Z a-z)/compose.yaml"
+  local lc; lc=$(echo "${1:?}" | tr '[:upper:]' '[:lower:]')
+  rm -rf "$PROJHOME/${1:?}" "$CFGROOT/${lc:?}"
+  mkdir -p "$PROJHOME/$1" "$CFGROOT/$lc"
+  printf 'PROJECT=x\nT3_PORT=3790\n' > "$CFGROOT/$lc/project.conf"
+  printf 'image: ghcr.io/x/spades-gis@sha256:aaa111\n' > "$CFGROOT/$lc/compose.yaml"
   git -C "$PROJHOME/$1" init -q -b main && git -C "$PROJHOME/$1" commit -q --allow-empty -m seed \
     && git -C "$PROJHOME/$1" remote add origin "https://github.com/allen/$1"; }
 newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"; mkrepo Ahead
