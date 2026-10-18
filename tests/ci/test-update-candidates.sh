@@ -19,8 +19,10 @@ echo '{"dependencies":{"@openai/codex":"0.163.0"}}' > "$R/images/base/agent-clis
 
 cat > "$BIN/gh" <<'STUB'
 #!/usr/bin/env bash
+[ "$*" = "api --paginate repos/pingdotgg/t3code/releases?per_page=100" ] || { echo "unexpected gh args: $*" >&2; exit 2; }
 [ -z "${GH_FAIL:-}" ] || { echo "gh: boom" >&2; exit 1; }
-cat "$FIX/gh.json"
+cat "$FIX/gh.json"                                 # --paginate: one JSON array per page, back to back
+[ ! -f "$FIX/gh-page2.json" ] || cat "$FIX/gh-page2.json"
 STUB
 cat > "$BIN/npm" <<'STUB'
 #!/usr/bin/env bash
@@ -36,9 +38,11 @@ rel() { # rel <tag> <prerelease> <draft> <published_at>
   jq -n --arg t "$1" --argjson p "$2" --argjson d "$3" --arg a "$4" \
     '{tag_name:$t,prerelease:$p,draft:$d,published_at:$a}'; }
 set_gh() { jq -s '.' > "$FIX/gh.json"; }
+set_gh2() { jq -s '.' > "$FIX/gh-page2.json"; }
 set_gh < <(rel v0.2.0 false false 2026-10-14T00:00:00Z; rel v0.3.0 false false 2026-10-16T00:00:00Z
            rel v0.4.0-rc.1 true false 2026-10-01T00:00:00Z; rel v0.0.45 false false 2026-09-01T00:00:00Z
            rel v0.5.0 false true 2026-10-01T00:00:00Z; rel nightly false false 2026-10-01T00:00:00Z)
+set_gh2 < <(rel v0.1.5 false false 2026-09-20T00:00:00Z; rel v0.0.40 false false 2026-08-01T00:00:00Z)   # second page
 echo '{"created":"2025-01-01T00:00:00.000Z","modified":"2026-10-16T00:00:00.000Z","2.1.301":"2026-10-01T00:00:00.000Z","2.1.300":"2026-09-01T00:00:00.000Z","2.2.0-beta.1":"2026-10-01T00:00:00.000Z","2.2.0":"2026-10-10T00:00:00.000Z","2.2.1":"2026-10-12T10:00:00.000Z","2.2.2":"2026-10-16T12:00:00.000Z"}' > "$FIX/npm-_anthropic-ai_claude-code.json"
 echo '{"created":"2025-01-01T00:00:00.000Z","modified":"2026-10-16T00:00:00.000Z","0.163.0":"2026-10-01T00:00:00.000Z","0.164.0":"2026-10-14T00:00:00.000Z"}' > "$FIX/npm-_openai_codex.json"
 
@@ -61,6 +65,8 @@ check "PINNED${tab}claude-code${tab}2.1.301"
 check "PINNED${tab}codex${tab}0.163.0"
 check "PINNED${tab}t3-protocol${tab}2"
 check "NEW${tab}t3${tab}0.2.0${tab}2026-10-14${tab}https://github.com/pingdotgg/t3code/releases/tag/v0.2.0"
+check "NEW${tab}t3${tab}0.1.5${tab}2026-09-20${tab}https://github.com/pingdotgg/t3code/releases/tag/v0.1.5"   # found on page 2
+absent "^NEW${tab}t3${tab}0.0.40"     # page 2, older than the pin
 absent "^NEW${tab}t3${tab}0.3.0"      # 1 day old: inside the cooldown
 absent "^NEW${tab}t3${tab}0.4.0"      # prerelease
 absent "^NEW${tab}t3${tab}0.5.0"      # draft
@@ -76,7 +82,7 @@ if [ "$order" = "2.2.0 2.2.1 " ]; then echo "OK:   oldest first"; else echo "FAI
 # Nothing but PINNED/NEW lines on stdout.
 if printf '%s\n' "$out" | grep -qvE "^(PINNED|NEW)${tab}"; then echo "FAIL: stray stdout"; fail=1; else echo "OK:   stdout clean"; fi
 
-refuses "gh failure names the query" "releases?per_page=100" GH_FAIL=1
+refuses "gh failure names the query" "gh api --paginate 'repos/pingdotgg/t3code/releases?per_page=100' failed" GH_FAIL=1
 refuses "npm failure names the package" "@anthropic-ai/claude-code" NPM_FAIL=1
 
 exit "$fail"

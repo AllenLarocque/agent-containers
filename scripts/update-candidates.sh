@@ -53,7 +53,7 @@ emit() {
 EPOCH='(try (sub("\\.[0-9]+";"") | fromdateiso8601) catch empty)'
 
 q='repos/pingdotgg/t3code/releases?per_page=100'
-raw=$(gh api "$q") || die "gh api '$q' failed"
+raw=$(gh api --paginate "$q") || die "gh api --paginate '$q' failed"   # one JSON array per page: jq reads the stream
 rows=$(jq -r "
   .[] | select(.prerelease == false and .draft == false and (.tag_name | test(\"^v[0-9]+\\\\.[0-9]+\\\\.[0-9]+\$\")))
   | (.published_at | $EPOCH) as \$e | select(\$e != null) | \"\(.tag_name | ltrimstr(\"v\"))\t\(\$e)\"" <<<"$raw") \
