@@ -12,6 +12,9 @@ ARG PE_AI_COMMIT=e7ae689751316dfe742f31b32d0d659accd0cc41
 # T3 Code server (MIT; spec §13.1), pinned: sha256 of t3-<ver>-linux-x64.tar.gz from the release's SHA256SUMS.
 ARG T3_VERSION=0.1.0
 ARG T3_SHA256=f7703ff1bb8f6243580058b3ccf2c02abb62eba4b991e26bbb1da22f4b56d9b1
+# T3 client/server protocol number: the update agent bumps it when T3's protocol changes, and
+# `agent-up update` compares it to decide re-pairing. 2 = the 0.1.0 protocol; 1 was 0.0.x.
+ENV T3_PROTOCOL=2
 # RStudio Server, open-source edition (AGPLv3; spec §13.3), pinned: the current stable release (published
 # 2026-09-11). Posit publishes no checksum file for server .debs: this sha256 is from the first download,
 # whose embedded dpkg-sig signature verified against Posit's code-signing key

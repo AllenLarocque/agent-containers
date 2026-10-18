@@ -78,7 +78,7 @@ diff "$CFG/compose.yaml.bak" "$CFG/compose.yaml"   # expect only the codex lines
 grep '^T3_PORT=' "$CFG/project.conf"                 # must print one line (else: the T3 upgrade above)
 ```
 
-Then upgrade the image as usual (a digest from `digests.md` that includes Codex) and `agent-up up <project>`.
+Then do the [update day](#update-day) steps (the digest must include Codex).
 
 ## T3 Connect (opt-in)
 
@@ -215,11 +215,30 @@ relay, not Tailscale).
    health warning. If it says logged out, run `tailscale login` and open the printed link: the tray
    icon can still say Connected, and `tailscale up` returns silently without logging in.
    `tailscale serve status` must still list the project's port.
-4. The app says **"This client requires a newer server"**: the app (which auto-updates) speaks a
+4. The app says **"This client requires a newer server"**: the app (if it auto-updated) speaks a
    newer T3 protocol than the container's pinned T3 server. Every hop above works, and the server's
    own web app at the same `https://…ts.net:<port>` address still works in the phone's browser. Fix:
-   bump `T3_VERSION` in `images/base/Dockerfile`, then pin the new digest and `agent-up up` each
-   project. Only protocol bumps cause this (the first was T3 0.1.0, 2026-10-15), not every release.
+   do the update day below (`agent-up update --all`), then update the T3 apps. Only protocol changes
+   cause this (the first was T3 0.1.0, 2026-10-15), not every release. After a protocol change,
+   expect to re-add each environment in the app: `agent-up update` prints a new pairing code for
+   each project that needs one.
+
+## Update day
+
+**First, turn off auto-update for the T3 phone and desktop apps.** Update them only after
+`agent-up update` (last step), so an app never gets ahead of the containers.
+
+1. Merge the update PR, then the digests PR.
+2. `git pull` in your agent-containers clone (it must be on an up-to-date `main`).
+3. Optional: `bin/agent-up busy --all` shows running R work and agents mid-task (exit 1 = busy).
+4. `bin/agent-up update --all` (or `update <project>...`). It moves each project to the new digest,
+   leaves stopped projects stopped, and asks `[s]kip / [r]estart anyway / [q]uit` for busy ones
+   (default skip). It prints a summary table.
+5. If it lists pairing codes (T3 protocol changed), re-add each environment in the T3 app with
+   its code. "Can't tell" means an old container without the marker: re-pair if the app complains.
+   A code is valid 10 minutes; for a fresh one at any time, run `bin/agent-up pair <project>`.
+6. Now update the T3 apps. If the last line is a WARNING instead (projects skipped, failed or not
+   reached are still on the old image), finish them first with `bin/agent-up update <project>...`.
 
 ## Research container
 
@@ -427,7 +446,7 @@ helper and the set are gone.
 | Action | Steps |
 |---|---|
 | New project | [docs/runbooks/new-project.md](../docs/runbooks/new-project.md) |
-| Upgrade the image | put a new digest from `digests.md` in `~/.config/agent-containers/<project>/compose.yaml`; `agent-up up <project>` |
+| Upgrade the image (update day) | see [Update day](#update-day) above |
 | Change the allowlist | edit `~/.config/agent-containers/<project>/allowlist`; `agent-up up <project>` |
 | Change a secret | edit it in 1Password; `agent-up up <project>` (the env is fixed at container creation) |
 | Attach | VS Code → **Dev Containers: Attach to Running Container…** → `<project>-agent-1`, or `agent-up shell <project>` |
