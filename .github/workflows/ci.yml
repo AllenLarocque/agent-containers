@@ -491,7 +491,7 @@ jobs:
         if: always()
         run: |
           shellcheck --version
-          shellcheck -S warning images/base/*.sh tests/*/*.sh scripts/*.sh bin/agent-up
+                    shellcheck -S warning images/base/*.sh tests/*/*.sh scripts/*.sh bin/agent-up bin/agent-new
       - name: CI classifier unit test (which change sets may skip the image build)
         if: always()
         run: bash tests/ci/test-classify.sh
