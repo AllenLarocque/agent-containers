@@ -68,8 +68,14 @@ case "$*" in
     sd="$(dirname "$DLOG")"; pn="$*"; pn="${pn#*-p }"; pn="${pn%% *}"
     [ ! -f "$sd/UPFAIL.$pn" ] || exit 1
     [ ! -f "$sd/proto.$pn-agent-1.new" ] || cp "$sd/proto.$pn-agent-1.new" "$sd/proto.$pn-agent-1" ;;
-  "exec -u agent "*" claude --version") echo "9.9.9 (Claude Code)" ;;
-  "exec -u agent "*" codex --version") echo "codex-cli 8.8.8" ;;
+  "exec -u agent "*" claude --version")   # CLI_FAILS=N: the first N calls fail (CLIs still installing at container start)
+    sd="$(dirname "$DLOG")"; n=$(( $(cat "$sd/cli.count" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$sd/cli.count"
+    if [ -f "$sd/CLI_FAILS" ] && [ "$n" -le "$(cat "$sd/CLI_FAILS")" ]; then exit 1; fi
+    echo "9.9.9 (Claude Code)" ;;
+  "exec -u agent "*" codex --version")
+    sd="$(dirname "$DLOG")"
+    if [ -f "$sd/CLI_FAILS" ] && [ "$(cat "$sd/cli.count" 2>/dev/null || echo 0)" -le "$(cat "$sd/CLI_FAILS")" ]; then exit 1; fi
+    echo "codex-cli 8.8.8" ;;
 esac
 exit 0
 STUB
@@ -1214,12 +1220,25 @@ printf '%s\n' "$BASEPS" | snap "$BC" 1; printf '%s\n' "$BASEPS" | snap "$BC" 2
 bout="$(au busy "$NAME" 2>&1)" && rc=0 || rc=$?
 check "busy: nothing running -> exit 0" test "$rc" -eq 0
 check "  ...reports the idle agent" grep -qxF "IDLE: agent idle (claude)" <<<"$bout"
-{ printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 Rscript       /usr/lib/R/bin/Rscript /workspace/run.R --long'; } | snap "$BC" 1
-{ printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 Rscript       /usr/lib/R/bin/Rscript /workspace/run.R --long'; } | snap "$BC" 2
-refuses "busy: Rscript -> BUSY" 'BUSY: Rscript /workspace/run.R --long \(running 2h1m\)' au busy "$NAME"
-{ printf '%s\n' "$BASEPS"; echo '  500     1  100  100 R              /usr/lib/R/bin/exec/R --no-save'; } | snap "$BC" 1
-{ printf '%s\n' "$BASEPS"; echo '  500     1  103  103 R              /usr/lib/R/bin/exec/R --no-save'; } | snap "$BC" 2
-refuses "busy: R using CPU -> BUSY" 'BUSY: .*R' au busy "$NAME"
+# Rscript execs into R in the rocker images: ps shows comm R with --file= or -e (no CPU growth needed).
+RFILE='  400   300  7300  60 R              /usr/local/lib/R/bin/exec/R --no-save --no-restore --no-echo --no-restore --file=/workspace/run.R --args --long'
+{ printf '%s\n' "$BASEPS"; echo "$RFILE"; } | snap "$BC" 1
+{ printf '%s\n' "$BASEPS"; echo "$RFILE"; } | snap "$BC" 2
+refuses "busy: Rscript file.R (comm R, --file=), no CPU growth -> BUSY" 'BUSY: Rscript /workspace/run.R --long \(running 2h1m\)' au busy "$NAME"
+REXPR='  410   300   130   0 R              /usr/local/lib/R/bin/exec/R --no-save --no-restore --no-echo --no-restore -e Sys.sleep(8)'
+{ printf '%s\n' "$BASEPS"; echo "$REXPR"; } | snap "$BC" 1
+{ printf '%s\n' "$BASEPS"; echo "$REXPR"; } | snap "$BC" 2
+refuses "busy: Rscript -e (comm R, -e), no CPU growth -> BUSY" 'BUSY: Rscript -e Sys.sleep\(8\) \(running 0h2m\)' au busy "$NAME"
+{ printf '%s\n' "$BASEPS"; echo '  420   300  7300  60 Rscript       /usr/lib/R/bin/Rscript /workspace/old.R'; } | snap "$BC" 1
+{ printf '%s\n' "$BASEPS"; echo '  420   300  7300  60 Rscript       /usr/lib/R/bin/Rscript /workspace/old.R'; } | snap "$BC" 2
+refuses "busy: comm Rscript -> BUSY (kept)" 'BUSY: Rscript /workspace/old.R \(running 2h1m\)' au busy "$NAME"
+{ printf '%s\n' "$BASEPS"; echo '  500     1  100  100 R              /usr/local/lib/R/bin/exec/R --no-save'; } | snap "$BC" 1
+{ printf '%s\n' "$BASEPS"; echo '  500     1  103  103 R              /usr/local/lib/R/bin/exec/R --no-save'; } | snap "$BC" 2
+refuses "busy: interactive R using CPU -> BUSY" 'BUSY: R using CPU' au busy "$NAME"
+{ printf '%s\n' "$BASEPS"; echo '  500     1  100  100 R              /usr/local/lib/R/bin/exec/R --no-save'; } | snap "$BC" 1
+{ printf '%s\n' "$BASEPS"; echo '  500     1  103  100 R              /usr/local/lib/R/bin/exec/R --no-save'; } | snap "$BC" 2
+bout="$(au busy "$NAME" 2>&1)" && rc=0 || rc=$?
+check "busy: interactive R idle -> IDLE, exit 0" bash -c '[ "$1" -eq 0 ] && grep -qxF "IDLE: idle R session (R)" <<<"$2"' _ "$rc" "$bout"
 { printf '%s\n' "$BASEPS"; echo '  600     1  100   50 rsession       /usr/lib/rstudio-server/bin/rsession'; } | snap "$BC" 1
 { printf '%s\n' "$BASEPS"; echo '  600     1  103   50 rsession       /usr/lib/rstudio-server/bin/rsession'; } | snap "$BC" 2
 bout="$(au busy "$NAME" 2>&1)" && rc=0 || rc=$?
@@ -1243,8 +1262,8 @@ refuses "busy: no arguments prints usage" 'usage:' au busy
 BR="$T/busy-cfg"; mkdir -p "$BR"
 for pn in pa pb pc; do mkdir -p "$BR/$pn"; printf 'PROJECT=%s\nPROJECT_DIR=%s\n' "$pn" "$T/elsewhere-$pn" > "$BR/$pn/project.conf"; done
 AMBIENT=(AGENT_UP_BUSY_SAMPLE=0 AGENT_CONTAINERS_CONFIG="$BR")
-{ printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 Rscript       Rscript x.R'; } | snap pa-agent-1 1
-{ printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 Rscript       Rscript x.R'; } | snap pa-agent-1 2
+{ printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 R              /usr/local/lib/R/bin/exec/R --no-save --no-restore --no-echo --no-restore --file=x.R'; } | snap pa-agent-1 1
+{ printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 R              /usr/local/lib/R/bin/exec/R --no-save --no-restore --no-echo --no-restore --file=x.R'; } | snap pa-agent-1 2
 printf '%s\n' "$BASEPS" | snap pb-agent-1 1; printf '%s\n' "$BASEPS" | snap pb-agent-1 2
 echo 0 > "$T/RUNNING.pc-agent-1"
 aout="$(au busy --all 2>&1)" && rc=0 || rc=$?
@@ -1258,8 +1277,8 @@ printf '%s\n' "$BASEPS" | snap pb-agent-1 1; printf '%s\n' "$BASEPS" | snap pb-a
 aout="$(au busy --all 2>&1)" && rc=0 || rc=$?
 check "busy --all: all idle -> exit 0" test "$rc" -eq 0
 check "  ...last line is 'Nothing busy.'" test "$(tail -n 1 <<<"$aout")" = "Nothing busy."
-{ printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 Rscript       Rscript x.R'; } | snap pa-agent-1 1
-{ printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 Rscript       Rscript x.R'; } | snap pa-agent-1 2
+{ printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 R              /usr/local/lib/R/bin/exec/R --no-save --no-restore --no-echo --no-restore --file=x.R'; } | snap pa-agent-1 1
+{ printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 R              /usr/local/lib/R/bin/exec/R --no-save --no-restore --no-echo --no-restore --file=x.R'; } | snap pa-agent-1 2
 printf '%s\n' "$BASEPS" | snap pb-agent-1 1; printf '%s\n' "$BASEPS" | snap pb-agent-1 2
 refuses "busy pa pb: several names behave like --all" '== pa' au busy pa pb
 # A launcher clone fixture (a copy of agent-up with an ssh-form origin) and a startable project whose
@@ -1299,8 +1318,8 @@ ucfg(){ echo "$UR/$1/compose.yaml"; }
 uset(){ # $1 project, $2 image path, $3 digest hex: rewrite the compose image line
   sed -i -E "s|^( *image: *).*|\1$2@sha256:$3|" "$(ucfg "$1")"; }
 uidle(){ printf '%s\n' "$BASEPS" | snap "$1-agent-1" 1; printf '%s\n' "$BASEPS" | snap "$1-agent-1" 2; }
-ubusy(){ { printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 Rscript       Rscript x.R'; } | snap "$1-agent-1" 1
-         { printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 Rscript       Rscript x.R'; } | snap "$1-agent-1" 2; }
+ubusy(){ { printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 R              /usr/local/lib/R/bin/exec/R --no-save --no-restore --no-echo --no-restore --file=x.R'; } | snap "$1-agent-1" 1
+         { printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 R              /usr/local/lib/R/bin/exec/R --no-save --no-restore --no-echo --no-restore --file=x.R'; } | snap "$1-agent-1" 2; }
 uup(){ grep -cE "^ARGS: compose .* -p $1 up -d" "$DLOG" || true; }
 ureset(){ for pn in "$@"; do uset "$pn" ghcr.io/allenlarocque/spades-gis "$OLD1"; uidle "$pn"; done; : > "$DLOG"; : > "$OPLOG"; }
 uenv
@@ -1326,6 +1345,7 @@ check "  ...summary lists versions (t3 0.9.9)" grep -q "0.9.9" <<<"$uout"
 check "  ...ends with the phone/desktop reminder" test "$(tail -n 1 <<<"$uout")" = "Now update the T3 apps on your phone and desktop (and turn their auto-update back off if an update turned it on)."
 check "  ...no marker on the old containers: 'unknown' heading printed" \
   grep -qxF "Can't tell whether these need re-pairing (no protocol marker on the old container); if the app still connects, ignore:" <<<"$uout"
+check "  ...lists the idle sessions of a project it restarts (IDLE: agent idle (claude))" grep -qxF "IDLE: agent idle (claude)" <<<"$uout"
 
 # order: a startable project whose PROJECT_DIR is another clone of this repo goes last; research (empty PROJECT_DIR) does not
 mkdir -p "$T/upd-zz"; au init "$T/upd-zz" --name aaa-self >/dev/null
@@ -1341,17 +1361,29 @@ rm -rf "$UR/aaa-self"
 uset alpha ghcr.io/allenlarocque/spades-gis "$GISD"
 uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
 check "update: already-current project -> 'current', exit 0, no up" bash -c '[ "$1" -eq 0 ] && grep -q "current" <<<"$2" && [ "$3" -eq 0 ]' _ "$rc" "$uout" "$(uup alpha)"
+check "  ...nothing to re-pair: 'No re-pairing needed.'" grep -qxF "No re-pairing needed." <<<"$uout"
+check "  ...ends with the phone/desktop reminder" test "$(tail -n 1 <<<"$uout")" = "Now update the T3 apps on your phone and desktop (and turn their auto-update back off if an update turned it on)."
 ureset alpha
 echo 0 > "$T/RUNNING.alpha-agent-1"
 uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
 check "update: stopped project -> digest rewritten, 'updated, not started'" bash -c '[ "$1" -eq 0 ] && grep -q "updated, not started" <<<"$2" && grep -q "sha256:$3" "$4"' _ "$rc" "$uout" "$GISD" "$(ucfg alpha)"
 check "  ...no up, and no token read" bash -c '[ "$(grep -c " up -d" "$1")" -eq 0 ] && ! grep -q "^OP: read" "$2"' _ "$DLOG" "$OPLOG"
+check "  ...'updated, not started' still ends with the phone/desktop reminder" test "$(tail -n 1 <<<"$uout")" = "Now update the T3 apps on your phone and desktop (and turn their auto-update back off if an update turned it on)."
+# rewrite_digest: only the image line the digest was read from changes
+ureset alpha; printf '  sidecar:\n    image: ghcr.io/allenlarocque/spades-gis@sha256:%s\n' "$OLD1" >> "$(ucfg alpha)"
+uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: only the first pinned image: line is rewritten (a later one keeps its digest)" \
+  bash -c '[ "$(grep -c "@sha256:$2" "$1")" -eq 1 ] && [ "$(grep -c "@sha256:$3" "$1")" -eq 1 ] && [ "$(tail -n 1 "$1")" = "    image: ghcr.io/allenlarocque/spades-gis@sha256:$3" ]' _ "$(ucfg alpha)" "$GISD" "$OLD1"
+sed -i '/^  sidecar:$/,$d' "$(ucfg alpha)"
 rm -f "$T/RUNNING.alpha-agent-1"
 
 # busy: skip on EOF, restart on 'r', quit on 'q'
 ureset alpha beta; ubusy alpha
 uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
 check "update: busy project with EOF on stdin -> skipped, exit 0" bash -c '[ "$1" -eq 0 ] && grep -q "BUSY: Rscript" <<<"$2" && grep -q "skipped" <<<"$2"' _ "$rc" "$uout"
+check "  ...last line warns: still on the old image, finish with agent-up update alpha first" \
+  bash -c 'l="$(tail -n 1 <<<"$1")"; [[ $l == WARNING:* ]] && grep -qF "alpha" <<<"$l" && grep -qF "still on the old image" <<<"$l" && grep -qF "may disconnect" <<<"$l" && grep -qF "agent-up update alpha" <<<"$l"' _ "$uout"
+check "  ...and no 'Now update the T3 apps' line" bash -c '! grep -qF "Now update the T3 apps" <<<"$1"' _ "$uout"
 check "  ...compose unchanged, no up" bash -c 'grep -q "sha256:$2" "$1" && [ "$3" -eq 0 ]' _ "$(ucfg alpha)" "$OLD1" "$(uup alpha)"
 uout="$(printf 'r\n' | au update alpha 2>&1)" && rc=0 || rc=$?
 check "update: busy project, answer r -> restarted (digest rewritten, up called)" bash -c '[ "$1" -eq 0 ] && grep -q "sha256:$2" "$3" && [ "$4" -eq 1 ]' _ "$rc" "$GISD" "$(ucfg alpha)" "$(uup alpha)"
@@ -1363,6 +1395,8 @@ check "update: answer q stops the run (beta untouched), summary still printed" b
 touch "$T/OPREAD_FAIL_alpha"; ureset alpha beta
 uout="$(au update alpha beta </dev/null 2>&1)" && rc=0 || rc=$?
 check "update: token unreadable -> NOT UPDATED, exit non-zero" bash -c '[ "$1" -ne 0 ] && grep -qF "NOT UPDATED (could not read op://Personal/agent-alpha service account/credential; run: agent-up up alpha)" <<<"$2"' _ "$rc" "$uout"
+check "  ...the warning names only the project left behind (alpha, not beta)" \
+  bash -c 'l="$(tail -n 1 <<<"$1")"; [[ $l == WARNING:* ]] && grep -qF "agent-up update alpha" <<<"$l" && ! grep -qF "beta" <<<"$l"' _ "$uout"
 check "  ...compose unchanged, no up for it; the other project updated" bash -c 'grep -q "sha256:$2" "$1" && [ "$3" -eq 0 ] && grep -q "sha256:$4" "$5" && [ "$6" -eq 1 ]' _ "$(ucfg alpha)" "$OLD1" "$(uup alpha)" "$GISD" "$(ucfg beta)" "$(uup beta)"
 rm -f "$T/OPREAD_FAIL_alpha"
 touch "$T/UPFAIL.alpha"; ureset alpha beta
@@ -1382,6 +1416,19 @@ check "update: marker 1 -> 2 pairs alpha ('yes'); 2 -> 2 does not pair beta" bas
 check "  ...no 'Can't tell' heading when nothing is unknown" bash -c '! grep -qF "Can'"'"'t tell" <<<"$1"' _ "$uout"
 rm -f "$T"/proto.* "$T/pair.count"
 
+# versions: the CLIs install at container start; poll (bounded by AGENT_UP_PAIR_WAIT), then say "installing"
+mkdir -p "$T/fastsleep"; printf '#!/bin/sh\nexit 0\n' > "$T/fastsleep/sleep"; chmod +x "$T/fastsleep/sleep"
+uenv; AMBIENT+=(AGENT_UP_PAIR_WAIT=10 PATH="$T/fastsleep:$T/dstub:$T/bin:$PATH")
+ureset alpha; echo 2 > "$T/CLI_FAILS"; rm -f "$T/cli.count"
+uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: CLIs missing right after up, present after a wait -> real versions in the summary" \
+  bash -c '[ "$1" -eq 0 ] && grep -qF "Claude Code: 9.9.9" <<<"$2" && grep -qF "Codex: codex-cli 8.8.8" <<<"$2" && ! grep -qE "MISSING|installing" <<<"$2" && [ "$(grep -c " claude --version" "$3")" -ge 3 ]' _ "$rc" "$uout" "$DLOG"
+ureset alpha; echo 100000 > "$T/CLI_FAILS"; rm -f "$T/cli.count"
+uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: CLIs still missing when the wait expires -> 'installing (check later: agent-up status alpha)', never MISSING" \
+  bash -c '[ "$1" -eq 0 ] && grep -qF "Claude Code: installing (check later: agent-up status alpha)" <<<"$2" && grep -qF "Codex: installing (check later: agent-up status alpha)" <<<"$2" && ! grep -qF "MISSING" <<<"$2"' _ "$rc" "$uout"
+rm -f "$T/CLI_FAILS" "$T/cli.count"; uenv
+
 # an image not in digests.md
 ureset alpha; uset alpha ghcr.io/x/custom "$OLD1"; cp "$(ucfg alpha)" "$T/alpha.compose.before"
 uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
@@ -1394,6 +1441,14 @@ refuses "update: no arguments prints usage" 'usage:' au update
 GC="$T/gitclone"; mkdir -p "$GC/bin" "$GC/project-template"; cp "$AU" "$GC/bin/agent-up"; git -C "$GC" init -q -b side; git -C "$GC" -c user.email=t@t -c user.name=t commit -q --allow-empty -m x
 refuses "update: refuses when the clone is not on main" "pull main in .* first: digests.md is not current" \
   env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" PATH="$T/dstub:$T/bin:$PATH" AGENT_CONTAINERS_CONFIG="$UR" AGENT_UP_DIGESTS="$T/digests.md" "$GC/bin/agent-up" update --all
+# the fetch never prompts for credentials (GIT_TERMINAL_PROMPT=0): a failing fetch takes the warning path
+git -C "$GC" branch -q -m side main
+REALGIT="$(command -v git)"; mkdir -p "$T/gitstub"
+printf '#!/bin/sh\ncase " $* " in *" fetch "*) echo "GTP=${GIT_TERMINAL_PROMPT-<unset>}" >> "%s"; exit 128 ;; esac\nexec "%s" "$@"\n' "$T/git.log" "$REALGIT" > "$T/gitstub/git"; chmod +x "$T/gitstub/git"
+uset alpha ghcr.io/allenlarocque/spades-gis "$GISD"; rm -f "$T/git.log"
+gout="$(env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/gitstub:$T/dstub:$T/bin:$PATH" AGENT_UP_BUSY_SAMPLE=0 AGENT_CONTAINERS_CONFIG="$UR" AGENT_UP_DIGESTS="$T/digests.md" "$GC/bin/agent-up" update alpha </dev/null 2>&1)" || true
+check "update: git fetch runs with GIT_TERMINAL_PROMPT=0; its failure is a warning" \
+  bash -c 'grep -qx "GTP=0" "$1" && grep -qF "WARNING: could not fetch origin main" <<<"$2"' _ "$T/git.log" "$gout"
 
 # pair: the default wait is 180 s (the first start after an image update installs the CLIs)
 AMBIENT=(); mkdir -p "$T/fastsleep"; printf '#!/bin/sh\nexit 0\n' > "$T/fastsleep/sleep"; chmod +x "$T/fastsleep/sleep"
