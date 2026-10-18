@@ -15,4 +15,8 @@ Projects don't build images: each one references an image **by digest** from its
 `~/.config/agent-containers/<project>/`, outside the agent-writable project folder. Start and
 manage containers with `bin/agent-up` (see `project-template/README.md`).
 
+**Update day:** turn off auto-update for the T3 phone and desktop apps. Merge the update PR and the
+digests PR, `git pull` here, run `bin/agent-up update --all`, re-add the environments it lists
+(after a T3 protocol change), then update the apps. Details: `project-template/README.md`.
+
 Status: **Phase 1 in progress** (PR #3). See `docs/specs/2026-10-03-agent-containers-design.md`.

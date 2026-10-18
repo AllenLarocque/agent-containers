@@ -1401,5 +1401,7 @@ echo 1000 > "$T/PAIR_FAILS"; rm -f "$T/pair.count"
 refuses "pair: default wait is 180 s" "did not answer within 180 s" env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/fastsleep:$T/dstub:$T/bin:$PATH" "$AU" pair "$NAME"
 rm -f "$T/PAIR_FAILS" "$T/pair.count"
 
+check "Dockerfile sets an integer T3_PROTOCOL" grep -Eq '^ENV T3_PROTOCOL=[0-9]+$' "$ROOT/images/base/Dockerfile"
+
 # ---- END OF SECTIONS (later tasks insert above this line)
 [ "$fail" -eq 0 ] && echo "LAUNCHER: ALL PASSED" || { echo "LAUNCHER: FAILURES"; exit 1; }
