@@ -74,6 +74,9 @@ jobs:
           if grep -q 'SKIP: render checks' /tmp/launcher.log; then echo "::error::launcher render checks were skipped"; exit 1; fi
           echo "::notice title=launcher (render-only)::$(grep -c '^OK' /tmp/launcher.log) OK, $(grep -c '^OK: *rendered' /tmp/launcher.log) of them render checks"
           echo "::notice title=build-test::image build skipped for draft; runs when marked ready"
+      - name: draft — agent-new tests (stubs only)
+        if: steps.mode.outputs.mode == 'draft'
+        run: bash tests/launcher/test-agent-new.sh
       - name: Free runner disk (preinstalled SDKs we never use, ~30 GB)
         if: steps.mode.outputs.mode == 'full'
         run: |
@@ -510,6 +513,9 @@ jobs:
           grep -q '^NOTE: behavioural containers get the host-supplied GitHub meta' /tmp/launcher-full.log || { echo "::error::launcher test did not mount the GitHub meta fixture"; exit 1; }
           # The FTP behavioural checks skip without nf_conntrack_ftp; on the runner it is loaded above.
           if grep -q '^SKIP: FTP behavioural checks' /tmp/launcher-full.log; then echo "::error::launcher FTP behavioural checks were skipped"; exit 1; fi
+      - name: agent-new tests (stubs only)
+        if: steps.mode.outputs.mode == 'full'
+        run: bash tests/launcher/test-agent-new.sh
       - name: Acceptance (setupProject behind firewall, plain Rscript)
         if: steps.mode.outputs.mode == 'full'
         run: |
@@ -538,7 +544,7 @@ jobs:
         if: always()
         run: |
           shellcheck --version
-          shellcheck -S warning images/base/*.sh tests/*/*.sh scripts/*.sh bin/agent-up
+                    shellcheck -S warning images/base/*.sh tests/*/*.sh scripts/*.sh bin/agent-up bin/agent-new
       - name: CI classifier unit test (which change sets may skip the image build)
         if: always()
         run: bash tests/ci/test-classify.sh

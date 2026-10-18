@@ -13,6 +13,8 @@ GitHub UI paths below are as of 2026-10 and may move; if a label differs, look f
 **Why this exists.** The agent pushes code and opens pull requests as a separate GitHub account (a "machine user"), not as you.
 A branch ruleset on `main` makes it impossible for that account to merge its own work: only you can approve and merge.
 
+For repos you admin, `agent-new protect` automates step 2.1 (the collaborator invite and its acceptance) and step 4 (the ruleset), and warns — without fixing — when step 2.2 (CODEOWNERS) or 2.3 (the Actions approval setting) is missing; `agent-new verify` automates step 6 (as the machine user, in a throwaway worktree or clone, leaving your checkout alone). Step 1 (the account) and step 3 (minting tokens) stay manual.
+
 Step 1 is done once. Steps 2 and 4 are done per repo. Step 3 is done once per project (a token reaches only the repos the machine user is invited to). Step 5 is a note on ordering. Step 6 is done per project after its container is up (see [new-project.md](new-project.md)). Step 7 is done once, for `agent-containers`.
 
 ## 1. Create the agent's GitHub account
@@ -75,7 +77,8 @@ Repo → Settings → Rules → Rulesets → New ruleset → **New branch rulese
 4. Tick:
    - **Restrict deletions**
    - **Block force pushes**
-   - **Require a pull request before merging**, with: Required approvals = **1**; **Dismiss stale pull request approvals when new commits are pushed**; **Require review from Code Owners**; **Require approval of the most recent reviewable push**
+   - **Require a pull request before merging**, with: Required approvals = **1**; **Dismiss stale pull request approvals when new commits are pushed**; **Require review from Code Owners**. Leave **Require approval of the most recent reviewable push** OFF.
+     *Why off: you are the only code owner and the bot cannot approve, so this rule only blocks you from approving a PR after you pushed to it yourself. "Dismiss stale approvals" plus "Code Owners" already mean your approval must be of the final commit.*
    - **Require status checks to pass** → Add checks → `build-test` and `gitleaks` (both are jobs in this repo's `ci.yml`; selectable after CI has run once). Project repos get their own `gitleaks` workflow from `agent-up init`.
 5. Create.
 
