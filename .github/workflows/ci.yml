@@ -548,6 +548,9 @@ jobs:
       - name: CI classifier unit test (which change sets may skip the image build)
         if: always()
         run: bash tests/ci/test-classify.sh
+      - name: update-candidates unit test (pinned vs eligible upstream versions)
+        if: always()
+        run: bash tests/ci/test-update-candidates.sh
       - name: actionlint
         if: always()
         run: |
