@@ -27,10 +27,17 @@ Host: Linux or WSL2 (GNU coreutils).
 | `bin/agent-up shell <project>` | `zsh` in the container as `agent` |
 | `bin/agent-up pair <project>` | prints a one-time T3 Code pairing link (`http://localhost:<T3_PORT>/pair#token=…`, valid 10 min) |
 | `bin/agent-up rstudio <project>` | prints the RStudio Server address, user and password (only with `RSTUDIO=1`) |
-| `bin/agent-up status \| stop \| down <project>` | `down` removes the container; named volumes are kept |
+| `bin/agent-up status \| stop \| down <project>` | `stop` keeps it stopped, even after a reboot; `down` removes the container; named volumes are kept |
 
 `<project>` is the project folder name, lowercased to `[a-z0-9_-]` (or `--name` at init). The
 container is `<project>-agent-1`.
+
+**After a reboot**, containers come back by themselves when Docker starts (`restart:
+unless-stopped`): the same container, image, settings and secrets as at the last `agent-up up`, and
+the firewall is set up again. A container you stopped with `agent-up stop` (or Docker Desktop's
+Stop) stays stopped; start it again with `agent-up up <project>`, or Docker Desktop's Start. Turn
+on Docker Desktop's "Start Docker Desktop when you sign in" so this happens without you. Containers
+created before this setting existed get it at their next `agent-up up` or `agent-up update`.
 
 ## T3 Code
 

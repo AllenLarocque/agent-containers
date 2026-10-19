@@ -242,7 +242,7 @@ AMBIENT=(COMPOSE_FILE=evil.yaml COMPOSE_PROFILES=evil PROJECT_DIR=/evil SPADES_A
 rc=0; out=$(au up "$NAME" 2>&1) || rc=$?
 AMBIENT=()
 check "up succeeds (stub op + stub docker)" test "$rc" -eq 0
-C="compose --env-file $CFG/project.conf -f $CFG/compose.yaml -f $CFG/.generated/env-passthrough.yaml -f $CFG/.generated/t3-connect.yaml -f $CFG/.generated/research.yaml -f $CFG/.generated/rstudio.yaml -f $CFG/.generated/ftp.yaml -f $CFG/.generated/hostname.yaml --project-directory $CFG -p $NAME"
+C="compose --env-file $CFG/project.conf -f $CFG/compose.yaml -f $CFG/.generated/env-passthrough.yaml -f $CFG/.generated/t3-connect.yaml -f $CFG/.generated/research.yaml -f $CFG/.generated/rstudio.yaml -f $CFG/.generated/ftp.yaml -f $CFG/.generated/hostname.yaml -f $CFG/.generated/restart.yaml --project-directory $CFG -p $NAME"
 check "  ...op run resolves project.env, then runs docker compose" \
   grep -qxF "OP: run --env-file $CFG/project.env -- docker $C up -d --force-recreate" "$OPLOG"
 check "  ...docker compose gets ONLY the config dir's files" grep -qxF "ARGS: $C up -d --force-recreate" "$DLOG"
@@ -257,6 +257,8 @@ check "  ...and holds no value or reference" bash -c '! grep -Eq "fake-secret|op
 T3O="$CFG/.generated/t3-connect.yaml"
 check "T3_CONNECT=0: the T3 Connect overlay adds nothing" bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent: {}")" ]' _ "$T3O"
 check "  ...and no firewall switch file exists" test ! -e "$CFG/.generated/t3-connect"
+check "the container restarts with Docker (after a reboot) unless stopped by hand" \
+  bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent:\n    restart: unless-stopped")" ]' _ "$CFG/.generated/restart.yaml"
 check "the container gets a readable hostname (T3's environment name): the project name" \
   bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent:\n    hostname: demo-proj")" ]' _ "$CFG/.generated/hostname.yaml"
 RO="$CFG/.generated/research.yaml"
@@ -623,7 +625,7 @@ check "  ...created the research exchange root" test -d "$RD"
 refuses "init --profile research never overwrites" 'already exists' au init --profile research
 refuses "up research refuses the placeholder digest" 'not pinned to a real digest' au up research
 sed -i "s/REPLACE_WITH_DIGEST_FROM_digests.md/$H64/" "$RCFG/compose.yaml"
-RC="compose --env-file $RCFG/project.conf -f $RCFG/compose.yaml -f $RCFG/.generated/env-passthrough.yaml -f $RCFG/.generated/t3-connect.yaml -f $RCFG/.generated/research.yaml -f $RCFG/.generated/rstudio.yaml -f $RCFG/.generated/ftp.yaml -f $RCFG/.generated/hostname.yaml --project-directory $RCFG -p research"
+RC="compose --env-file $RCFG/project.conf -f $RCFG/compose.yaml -f $RCFG/.generated/env-passthrough.yaml -f $RCFG/.generated/t3-connect.yaml -f $RCFG/.generated/research.yaml -f $RCFG/.generated/rstudio.yaml -f $RCFG/.generated/ftp.yaml -f $RCFG/.generated/hostname.yaml -f $RCFG/.generated/restart.yaml --project-directory $RCFG -p research"
 : > "$DLOG"; rm -f "$OPLOG"; TOK=""
 AMBIENT=(OP_SERVICE_ACCOUNT_TOKEN=owner-op-token GH_TOKEN=owner-gh-token)
 rc=0; out=$(au up research 2>&1) || rc=$?
@@ -798,6 +800,8 @@ if docker compose version >/dev/null 2>&1; then
     bash -c '[ "$(jq -r ".volumes[\"codex-config\"].name" <<<"$1")" = "codex-$2" ] && jq -e ".services.agent.volumes[] | select(.target==\"/home/agent/.codex\" and .source==\"codex-config\")" <<<"$1" >/dev/null' _ "$J" "$NAME"
   check "rendered: hostname is the project name (T3 shows it as the environment)" \
     test "$(jq -r .services.agent.hostname <<<"$J")" = "$NAME"
+  check "rendered: restart unless-stopped (back after a reboot)" \
+    test "$(jq -r .services.agent.restart <<<"$J")" = unless-stopped
   check "rendered: command is the image entrypoint (firewall first)" \
     jq -e '.services.agent.command == ["/usr/local/bin/agent-entrypoint"]' <<<"$J"
   check "rendered: no env_file (secrets only via op run)" test -z "$(jq -r '.services.agent.env_file // empty' <<<"$J")"
@@ -883,7 +887,7 @@ if docker compose version >/dev/null 2>&1; then
   # RStudio OFF must render exactly what the launcher rendered before RStudio existed (no overlay).
   JPRE="$(cd "$T" && env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u T3_PORT -u T3_CONNECT HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" \
           docker compose --env-file "$CFG/project.conf" -f "$CFG/compose.yaml" -f "$CFG/.generated/env-passthrough.yaml" \
-          -f "$CFG/.generated/t3-connect.yaml" -f "$CFG/.generated/research.yaml" -f "$CFG/.generated/hostname.yaml" --project-directory "$CFG" -p "$NAME" config --format json)"
+          -f "$CFG/.generated/t3-connect.yaml" -f "$CFG/.generated/research.yaml" -f "$CFG/.generated/hostname.yaml" -f "$CFG/.generated/restart.yaml" --project-directory "$CFG" -p "$NAME" config --format json)"
   check "rendered (RSTUDIO=0): identical to the config rendered without the RStudio overlay" \
     bash -c 'diff <(jq -S . <<<"$1") <(jq -S . <<<"$2")' _ "$JPRE" "$J"
   check "rendered (RSTUDIO=0): no rstudio volume, no 8787" \
@@ -905,7 +909,7 @@ if docker compose version >/dev/null 2>&1; then
   # FTP_HOSTS unset must render exactly what the launcher rendered before FTP existed (no overlay).
   JNOFTP="$(cd "$T" && env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u T3_PORT -u T3_CONNECT HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" \
           docker compose --env-file "$CFG/project.conf" -f "$CFG/compose.yaml" -f "$CFG/.generated/env-passthrough.yaml" \
-          -f "$CFG/.generated/t3-connect.yaml" -f "$CFG/.generated/research.yaml" -f "$CFG/.generated/rstudio.yaml" -f "$CFG/.generated/hostname.yaml" --project-directory "$CFG" -p "$NAME" config --format json)"
+          -f "$CFG/.generated/t3-connect.yaml" -f "$CFG/.generated/research.yaml" -f "$CFG/.generated/rstudio.yaml" -f "$CFG/.generated/hostname.yaml" -f "$CFG/.generated/restart.yaml" --project-directory "$CFG" -p "$NAME" config --format json)"
   check "rendered (FTP_HOSTS unset): identical to the config rendered without the FTP overlay" \
     bash -c 'diff <(jq -S . <<<"$1") <(jq -S . <<<"$2")' _ "$JNOFTP" "$J"
   cp "$CFG/project.conf" "$T/pconf-ftp-render.bak"
@@ -988,13 +992,13 @@ services:
 OVR
   dc(){ env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u COMPOSE_FILE HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" GH_TOKEN=dummy-in-container \
           docker compose --env-file "$CFG/project.conf" -f "$CFG/compose.yaml" -f "$CFG/.generated/env-passthrough.yaml" \
-          -f "$CFG/.generated/t3-connect.yaml" -f "$CFG/.generated/research.yaml" -f "$CFG/.generated/rstudio.yaml" -f "$CFG/.generated/ftp.yaml" -f "$CFG/.generated/hostname.yaml" -f "$T/override.yaml" --project-directory "$CFG" -p "$NAME" "$@"; }
+          -f "$CFG/.generated/t3-connect.yaml" -f "$CFG/.generated/research.yaml" -f "$CFG/.generated/rstudio.yaml" -f "$CFG/.generated/ftp.yaml" -f "$CFG/.generated/hostname.yaml" -f "$CFG/.generated/restart.yaml" -f "$T/override.yaml" --project-directory "$CFG" -p "$NAME" "$@"; }
   # The research container: agent-up's exact arguments, with the owner's ambient secrets in compose's
   # environment (they must NOT reach the container).
   rdc(){ env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u COMPOSE_FILE HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" \
           GH_TOKEN=ambient-gh OP_SERVICE_ACCOUNT_TOKEN=ambient-op \
           docker compose --env-file "$RCFG/project.conf" -f "$RCFG/compose.yaml" -f "$RCFG/.generated/env-passthrough.yaml" \
-          -f "$RCFG/.generated/t3-connect.yaml" -f "$RCFG/.generated/research.yaml" -f "$RCFG/.generated/rstudio.yaml" -f "$RCFG/.generated/ftp.yaml" -f "$RCFG/.generated/hostname.yaml" -f "$T/override.yaml" --project-directory "$RCFG" -p research "$@"; }
+          -f "$RCFG/.generated/t3-connect.yaml" -f "$RCFG/.generated/research.yaml" -f "$RCFG/.generated/rstudio.yaml" -f "$RCFG/.generated/ftp.yaml" -f "$RCFG/.generated/hostname.yaml" -f "$RCFG/.generated/restart.yaml" -f "$T/override.yaml" --project-directory "$RCFG" -p research "$@"; }
   # The agent (uid 1000) writes into the project dir (e.g. RStudio's .Rproj.user): hand $T back to the
   # runner before removing it, or the EXIT trap's rm fails and turns a passing run into exit 1.
   reclaim(){ docker run --rm -u root -v "$T:/t" "$TEMPLATE_IMAGE" chown -R "$(id -u):$(id -g)" /t >/dev/null 2>&1 || true; }
