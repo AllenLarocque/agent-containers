@@ -186,6 +186,8 @@ RESEARCH_DIR=$rd
 T3_PORT=$(next_t3_port)
 # T3 Connect: 0 = off, 1 = managed tunnel (T3's relay + Cloudflare; at most 3 per T3 account), publish = notifications only, connect over Tailscale (README "Phone and desktop apps").
 T3_CONNECT=0
+# Contact address for Unpaywall/OpenAlex/Crossref (they ask who is calling). Use a forwarding alias you can switch off, never your real address. Not a secret; unset = the bot skips Unpaywall.
+#RESEARCH_CONTACT_EMAIL=
 CONFEOF
   chmod 600 "$tmp/compose.yaml" "$tmp/project.conf"
   chmod 700 "$tmp"
@@ -244,6 +246,18 @@ check_image_profile(){ # $1 config dir: spades-research belongs to the research 
   [ "$(profile "$1")" = research ] && return 0
   if grep -Eq '^[[:space:]]*image:[[:space:]]*[^[:space:]]*/spades-research(@|:|[[:space:]]|$)' "$1/compose.yaml"; then
     die "spades-research is for the research container only"
+  fi
+}
+contact_email(){ conf_get "$1/project.conf" RESEARCH_CONTACT_EMAIL; }   # $1 config dir: the value as written (empty = unset)
+contact_ok(){ # $1 config dir: unset, or a plain email address (validated as conf_get returns it)
+  local v LC_ALL=C; v="$(contact_email "$1")"
+  [ -z "$v" ] || [[ "$v" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]
+}
+check_contact(){ # $1 config dir: research only; a builder never gets the setting. Never echoes the value.
+  if [ "$(profile "$1")" = research ]; then
+    contact_ok "$1" || die "RESEARCH_CONTACT_EMAIL in $1/project.conf: not a plain email address"
+  elif [ -n "$(contact_email "$1")" ]; then
+    die "RESEARCH_CONTACT_EMAIL is for the research container only"
   fi
 }
 check_t3_port(){ # only up and pair need it: stop/down must work on a config that predates T3
@@ -580,6 +594,9 @@ write_research(){ # the research profile's switch + instructions + exchange; a b
       echo "    working_dir: /research/_general        # persistent; overrides the owner's compose.yaml"
       echo "    environment:"
       echo "      T3_PROJECT_DIR: /research/_general   # T3 Code's default project; overrides compose.yaml"
+      if [ -n "$(contact_email "$1")" ] && contact_ok "$1"; then   # invalid (stop/down) = omitted
+        echo "      RESEARCH_CONTACT_EMAIL: $(yaml_str "$(contact_email "$1")")"
+      fi
       echo "    volumes:"
       echo "      # read by the root firewall at start (open public egress); the agent cannot change it"
       bind_yaml ./.generated/profile /etc/firewall/profile ro
@@ -722,6 +739,7 @@ cmd_up(){
   local cfg name; cfg="$(cfg_dir "$1")"; name="$(basename "$cfg")"
   check_files "$cfg"
   check_image_profile "$cfg"
+  check_contact "$cfg"
   check_t3_port "$cfg"
   check_t3_connect "$cfg"
   check_ts_port "$cfg"
@@ -780,6 +798,7 @@ cmd_config(){
   local cfg; cfg="$(cfg_dir "$1")"; shift
   check_files "$cfg"
   check_image_profile "$cfg"
+  check_contact "$cfg"
   if [ "$(profile "$cfg")" = research ]; then check_research_env "$cfg"; else check_project_env "$cfg/project.env"; fi
   check_t3_connect "$cfg"
   check_research "$cfg"
@@ -1090,7 +1109,7 @@ cmd_status(){
 # must not override it (a shell variable beats --env-file in compose).
 unset COMPOSE_FILE COMPOSE_PROFILES COMPOSE_PATH_SEPARATOR COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES \
       PROJECT PROJECT_DIR PROFILE IMAGE SPADES_AI_DIR AGENT_MEMORY_DIR T3_PORT T3_CONNECT RESEARCH RESEARCH_DIR \
-      RSTUDIO RSTUDIO_PORT TAILSCALE_HTTPS_PORT TAILSCALE_HOST FTP_HOSTS
+      RSTUDIO RSTUDIO_PORT TAILSCALE_HTTPS_PORT TAILSCALE_HOST FTP_HOSTS RESEARCH_CONTACT_EMAIL
 
 [ $# -ge 1 ] || usage
 cmd="$1"; shift

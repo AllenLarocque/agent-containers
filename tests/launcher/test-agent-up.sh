@@ -708,6 +708,41 @@ msg=$(au up research 2>&1 || true)
 check "  ...without echoing the value" bash -c '! grep -q "op://" <<<"$1"' _ "$msg"
 rm -f "$RCFG/project.env"
 
+# RESEARCH_CONTACT_EMAIL: a setting (not a secret) for the research container only
+cp "$RCFG/project.conf" "$T/rconf-ce.bak"
+check "init seeds a commented RESEARCH_CONTACT_EMAIL line" grep -qx '#RESEARCH_CONTACT_EMAIL=' "$RCFG/project.conf"
+check "  ...with a forwarding-alias comment above it" bash -c 'grep -B1 -x "#RESEARCH_CONTACT_EMAIL=" "$1" | head -n 1 | grep -q "forwarding alias"' _ "$RCFG/project.conf"
+au config research >/dev/null 2>&1 || true
+check "unset: the research overlay has no RESEARCH_CONTACT_EMAIL" bash -c '! grep -q RESEARCH_CONTACT_EMAIL "$1"' _ "$RCFG/.generated/research.yaml"
+echo 'RESEARCH_CONTACT_EMAIL=papers+research@relay.example' >> "$RCFG/project.conf"
+check "config research accepts a plain alias" au config research
+check "  ...the agent service environment carries it" grep -qx '      RESEARCH_CONTACT_EMAIL: "papers+research@relay.example"' "$RCFG/.generated/research.yaml"
+check "  ...under environment:" bash -c 'grep -B3 "RESEARCH_CONTACT_EMAIL" "$1" | grep -qx "    environment:"' _ "$RCFG/.generated/research.yaml"
+cp "$T/rconf-ce.bak" "$RCFG/project.conf"
+for bad in 'a b@x.org' 'a@x.org"' '$HOME@x.org' 'a@b@x.org' 'nobody'; do
+  echo "RESEARCH_CONTACT_EMAIL=$bad" >> "$RCFG/project.conf"
+  refuses "up research refuses RESEARCH_CONTACT_EMAIL='$bad'" 'not a plain email address' au up research
+  refuses "config research refuses RESEARCH_CONTACT_EMAIL='$bad'" 'not a plain email address' au config research
+  msg=$(au up research 2>&1 || true)
+  check "  ...without echoing the value" bash -c '! grep -qF -- "$2" <<<"$1"' _ "$msg" "$bad"
+  cp "$T/rconf-ce.bak" "$RCFG/project.conf"
+done
+echo 'RESEARCH_CONTACT_EMAIL=a b@x.org' >> "$RCFG/project.conf"
+check "stop research works with an invalid RESEARCH_CONTACT_EMAIL" au stop research
+check "  ...and the value is omitted from the overlay" bash -c '! grep -q RESEARCH_CONTACT_EMAIL "$1"' _ "$RCFG/.generated/research.yaml"
+cp "$T/rconf-ce.bak" "$RCFG/project.conf"
+AMBIENT=(RESEARCH_CONTACT_EMAIL=leak@evil.example)
+au config research >/dev/null 2>&1 || true
+check "an ambient RESEARCH_CONTACT_EMAIL never reaches the research overlay" bash -c '! grep -rq "leak@evil.example" "$1"' _ "$RCFG/.generated"
+check "  ...nor the config output" bash -c '! grep -q "leak@evil.example" <<<"$1"' _ "$(au config research 2>&1 || true)"
+AMBIENT=()
+cp "$CFG/project.conf" "$T/pconf-ce.bak"
+echo 'RESEARCH_CONTACT_EMAIL=papers+research@relay.example' >> "$CFG/project.conf"
+refuses "up refuses RESEARCH_CONTACT_EMAIL on a builder" 'for the research container only' au up "$NAME"
+refuses "config refuses RESEARCH_CONTACT_EMAIL on a builder" 'for the research container only' au config "$NAME"
+cp "$T/pconf-ce.bak" "$CFG/project.conf"
+au config research >/dev/null 2>&1 || true
+
 # builder opt-in: RESEARCH=1
 cp "$CFG/project.conf" "$T/pconf-res.bak"
 sed -i 's/^RESEARCH=.*/RESEARCH=1/' "$CFG/project.conf"
