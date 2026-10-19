@@ -114,13 +114,14 @@ jobs:
           grep -Pq '^\| spades-base \| 2000\.01\.01-dryrun \| \x60sha256:[0-9a-f]{64}\x60 \|$' /tmp/digests.md
           grep -Pq '^\| spades-bio \| 2000\.01\.01-dryrun \| \x60sha256:[0-9a-f]{64}\x60 \|$' /tmp/digests.md
           grep -Pq '^\| spades-gis \| 2000\.01\.01-dryrun \| \x60sha256:[0-9a-f]{64}\x60 \|$' /tmp/digests.md
-          [ "$(grep -c '^| spades-' /tmp/digests.md)" = 3 ]
+          grep -Pq '^\| spades-research \| 2000\.01\.01-dryrun \| \x60sha256:[0-9a-f]{64}\x60 \|$' /tmp/digests.md
+          [ "$(grep -c '^| spades-' /tmp/digests.md)" = 4 ]
           # header must match the committed skeleton
           diff <(head -7 digests.md) <(head -7 /tmp/digests.md)
       - name: Use the pushed images as spades-*:ci for the remaining tests
         if: steps.mode.outputs.mode == 'full'
         run: |
-          for img in base gis bio; do
+          for img in base gis bio research; do
             docker pull -q "localhost:5000/allenlarocque/spades-$img:latest"
             docker tag "localhost:5000/allenlarocque/spades-$img:latest" "spades-$img:ci"
           done
@@ -156,7 +157,7 @@ jobs:
         if: always() && steps.mode.outputs.mode == 'full'
         run: |
           r=$( {
-            echo "== images"; docker image ls --format '{{.Repository}}:{{.Tag}}  {{.Size}}' | grep -E '^spades-(base|gis|bio):ci'
+            echo "== images"; docker image ls --format '{{.Repository}}:{{.Tag}}  {{.Size}}' | grep -E '^spades-(base|gis|bio|research):ci'
             for img in base bio; do
               echo "== spades-$img largest layers"
               docker history --no-trunc --format '{{.Size}}\t{{.CreatedBy}}' "spades-$img:ci" | grep -v '^0B' \
@@ -544,10 +545,13 @@ jobs:
         if: always()
         run: |
           shellcheck --version
-                    shellcheck -S warning images/base/*.sh tests/*/*.sh scripts/*.sh bin/agent-up bin/agent-new
+                    shellcheck -S warning images/base/*.sh tests/*/*.sh scripts/*.sh images/research/paper-tools/*.sh bin/agent-up bin/agent-new
       - name: CI classifier unit test (which change sets may skip the image build)
         if: always()
         run: bash tests/ci/test-classify.sh
+      - name: render-digests unit test (four image rows, skeleton unchanged)
+        if: always()
+        run: bash tests/ci/test-render-digests.sh
       - name: update-candidates unit test (pinned vs eligible upstream versions)
         if: always()
         run: bash tests/ci/test-update-candidates.sh

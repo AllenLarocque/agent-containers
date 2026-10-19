@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Free runner disk (the three images + buildx cache exceed the runner's free space)
+      - name: Free runner disk (the four images + buildx cache exceed the runner's free space)
         run: |
           # Preinstalled SDKs we never use (~30 GB). Without this, pulling spades-bio back from the
           # registry for its smoke test hit "no space left on device" (2026-10-07, PR #5).
