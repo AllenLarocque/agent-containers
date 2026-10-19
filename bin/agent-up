@@ -14,7 +14,7 @@ usage(){
   cat >&2 <<'USAGE'
 usage:
   agent-up init <project-dir> [--name NAME] [--image base|gis|bio]   a builder project
-  agent-up init --profile research [--image base|gis|bio]           the ONE shared research container
+  agent-up init --profile research [--image research|base|gis|bio]  the ONE shared research container (default: research)
   agent-up up <project>                  resolve secrets with `op run`, (re)create the container
                                          (research: no secrets, no `op run`)
   agent-up config <project> [ARGS...]    print the rendered compose config (no secrets needed)
@@ -47,7 +47,7 @@ next_rstudio_port(){ # lowest port >= 8787 not used by any project's T3_PORT or 
 }
 
 cmd_init(){
-  local dir="" name="" image="gis" profile="builder"
+  local dir="" name="" image="" profile="builder"
   while [ $# -gt 0 ]; do
     case "$1" in
       --name)    [ $# -ge 2 ] || usage; name="$2"; shift 2 ;;
@@ -57,10 +57,18 @@ cmd_init(){
       *) [ -z "$dir" ] || usage; dir="$1"; shift ;;
     esac
   done
-  case "$image" in base|gis|bio) ;; *) die "--image must be base, gis or bio (got: $image)" ;; esac
   case "$profile" in
-    builder) ;;
-    research) init_research "$dir" "$name" "$image"; return ;;
+    builder)
+      image="${image:-gis}"
+      case "$image" in
+        base|gis|bio) ;;
+        research) die "--image research is for the research container only (agent-up init --profile research)" ;;
+        *) die "--image must be base, gis or bio (got: $image)" ;;
+      esac ;;
+    research)
+      image="${image:-research}"
+      case "$image" in research|base|gis|bio) ;; *) die "--image must be research, base, gis or bio (got: $image)" ;; esac
+      init_research "$dir" "$name" "$image"; return ;;
     *) die "--profile must be builder or research (got: $profile)" ;;
   esac
   [ -n "$dir" ] || usage
@@ -226,7 +234,17 @@ check_files(){
     die "the project name 'research' is reserved for the shared research container"
   fi
   img="$(conf_get "$1/project.conf" IMAGE)"
-  case "$img" in base|gis|bio) ;; *) die "IMAGE=$img in $1/project.conf: must be base, gis or bio" ;; esac
+  if [ "$prof" = research ]; then
+    case "$img" in research|base|gis|bio) ;; *) die "IMAGE=$img in $1/project.conf: must be research, base, gis or bio" ;; esac
+  else
+    case "$img" in base|gis|bio) ;; *) die "IMAGE=$img in $1/project.conf: must be base, gis or bio" ;; esac
+  fi
+}
+check_image_profile(){ # $1 config dir: spades-research belongs to the research profile only (never refused there)
+  [ "$(profile "$1")" = research ] && return 0
+  if grep -Eq '^[[:space:]]*image:[[:space:]]*[^[:space:]]*/spades-research(@|:|[[:space:]]|$)' "$1/compose.yaml"; then
+    die "spades-research is for the research container only"
+  fi
 }
 check_t3_port(){ # only up and pair need it: stop/down must work on a config that predates T3
   local port; port="$(conf_get "$1/project.conf" T3_PORT)"
@@ -703,6 +721,7 @@ cmd_up(){
   [ $# -eq 1 ] || usage
   local cfg name; cfg="$(cfg_dir "$1")"; name="$(basename "$cfg")"
   check_files "$cfg"
+  check_image_profile "$cfg"
   check_t3_port "$cfg"
   check_t3_connect "$cfg"
   check_ts_port "$cfg"
@@ -760,6 +779,7 @@ cmd_config(){
   [ $# -ge 1 ] || usage
   local cfg; cfg="$(cfg_dir "$1")"; shift
   check_files "$cfg"
+  check_image_profile "$cfg"
   if [ "$(profile "$cfg")" = research ]; then check_research_env "$cfg"; else check_project_env "$cfg/project.env"; fi
   check_t3_connect "$cfg"
   check_research "$cfg"
