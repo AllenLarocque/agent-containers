@@ -912,11 +912,18 @@ if docker compose version >/dev/null 2>&1; then
   RCFGR="$CFGROOT/research"
   check "rendered research: project name 'research', cwd /research/_general, mem_limit 16g" \
     jq -e '.name == "research" and .services.agent.working_dir == "/research/_general" and ((.services.agent.mem_limit|tostring) == "17179869184")' <<<"$JS"
-  check "rendered research: image pinned by digest" bash -c 'jq -r .services.agent.image <<<"$1" | grep -Eq "spades-gis@sha256:[0-9a-f]{64}$"' _ "$JS"
+  check "rendered research: image pinned by digest" bash -c 'jq -r .services.agent.image <<<"$1" | grep -Eq "spades-research@sha256:[0-9a-f]{64}$"' _ "$JS"
   check "rendered research: NO project, spades.ai, memory, Require cache or project allowlist mount" \
     jq -e '[.services.agent.volumes[].target | select(. == "/workspace" or . == "/opt/memory" or . == "/opt/reference/spades.ai" or . == "/home/agent/.cache/R/Require" or startswith("/etc/firewall/allowlist.d"))] == []' <<<"$JS"
   check "rendered research: environment holds no secret (exactly the 3 seed variables)" \
     jq -e '(.services.agent.environment | keys) == ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC","CLAUDE_CONFIG_DIR","T3_PROJECT_DIR"] and .services.agent.environment.T3_PROJECT_DIR == "/research/_general"' <<<"$JS"
+  cp "$RCFG/project.conf" "$T/rconf-render.bak"
+  echo 'RESEARCH_CONTACT_EMAIL=papers+research@relay.example' >> "$RCFG/project.conf"
+  JSA="$(cd "$T" && aureal config research --format json)"
+  cp "$T/rconf-render.bak" "$RCFG/project.conf"
+  ( cd "$T" && aureal config research >/dev/null 2>&1 ) || true   # regenerate the overlay without the alias
+  check "rendered research (RESEARCH_CONTACT_EMAIL set): environment holds the 3 seed variables plus the alias, passed through literally" \
+    jq -e '(.services.agent.environment | keys) == ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC","CLAUDE_CONFIG_DIR","RESEARCH_CONTACT_EMAIL","T3_PROJECT_DIR"] and .services.agent.environment.RESEARCH_CONTACT_EMAIL == "papers+research@relay.example"' <<<"$JSA"
   check "rendered research: /research/_general read-write from RESEARCH_DIR/_general" \
     test "$(mr "$JS" /research/_general)" = "[{\"type\":\"bind\",\"source\":\"$RDR/_general\",\"ro\":false}]"
   check "rendered research: profile switch read-only at /etc/firewall/profile (the only /etc/firewall mount)" \

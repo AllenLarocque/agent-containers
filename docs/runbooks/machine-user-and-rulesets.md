@@ -125,6 +125,8 @@ Finally, as **you** in the browser: open the PR, approve it, and merge it (or cl
 
 After the first run of the `publish` workflow:
 
-1. GitHub → your profile → Packages → `spades-base`, then `spades-gis` (later `spades-bio`) → Package settings. Confirm the package is **linked to the `agent-containers` repo**, then Danger Zone → **Change visibility → Public**. *Why: public images pull without credentials.*
+1. GitHub → your profile → Packages → `spades-base`, then `spades-gis`, `spades-research` (later `spades-bio`) → Package settings. Confirm the package is **linked to the `agent-containers` repo**, then Danger Zone → **Change visibility → Public**. *Why: public images pull without credentials.*
 2. Open the auto-created `chore/digests-*` PR and confirm a `build-test` run appears as a check on it. *Why: PRs opened by Actions do not trigger workflows by themselves; `publish` dispatches CI explicitly, and this proves it worked.* If it does not appear, **stop and decide**: the fallback is a GitHub App token, which would be a documented exception to the "no extra credentials" rule.
 3. Review and merge that PR yourself. Copy the digest from `digests.md` into projects as in [new-project.md](new-project.md).
+
+**A package added later** (e.g. `spades-research`): its first `chore/digests-*` PR shows a red `build-test`, because CI checks digests anonymously and a new package starts private. Make it public (step 1), re-run the failed job (or `gh workflow run ci.yml --ref chore/digests-<tag>`), then merge.

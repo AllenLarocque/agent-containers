@@ -275,25 +275,28 @@ agent-up shell research                   # first time: `claude` (log in), `code
 agent-up pair research                    # T3 Code for the research container (its project is /research/_general)
 ```
 
-The research container runs the `spades-research` image: `spades-gis` plus the PDF tools for
-reading papers. Only the research container may use it (`IMAGE=research`); builders are refused.
+The research container runs the `spades-research` image: `spades-gis` plus a PDF-tool installer.
+The PDF tools come in stage 2; none are installed yet, so the agent reads PDFs with its built-in reader. Only the research container may use it (`IMAGE=research`); builders are refused.
 `agent-up init --profile research` sets this by default.
 
-**Migrating an existing research config.** After the change that adds `spades-research` merges, the
-publish workflow adds a `spades-research` row to `digests.md`. Then:
-1. Set `IMAGE=research` in `~/.config/agent-containers/research/project.conf`.
-2. Put the `spades-research` digest in `~/.config/agent-containers/research/compose.yaml`.
-3. Run `agent-up up research`.
+**Migrating an existing research config.** In this order:
+1. After the change that adds `spades-research` merges, publish opens a digests PR.
+2. Make `spades-research` public on GitHub (Packages → spades-research → Package settings →
+   Change visibility → Public).
+3. Re-run CI on that PR, then merge it.
+4. Migrate the config: set `IMAGE=research` in `~/.config/agent-containers/research/project.conf`,
+   put the `spades-research` digest in `~/.config/agent-containers/research/compose.yaml`, and run
+   `agent-up up research`.
 
 Until you do, a config with `IMAGE=gis` keeps working unchanged.
 
 **Contact alias for paper lookups.** Unpaywall requires an email address on every request. OpenAlex
 and Crossref prefer one, and give faster, more reliable service when they get it. Do not use your
 real address. Create a forwarding alias with Firefox Relay or SimpleLogin, one you can switch off.
-Then uncomment the line in `~/.config/agent-containers/research/project.conf` and set it:
+Then add (or uncomment) the line in `~/.config/agent-containers/research/project.conf` and set it:
 
 ```bash
-RESEARCH_CONTACT_EMAIL=your-alias@example.invalid
+RESEARCH_CONTACT_EMAIL=<your-alias>
 ```
 
 `agent-up` checks that it is a plain address and passes it to the research container as the
