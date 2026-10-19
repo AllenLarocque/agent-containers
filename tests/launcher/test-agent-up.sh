@@ -155,6 +155,8 @@ refuses "refusal: research with a project dir (again)" 'takes no project directo
 refuses "refusal: a builder named research" "'research' is reserved" au init "$P" --name research
 refuses "refusal: an unknown profile" 'builder or research' au init "$P" --profile foo --name zz
 refuses "refusal: unknown image (again)" 'base, gis or bio' au init "$P" --image foo --name zz
+refuses "refusal: a builder with --image research" 'research container only' au init "$P" --image research --name zz
+refuses "--image foo still refused" '--image must be' au init "$P" --image foo --name zz
 check "no .init.* leftovers after refusals and successes" noleft
 check "no config dir for refused inits" test ! -e "$CFGROOT/zz"
 check "config dirs are exactly the expected ones" test "$(ls -A "$CFGROOT" | sort | tr '\n' ' ')" = "bio2 demo-proj symproj1 symproj2 "
@@ -170,6 +172,11 @@ TOK=tok
 refuses "up refuses an unknown project" 'no config' au up nosuch
 refuses "up refuses the placeholder digest" 'not pinned to a real digest' au up "$NAME"
 sed -i "s/REPLACE_WITH_DIGEST_FROM_digests.md/$H64/" "$CFG/compose.yaml"
+cp "$CFG/compose.yaml" "$T/compose-img.bak"
+sed -i -E "s|^( *image: *).*|\\1ghcr.io/allenlarocque/spades-research@sha256:$H64|" "$CFG/compose.yaml"
+refuses "up refuses a builder pinned to spades-research" 'spades-research is for the research container only' au up "$NAME"
+refuses "config refuses a builder pinned to spades-research" 'spades-research is for the research container only' au config "$NAME"
+cp "$T/compose-img.bak" "$CFG/compose.yaml"
 TOK=""
 refuses "up refuses without OP_SERVICE_ACCOUNT_TOKEN" 'OP_SERVICE_ACCOUNT_TOKEN' au up "$NAME"
 TOK=tok
@@ -611,16 +618,18 @@ TOK=""
 # ---- research profile: the ONE shared research container (spec §2.1, Phase 1b)
 RCFG="$CFGROOT/research"; RD="$H/agent-research"
 refuses "init --profile research refuses another name" "always named 'research'" au init --profile research --name foo
-check "init --profile research (no project dir)" au init --profile research
+rinit="$(au init --profile research 2>&1)" && rrc=0 || rrc=$?
+check "init --profile research (no project dir)" test "$rrc" -eq 0
+check "  ...the Next text names the spades-research row" grep -q "the spades-research row" <<<"$rinit"
 check "  ...config dir 'research', mode 700" test "$(stat -c %a "$RCFG")" = 700
 check "  ...holds compose.yaml + project.conf ONLY (no project.env: no secrets; no allowlist)" \
   test "$(ls -A "$RCFG" | sort | paste -sd' ' -)" = "compose.yaml project.conf"
-check "  ...project.conf: PROFILE=research, IMAGE=gis, RESEARCH_DIR, T3_PORT, T3_CONNECT=0" \
-  bash -c 'grep -qx PROJECT=research "$1" && grep -qx PROFILE=research "$1" && grep -qx IMAGE=gis "$1" && grep -qx "RESEARCH_DIR=$2/agent-research" "$1" && grep -qE "^T3_PORT=[0-9]+$" "$1" && grep -qx T3_CONNECT=0 "$1"' _ "$RCFG/project.conf" "$H"
+check "  ...project.conf: PROFILE=research, IMAGE=research, RESEARCH_DIR, T3_PORT, T3_CONNECT=0" \
+  bash -c 'grep -qx PROJECT=research "$1" && grep -qx PROFILE=research "$1" && grep -qx IMAGE=research "$1" && grep -qx "RESEARCH_DIR=$2/agent-research" "$1" && grep -qE "^T3_PORT=[0-9]+$" "$1" && grep -qx T3_CONNECT=0 "$1"' _ "$RCFG/project.conf" "$H"
 check "  ...and NO project folder, spades.ai or memory settings" bash -c '! grep -Eq "^(PROJECT_DIR|SPADES_AI_DIR|AGENT_MEMORY_DIR)=" "$1"' _ "$RCFG/project.conf"
 check "  ...its T3_PORT is unique" bash -c '[ "$(grep -h "^T3_PORT=" "$1"/*/project.conf | sort | uniq -d)" = "" ]' _ "$CFGROOT"
-check "  ...compose: the research seed (spades-gis, 16g, cwd /research, own volumes)" \
-  bash -c 'grep -q "spades-gis@sha256:REPLACE_WITH_DIGEST_FROM_digests.md" "$1" && grep -qE "^    mem_limit: 16g" "$1" && grep -qE "^    working_dir: /research" "$1" && ! sed "s/#.*//" "$1" | grep -Eq "[^_]PROJECT_DIR|SPADES_AI_DIR|AGENT_MEMORY_DIR|require-cache|npm-cache-shared|allowlist|/workspace"' _ "$RCFG/compose.yaml"
+check "  ...compose: the research seed (spades-research, 16g, cwd /research, own volumes)" \
+  bash -c 'grep -q "spades-research@sha256:REPLACE_WITH_DIGEST_FROM_digests.md" "$1" && grep -qE "^    mem_limit: 16g" "$1" && grep -qE "^    working_dir: /research" "$1" && ! sed "s/#.*//" "$1" | grep -Eq "[^_]PROJECT_DIR|SPADES_AI_DIR|AGENT_MEMORY_DIR|require-cache|npm-cache-shared|allowlist|/workspace"' _ "$RCFG/compose.yaml"
 check "  ...created the research exchange root" test -d "$RD"
 refuses "init --profile research never overwrites" 'already exists' au init --profile research
 refuses "up research refuses the placeholder digest" 'not pinned to a real digest' au up research
@@ -639,6 +648,12 @@ check "  ...passthrough is empty (no secret names)" grep -qx "    environment: \
 check "  ...profile switch says PROFILE=research" test "$(cat "$RCFG/.generated/profile")" = PROFILE=research
 check "  ...research instructions written (readable: mode 644)" \
   bash -c 'cmp -s "$1" "$2" && [ "$(stat -c %a "$1")" = 644 ]' _ "$RCFG/.generated/agent-instructions.md" "$ROOT/project-template/instructions/research.md"
+RI="$ROOT/project-template/instructions"
+check "  ...research.md has a Papers section naming the contact variable, the papers folder and the Sci-Hub ban" \
+  bash -c 'f="$1"; grep -qxF "## Papers" "$f" && grep -qF "\$RESEARCH_CONTACT_EMAIL" "$f" && grep -qF "downloads/papers/" "$f" && grep -qiE "never.*Sci-Hub|no Sci-Hub" "$f"' _ "$RI/research.md"
+check "  ...builder-research.md says papers are for reading only" grep -qF "downloads/papers/" "$RI/builder-research.md"
+check "  ...neither instructions file contains an email address" \
+  bash -c 'for f in "$@"; do ! grep -Eq "[A-Za-z0-9]@[A-Za-z0-9-]+\." "$f" || { echo "address in $f"; exit 1; }; done' _ "$RI/research.md" "$RI/builder-research.md"
 check "  ...switch read-only at /etc/firewall/profile; instructions read-only at Claude's managed CLAUDE.md + Codex's AGENTS.md" \
   bash -c 'f="$1"; for t in /etc/firewall/profile /etc/claude-code/CLAUDE.md /home/agent/.codex/AGENTS.md; do grep -A1 "target: \"$t\"" "$f" | grep -q "read_only: true" || { echo "not ro: $t"; exit 1; }; done' _ "$RCFG/.generated/research.yaml"
 check "  ...no project subfolders yet: only the /research/_general mount" bash -c '! grep "target: \"/research/" "$1" | grep -qv "target: \"/research/_general\""' _ "$RCFG/.generated/research.yaml"
@@ -652,6 +667,14 @@ check "  ...a builder's overlay has no _general" bash -c '! grep -rq _general "$
 mv "$RD/_general" "$T/_general.real"; ln -s "$T/_general.real" "$RD/_general"
 refuses "up research refuses a symlinked _general" '_general is a symlink' au up research
 rm "$RD/_general"; mv "$T/_general.real" "$RD/_general"
+# Review Focus 1: the owner's existing research config (IMAGE=gis, compose pinned to spades-gis) must still work
+cp "$RCFG/compose.yaml" "$T/rcompose-res.bak"; cp "$RCFG/project.conf" "$T/rconf-res.bak"
+sed -i 's|/spades-research@sha256:|/spades-gis@sha256:|' "$RCFG/compose.yaml"
+sed -i 's/^IMAGE=.*/IMAGE=gis/' "$RCFG/project.conf"
+check "up research still accepts a spades-gis compose" au up research
+check "config research still accepts a spades-gis compose" au config research
+cp "$T/rcompose-res.bak" "$RCFG/compose.yaml"; cp "$T/rconf-res.bak" "$RCFG/project.conf"
+check "up research accepts a spades-research compose" au up research
 check "  ...no RStudio Server for the research container (overlay adds nothing, no switch, no password)" \
   bash -c '[ "$(grep -v "^#" "$1/rstudio.yaml")" = "$(printf "services:\n  agent: {}")" ] && [ ! -e "$1/rstudio" ] && [ ! -e "$1/rstudio-password" ]' _ "$RCFG/.generated"
 cp "$RCFG/project.conf" "$T/rconf-rs.bak"
@@ -690,6 +713,41 @@ refuses "config research refuses ANY key in project.env" 'holds no secrets' au c
 msg=$(au up research 2>&1 || true)
 check "  ...without echoing the value" bash -c '! grep -q "op://" <<<"$1"' _ "$msg"
 rm -f "$RCFG/project.env"
+
+# RESEARCH_CONTACT_EMAIL: a setting (not a secret) for the research container only
+cp "$RCFG/project.conf" "$T/rconf-ce.bak"
+check "init seeds a commented RESEARCH_CONTACT_EMAIL line" grep -qx '#RESEARCH_CONTACT_EMAIL=' "$RCFG/project.conf"
+check "  ...with a forwarding-alias comment above it" bash -c 'grep -B1 -x "#RESEARCH_CONTACT_EMAIL=" "$1" | head -n 1 | grep -q "forwarding alias"' _ "$RCFG/project.conf"
+au config research >/dev/null 2>&1 || true
+check "unset: the research overlay has no RESEARCH_CONTACT_EMAIL" bash -c '! grep -q RESEARCH_CONTACT_EMAIL "$1"' _ "$RCFG/.generated/research.yaml"
+echo 'RESEARCH_CONTACT_EMAIL=papers+research@relay.example' >> "$RCFG/project.conf"
+check "config research accepts a plain alias" au config research
+check "  ...the agent service environment carries it" grep -qx '      RESEARCH_CONTACT_EMAIL: "papers+research@relay.example"' "$RCFG/.generated/research.yaml"
+check "  ...under environment:" bash -c 'grep -B3 "RESEARCH_CONTACT_EMAIL" "$1" | grep -qx "    environment:"' _ "$RCFG/.generated/research.yaml"
+cp "$T/rconf-ce.bak" "$RCFG/project.conf"
+for bad in 'a b@x.org' 'a@x.org"' '$HOME@x.org' 'a@b@x.org' 'nobody'; do
+  echo "RESEARCH_CONTACT_EMAIL=$bad" >> "$RCFG/project.conf"
+  refuses "up research refuses RESEARCH_CONTACT_EMAIL='$bad'" 'not a plain email address' au up research
+  refuses "config research refuses RESEARCH_CONTACT_EMAIL='$bad'" 'not a plain email address' au config research
+  msg=$(au up research 2>&1 || true)
+  check "  ...without echoing the value" bash -c '! grep -qF -- "$2" <<<"$1"' _ "$msg" "$bad"
+  cp "$T/rconf-ce.bak" "$RCFG/project.conf"
+done
+echo 'RESEARCH_CONTACT_EMAIL=a b@x.org' >> "$RCFG/project.conf"
+check "stop research works with an invalid RESEARCH_CONTACT_EMAIL" au stop research
+check "  ...and the value is omitted from the overlay" bash -c '! grep -q RESEARCH_CONTACT_EMAIL "$1"' _ "$RCFG/.generated/research.yaml"
+cp "$T/rconf-ce.bak" "$RCFG/project.conf"
+AMBIENT=(RESEARCH_CONTACT_EMAIL=leak@evil.example)
+au config research >/dev/null 2>&1 || true
+check "an ambient RESEARCH_CONTACT_EMAIL never reaches the research overlay" bash -c '! grep -rq "leak@evil.example" "$1"' _ "$RCFG/.generated"
+check "  ...nor the config output" bash -c '! grep -q "leak@evil.example" <<<"$1"' _ "$(au config research 2>&1 || true)"
+AMBIENT=()
+cp "$CFG/project.conf" "$T/pconf-ce.bak"
+echo 'RESEARCH_CONTACT_EMAIL=papers+research@relay.example' >> "$CFG/project.conf"
+refuses "up refuses RESEARCH_CONTACT_EMAIL on a builder" 'for the research container only' au up "$NAME"
+refuses "config refuses RESEARCH_CONTACT_EMAIL on a builder" 'for the research container only' au config "$NAME"
+cp "$T/pconf-ce.bak" "$CFG/project.conf"
+au config research >/dev/null 2>&1 || true
 
 # builder opt-in: RESEARCH=1
 cp "$CFG/project.conf" "$T/pconf-res.bak"
@@ -854,11 +912,18 @@ if docker compose version >/dev/null 2>&1; then
   RCFGR="$CFGROOT/research"
   check "rendered research: project name 'research', cwd /research/_general, mem_limit 16g" \
     jq -e '.name == "research" and .services.agent.working_dir == "/research/_general" and ((.services.agent.mem_limit|tostring) == "17179869184")' <<<"$JS"
-  check "rendered research: image pinned by digest" bash -c 'jq -r .services.agent.image <<<"$1" | grep -Eq "spades-gis@sha256:[0-9a-f]{64}$"' _ "$JS"
+  check "rendered research: image pinned by digest" bash -c 'jq -r .services.agent.image <<<"$1" | grep -Eq "spades-research@sha256:[0-9a-f]{64}$"' _ "$JS"
   check "rendered research: NO project, spades.ai, memory, Require cache or project allowlist mount" \
     jq -e '[.services.agent.volumes[].target | select(. == "/workspace" or . == "/opt/memory" or . == "/opt/reference/spades.ai" or . == "/home/agent/.cache/R/Require" or startswith("/etc/firewall/allowlist.d"))] == []' <<<"$JS"
   check "rendered research: environment holds no secret (exactly the 3 seed variables)" \
     jq -e '(.services.agent.environment | keys) == ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC","CLAUDE_CONFIG_DIR","T3_PROJECT_DIR"] and .services.agent.environment.T3_PROJECT_DIR == "/research/_general"' <<<"$JS"
+  cp "$RCFG/project.conf" "$T/rconf-render.bak"
+  echo 'RESEARCH_CONTACT_EMAIL=papers+research@relay.example' >> "$RCFG/project.conf"
+  JSA="$(cd "$T" && aureal config research --format json)"
+  cp "$T/rconf-render.bak" "$RCFG/project.conf"
+  ( cd "$T" && aureal config research >/dev/null 2>&1 ) || true   # regenerate the overlay without the alias
+  check "rendered research (RESEARCH_CONTACT_EMAIL set): environment holds the 3 seed variables plus the alias, passed through literally" \
+    jq -e '(.services.agent.environment | keys) == ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC","CLAUDE_CONFIG_DIR","RESEARCH_CONTACT_EMAIL","T3_PROJECT_DIR"] and .services.agent.environment.RESEARCH_CONTACT_EMAIL == "papers+research@relay.example"' <<<"$JSA"
   check "rendered research: /research/_general read-write from RESEARCH_DIR/_general" \
     test "$(mr "$JS" /research/_general)" = "[{\"type\":\"bind\",\"source\":\"$RDR/_general\",\"ro\":false}]"
   check "rendered research: profile switch read-only at /etc/firewall/profile (the only /etc/firewall mount)" \

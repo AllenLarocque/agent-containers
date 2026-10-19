@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Usage: render-digests.sh <tag> <base-digest> <gis-digest> <bio-digest>   (prints digests.md to stdout)
+# Usage: render-digests.sh <tag> <base-digest> <gis-digest> <bio-digest> <research-digest>   (prints digests.md to stdout)
 set -euo pipefail
-tag=${1:?tag}; base=${2:?base digest}; gis=${3:?gis digest}; bio=${4:?bio digest}
+tag=${1:?tag}; base=${2:?base digest}; gis=${3:?gis digest}; bio=${4:?bio digest}; research=${5:?research digest}
 cat <<HDR
 # Image digests
 
@@ -15,3 +15,4 @@ bt='`'  # literal backtick (markdown code span)
 printf '| spades-base | %s | %s%s%s |\n' "$tag" "$bt" "$base" "$bt"
 printf '| spades-gis | %s | %s%s%s |\n' "$tag" "$bt" "$gis" "$bt"
 printf '| spades-bio | %s | %s%s%s |\n' "$tag" "$bt" "$bio" "$bt"
+printf '| spades-research | %s | %s%s%s |\n' "$tag" "$bt" "$research" "$bt"

@@ -1,0 +1,1 @@
+# stage 2: filled from the vetting report, owner-approved; apt unpinned, PyPI pinned `name==x.y.z`
