@@ -231,6 +231,11 @@ check "  trap deletes the local verify-ruleset branch" grep -q 'DOCKER: exec -w 
 newstate; plan_ok; sed -i 's/^api user|0|agent-allen/api user|0|allen/' "$STATE/exec-plan"
 refuses "container identity is the owner -> die" 'allen.*agent-allen|agent-allen.*allen' run verify p1
 check "  nothing pushed" sh -c "! grep -q 'git push' '$DLOG'"
+check "  waits for agent-init's git credentials first" grep -q 'DOCKER: exec -w /workspace p1-agent-1 bash -lc git config --global --get credential.https://github.com.helper' "$DLOG"
+newstate; plan_ok; sed -i '1i credential.https://github.com.helper|1|' "$STATE/exec-plan"
+AGENT_NEW_INIT_WAIT=2 refuses "git never gets credentials (agent-init unfinished) -> die after the wait" 'no GitHub credentials' run verify p1
+check "  nothing pushed" sh -c "! grep -q 'git push' '$DLOG'"
+check "  no worktree add attempted" sh -c "! grep -q 'worktree add' '$DLOG'"
 newstate; plan_ok; sed -i '1i branch --show-current|0|verify-ruleset' "$STATE/exec-plan"
 refuses "/workspace left on verify-ruleset -> die, tells owner to switch" 'git switch main' run verify p1
 check "  no worktree add attempted" sh -c "! grep -q 'worktree add' '$DLOG'"
