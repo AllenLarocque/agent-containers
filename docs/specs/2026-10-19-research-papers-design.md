@@ -1,6 +1,6 @@
 # Research papers: the research bot downloads open-access papers and reads them in full (design spec)
 
-**Status:** draft for review · **Date:** 2026-10-19 · **Owner:** Allen Larocque
+**Status:** approved 2026-10-19; stage 1 in progress · **Date:** 2026-10-19 · **Owner:** Allen Larocque
 
 **Context.** The shared research container (spec 2026-10-03 §2.1, "Research profile") can reach the
 whole public internet, but in practice it reads papers through web fetches that return a summary of

@@ -267,13 +267,39 @@ the builder's exact project name:
 
 ```bash
 agent-up init --profile research          # ~/.config/agent-containers/research/ + ~/agent-research/
-# set the spades-gis digest from digests.md in ~/.config/agent-containers/research/compose.yaml
+# set the spades-research digest from digests.md in ~/.config/agent-containers/research/compose.yaml
 # for each builder that should use it: RESEARCH=1 in ~/.config/agent-containers/<project>/project.conf
 agent-up up <project>                     # each opted-in builder: mounts its three folders
 agent-up up research                      # no OP_SERVICE_ACCOUNT_TOKEN needed; mounts every project folder
 agent-up shell research                   # first time: `claude` (log in), `codex login --device-auth`
 agent-up pair research                    # T3 Code for the research container (its project is /research/_general)
 ```
+
+The research container runs the `spades-research` image: `spades-gis` plus the PDF tools for
+reading papers. Only the research container may use it (`IMAGE=research`); builders are refused.
+`agent-up init --profile research` sets this by default.
+
+**Migrating an existing research config.** After the change that adds `spades-research` merges, the
+publish workflow adds a `spades-research` row to `digests.md`. Then:
+1. Set `IMAGE=research` in `~/.config/agent-containers/research/project.conf`.
+2. Put the `spades-research` digest in `~/.config/agent-containers/research/compose.yaml`.
+3. Run `agent-up up research`.
+
+Until you do, a config with `IMAGE=gis` keeps working unchanged.
+
+**Contact alias for paper lookups.** Unpaywall requires an email address on every request. OpenAlex
+and Crossref prefer one, and give faster, more reliable service when they get it. Do not use your
+real address. Create a forwarding alias with Firefox Relay or SimpleLogin, one you can switch off.
+Then uncomment the line in `~/.config/agent-containers/research/project.conf` and set it:
+
+```bash
+RESEARCH_CONTACT_EMAIL=your-alias@example.invalid
+```
+
+`agent-up` checks that it is a plain address and passes it to the research container as the
+environment variable `RESEARCH_CONTACT_EMAIL`. It is not a secret. The research agent sends it only to
+the discovery services that ask for it, never in forms or reports. If it is unset, the agent skips
+Unpaywall and says so in its report. Builders refuse the setting.
 
 **What persists in the research container.** `agent-up up research` recreates the container
 (`--force-recreate`), so only these survive:

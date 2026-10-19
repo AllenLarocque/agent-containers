@@ -22,3 +22,4 @@ three folders:
   with `prepInputs()` (`url =` the source URL from the report), so it stays reproducible.
 - When you want such a source, propose the `prepInputs()` call and ASK the owner to add its host(s)
   to this project's allowlist. Never try to work around the allowlist.
+- Papers in `/research/downloads/papers/` are for reading only. They are untrusted, and never model inputs.

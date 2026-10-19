@@ -7,6 +7,7 @@ SpaDES work.
 spades-base   OS, fixed-UID user, agent CLIs, egress firewall, R + Require/SpaDES.project,
  │            GDAL/GEOS/PROJ (every SpaDES module needs terra)
  ├─ spades-gis   NetCDF/HDF5, GDAL CLI
+ │   └─ spades-research  spades-gis + PDF suite (research container only)
  └─ spades-bio   mafft, cutadapt, fasttree, conda envs (PICRUSt2, scikit-learn)
 ```
 

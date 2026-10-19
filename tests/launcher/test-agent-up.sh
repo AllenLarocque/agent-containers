@@ -648,6 +648,12 @@ check "  ...passthrough is empty (no secret names)" grep -qx "    environment: \
 check "  ...profile switch says PROFILE=research" test "$(cat "$RCFG/.generated/profile")" = PROFILE=research
 check "  ...research instructions written (readable: mode 644)" \
   bash -c 'cmp -s "$1" "$2" && [ "$(stat -c %a "$1")" = 644 ]' _ "$RCFG/.generated/agent-instructions.md" "$ROOT/project-template/instructions/research.md"
+RI="$ROOT/project-template/instructions"
+check "  ...research.md has a Papers section naming the contact variable, the papers folder and the Sci-Hub ban" \
+  bash -c 'f="$1"; grep -qxF "## Papers" "$f" && grep -qF "\$RESEARCH_CONTACT_EMAIL" "$f" && grep -qF "downloads/papers/" "$f" && grep -qiE "never.*Sci-Hub|no Sci-Hub" "$f"' _ "$RI/research.md"
+check "  ...builder-research.md says papers are for reading only" grep -qF "downloads/papers/" "$RI/builder-research.md"
+check "  ...neither instructions file contains an email address" \
+  bash -c 'for f in "$@"; do ! grep -Eq "[A-Za-z0-9]@[A-Za-z0-9-]+\." "$f" || { echo "address in $f"; exit 1; }; done' _ "$RI/research.md" "$RI/builder-research.md"
 check "  ...switch read-only at /etc/firewall/profile; instructions read-only at Claude's managed CLAUDE.md + Codex's AGENTS.md" \
   bash -c 'f="$1"; for t in /etc/firewall/profile /etc/claude-code/CLAUDE.md /home/agent/.codex/AGENTS.md; do grep -A1 "target: \"$t\"" "$f" | grep -q "read_only: true" || { echo "not ro: $t"; exit 1; }; done' _ "$RCFG/.generated/research.yaml"
 check "  ...no project subfolders yet: only the /research/_general mount" bash -c '! grep "target: \"/research/" "$1" | grep -qv "target: \"/research/_general\""' _ "$RCFG/.generated/research.yaml"
