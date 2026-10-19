@@ -15,6 +15,12 @@ permissions).
 
 **Automated:** `agent-new project <folder>` performs steps 1–2, 4, 7 and 8 below and runs the 1Password sequence of step 3 with you (it pauses for `op signin`). Steps 5 (the project's allowlist) and 6 (the `spades.ai` clone) stay yours — the script only reminds you at the end, and `agent-up up` refuses to run without the clone. The research container is started without the token; if it has no config yet the script warns and tells you to run `agent-up init --profile research` then `agent-up up research`. The steps below remain the reference (and the fallback when the script can't).
 
+`agent-new` needs the machine user's GitHub login once, in the shared `~/.config/agent-containers/agent-up.conf` (next to `TAILSCALE_HOST`), or `--machine-user <user>` on each run:
+
+```
+MACHINE_USER=<machine-user-login>
+```
+
 ## Steps
 
 1. **Create the project's config** (outside the project folder):

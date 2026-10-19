@@ -425,6 +425,15 @@ cmd_verify(){
     local c="${VTARGET}-agent-1" wd=/workspace who
     docker ps --format '{{.Names}}' | grep -qx "$c" || die "container $c is not running (agent-up up $VTARGET first)"
     RUN_IN(){ docker exec -w "$wd" "$c" bash -lc "$1"; }
+    # a container just started by `agent-up up` may still be in agent-init, which wires git to gh last:
+    # until then git has no credentials ("could not read Username"). Wait for that, not a fixed sleep.
+    local iw="${AGENT_NEW_INIT_WAIT:-300}" waited=0
+    [[ $iw =~ ^[1-9][0-9]*$ ]] || iw=300
+    until RUN_IN 'git config --global --get credential.https://github.com.helper' >/dev/null 2>&1; do
+      [ "$waited" -lt "$iw" ] || die "git in $c has no GitHub credentials after $iw s: agent-init has not finished or gh setup-git failed (docker logs $c | grep agent-init)"
+      [ "$waited" -gt 0 ] || say "waiting for $c to finish its first-start setup (agent-init)..."
+      sleep 2; waited=$((waited + 2))
+    done
     who="$(RUN_IN 'gh api user --jq .login')" || die "gh in $c is not logged in"
     [ "$who" = "$mu" ] || die "gh in $c is '$who', not the machine user '$mu': refusing to verify as the wrong identity"
     [ "$(RUN_IN 'git branch --show-current')" != verify-ruleset ] \

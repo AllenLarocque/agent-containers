@@ -191,6 +191,8 @@ name (from `tailscale status` or the Tailscale admin console):
 TAILSCALE_HOST=<machine>.<tailnet>.ts.net
 ```
 
+`agent-new` also reads `MACHINE_USER=<machine-user-login>` from this file (docs/runbooks/new-project.md).
+
 **Per project:**
 1. `agent-up up <project>` prints the command, e.g.
    `tailscale serve --bg --https=8442 3773`. Run it once in Windows PowerShell (Tailscale runs on the
