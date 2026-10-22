@@ -5,7 +5,7 @@ Updated by the `publish` workflow via PR — never edit by hand.
 
 | image | tag | digest |
 |---|---|---|
-| spades-base | 2026.10.19-bcdfac4 | `sha256:8b97859a2963432581a0d3053e9fd944472c5eaceaa76d6ceb355c170cee24e9` |
-| spades-gis | 2026.10.19-bcdfac4 | `sha256:be400758fb40e4cd5709c63bd7d4d607249029d9690a02fbeddff1efa1272924` |
-| spades-bio | 2026.10.19-bcdfac4 | `sha256:c3fdafa815bfc9c938b634cdf9e1bf9acb578d8fa5f5af9d2cce42f971d1e478` |
-| spades-research | 2026.10.19-bcdfac4 | `sha256:3a0980a7b8f6d7eaed33118a4517e4c0c4a2a2c492fd32c7c0b0bb9cb676e3d7` |
+| spades-base | 2026.10.22-0b4bbf9 | `sha256:809caa033c81d8ea4fdfac3c40bc50f0e524fe41ff7b8c5d316b64dc6873e087` |
+| spades-gis | 2026.10.22-0b4bbf9 | `sha256:06388549152f3a728b44d618904437f2db6984e0243bfc0e33ff797fcdcdc57f` |
+| spades-bio | 2026.10.22-0b4bbf9 | `sha256:c0847e4e637f3e46ba2274b1c62ad32bb3b0174bc077d497f6bc87e7aed37c1b` |
+| spades-research | 2026.10.22-0b4bbf9 | `sha256:cf75c6dae713e6c21e47d4b4a3d137763ded848259555c389eac4705490552f4` |
