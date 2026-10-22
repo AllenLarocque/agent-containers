@@ -18,7 +18,7 @@
 - **The approved 2a tools, exactly:**
   - apt: `poppler-utils`, `qpdf`, `tesseract-ocr`, `tesseract-ocr-eng`, `tesseract-ocr-osd`, `openjdk-21-jre-headless`;
   - PyPI: `ocrmypdf==17.13.0`;
-  - GROBID: `grobid/grobid:0.9.1-crf@sha256:<digest the owner confirmed>` (see "Before execution").
+  - GROBID: `grobid/grobid:0.9.1-crf@sha256:223957791ac2bbe48609dcc58a689b16b60baeae13a8734ef440ae6bfb38f4cd` (owner-confirmed 2026-10-22 from Docker Hub).
 - **Not installed, ever:** Ghostscript (`gs`), PyMuPDF, `unpaper`, `grobid-client-python`, Docling (that's 2b). The smoke test asserts that `gs` is absent.
 - **Pins:** apt stays unpinned (the weekly rebuild picks up security patches). PyPI is pinned `name==x.y.z`. GROBID is pinned by tag **and** digest.
 - **Runs offline:** nothing is downloaded at runtime. GROBID consolidation (Crossref) is always sent as `0`.
@@ -126,7 +126,7 @@ git commit -m "feat(images): paper tools 2a — poppler, qpdf, tesseract, ocrmyp
 
 **Files:**
 - Modify: `images/research/Dockerfile`:
-  - a global `ARG GROBID_IMAGE=grobid/grobid:0.9.1-crf@sha256:<owner-confirmed>` before the first `FROM`, then `FROM ${GROBID_IMAGE} AS grobid`;
+  - a global `ARG GROBID_IMAGE=grobid/grobid:0.9.1-crf@sha256:223957791ac2bbe48609dcc58a689b16b60baeae13a8734ef440ae6bfb38f4cd` before the first `FROM`, then `FROM ${GROBID_IMAGE} AS grobid`;
   - `COPY --from=grobid /opt/grobid /opt/paper-tools/grobid` **before** the install `RUN`;
   - `RUN /opt/paper-tools/src/install-grobid.sh "$GROBID_IMAGE"`, with `ARG GROBID_IMAGE` re-declared after `FROM`;
   - a comment saying which three lines a builder image would copy (graceful growth).
