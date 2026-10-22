@@ -11,5 +11,6 @@ check(){
 }
 check "inherits gis smoke"  bash /tests/smoke/gis.sh
 check "paper-tools MANIFEST exists and is readable by agent" bash -c 'id -un | grep -qx agent && test -r /opt/paper-tools/MANIFEST'
+check "README readable by agent, names every MANIFEST tool" bash -c 'test -r /opt/paper-tools/README.md && for t in pdftotext qpdf tesseract ocrmypdf grobid; do grep -q "$t" /opt/paper-tools/README.md || { echo "README lacks $t"; exit 1; }; done'
 echo "INFO: paper tools: $(grep -c . /opt/paper-tools/MANIFEST || true) installed"
 [ "$fail" -eq 0 ] && echo "SMOKE research: ALL PASSED" || { echo "SMOKE research: FAILURES"; exit 1; }
