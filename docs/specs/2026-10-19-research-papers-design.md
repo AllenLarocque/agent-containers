@@ -120,6 +120,12 @@ Stage 2b: Docling, as a separate PR. Rejected: Ghostscript, PyMuPDF, `unpaper` a
 `grobid-client-python`. Stage 2a is split from 2b so that the image can be built and smoke-tested
 before the heavy layout models are added.
 
+*Measured in CI (run 39750078412, 2026-10-22):* `spades-research` is 4.97 GB against 3.76 GB for
+`spades-gis`, so stage 2a adds about 1.2 GB (the paper tools alone, without GROBID, were 4.11 GB).
+GROBID's JVM peaked at about 3.8 GB RSS (VmHWM 3988488 kB; one 162 KB paper, fulltext, `-Xmx4g`).
+OCRmyPDF peaked at about 117 MB (120036 KiB; one 200 dpi page). The runner had about 83 GB free
+after the build.
+
 ### 4.3 Instructions: a papers section in `research.md`
 
 Add a **Papers** section to `project-template/instructions/research.md`. It sits next to the data

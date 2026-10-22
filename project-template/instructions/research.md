@@ -55,7 +55,8 @@ Papers are not data. These rules sit next to the data rules and do not weaken th
   installed), and a small metadata file: DOI, title, source URL, version, licence, date fetched,
   and the tools used (if any).
 - Reuse before re-downloading. Re-reading a paper never means fetching it again.
-- PDF tools: use only those installed in the image (listed in `/opt/paper-tools/MANIFEST`). Never
+- PDF tools: use only those installed in the image (listed in `/opt/paper-tools/MANIFEST`; how to use
+  them: `/opt/paper-tools/README.md`). Never
   install PDF tools or models yourself (pip, uv, npm, conda, downloaded binaries): the owner
   approves tools before they enter the image. If none are installed, read the PDF with your
   built-in PDF reader and say so in the report.

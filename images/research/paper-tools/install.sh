@@ -7,7 +7,8 @@
 #                   entries; built on /usr/bin/python3 with uv, which needs no ensurepip)
 # Writes /opt/paper-tools/MANIFEST: "apt: <pkg> <installed version>" / "pip: <spec>" per spec (empty
 # file when there are none), /opt/paper-tools/python.freeze (the full resolved set), and links each
-# python spec's console script of the same name into /usr/local/bin.
+# python spec's console script of the same name into /usr/local/bin. Copies <dir>/README.md (the
+# usage card) to /opt/paper-tools/README.md when it exists.
 # Usage: install.sh <dir>
 set -euo pipefail
 dir=${1:?directory holding apt.txt and python.txt}
@@ -45,6 +46,9 @@ if [ "${#py_pkgs[@]}" -gt 0 ]; then
     if [ -n "$name" ] && [ -x "$out/venv/bin/$name" ]; then ln -sf "$out/venv/bin/$name" "/usr/local/bin/$name"; fi
   done
 fi
+
+# usage card for the agent (optional: other builders may not ship one)
+if [ -f "$dir/README.md" ]; then cp "$dir/README.md" "$out/README.md"; fi
 
 chmod -R a+rX "$out"
 echo "paper tools: ${#apt_pkgs[@]} apt, ${#py_pkgs[@]} python"
