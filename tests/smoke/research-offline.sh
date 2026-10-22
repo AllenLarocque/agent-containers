@@ -98,10 +98,11 @@ loopback_only() {  # every socket listening on 8070/8071 is bound to 127.0.0.1
   done <<< "$l"
   [ "$seen" -eq 1 ] && [ "$bad" -eq 0 ]
 }
-tei_ok() {  # tei_ok <tei> <word>: the header's main title (the first one; reference titles use the same element) contains <word>
-  local t
+tei_ok() {  # tei_ok <tei> <word>: the teiHeader's main title contains <word> (reference titles use the same element)
+  local h t
   [ -s "$1" ] || { echo "no TEI at $1"; return 1; }
-  t=$(grep -m1 -o '<title level="a" type="main"[^>]*>[^<]*' "$1") || { echo "no main title"; return 1; }
+  h=$(sed -n '1,/<\/teiHeader>/p' "$1")
+  t=$(grep -m1 -o '<title level="a" type="main"[^>]*>[^<]*' <<< "$h") || { echo "no main title in the teiHeader"; return 1; }
   echo "title: $t"
   [[ $t == *"$2"* ]]
 }
@@ -114,6 +115,21 @@ grobid_fulltext() {
   h=$(grep -oE '<head[ >]' "$w/a.tei.xml" | wc -l)
   echo "biblStruct: $b, head: $h"
   [ "$b" -ge 10 ] && [ "$h" -ge 3 ]
+}
+grobid_header() {
+  grobid header "$S" "$w/h.tei.xml" || return 1
+  tei_ok "$w/h.tei.xml" Rcpp
+}
+grobid_three_at_once() {  # concurrency is 2, so one run meets HTTP 503 and must retry, not fail
+  local i rc ok=0 pids=()
+  for i in 1 2 3; do grobid fulltext "$S" "$w/c$i.tei.xml" & pids+=("$!"); done
+  for i in 1 2 3; do
+    rc=0; wait "${pids[$((i - 1))]}" || rc=$?
+    echo "run $i: exit $rc"
+    [ "$rc" -eq 0 ] || ok=1
+  done
+  [ "$ok" -eq 0 ] || return 1
+  for i in 1 2 3; do tei_ok "$w/c$i.tei.xml" Rcpp || return 1; done
 }
 grobid_hostile_name() {
   cp "$S" "$w/A paper; v2, final.pdf" || return 1
@@ -165,6 +181,8 @@ check "grobid fulltext"                             grobid_fulltext
 check "grobid on a hostile file name"               grobid_hostile_name
 check "grobid on image-only PDF"                    grobid_image_only
 check "scan -> OCR -> GROBID"                       grobid_after_ocr
+check "grobid header"                               grobid_header
+check "three grobid fulltext runs at once"          grobid_three_at_once
 info_jvm_rss || true
 check "grobid stop"                                 grobid_stop
 [ "$fail" -eq 0 ] && echo "SMOKE research-offline: ALL PASSED" || { echo "SMOKE research-offline: FAILURES"; exit 1; }

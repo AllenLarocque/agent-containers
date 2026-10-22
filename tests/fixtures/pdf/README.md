@@ -1,7 +1,7 @@
 # PDF test fixture
 
 `rcpp-jss-2011.pdf` is the offline input for the `spades-research` smoke test
-(`tests/smoke/research.sh`), which runs with no network.
+(`tests/smoke/research-offline.sh`), which runs with no network.
 
 - **Paper:** Dirk Eddelbuettel and Romain Francois (2011), "Rcpp: Seamless R and C++ Integration",
   *Journal of Statistical Software* 40(8), doi:10.18637/jss.v040.i08.

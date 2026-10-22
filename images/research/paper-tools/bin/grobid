@@ -77,6 +77,13 @@ start_locked() {  # start_locked <state dir> <timeout>; runs holding the lock
     echo "grobid: already starting (pid $pid), waiting" >&2
   else
     rm -f -- "$pidf"           # stale: the process is gone (crash, kill -9) or the pid was reused
+    # Fresh launch (lock held, no JVM of ours): clear what an earlier run left in grobid-home/tmp,
+    # scoped to that directory (find never follows symlinks), and keep one previous log.
+    if [ -n "$home" ] && [ -d "$home/grobid-home/tmp" ]; then
+      find "$home/grobid-home/tmp" -mindepth 1 -delete 2>/dev/null \
+        || echo "grobid: warning: could not clear all of $home/grobid-home/tmp" >&2
+    fi
+    if [ -f "$log" ]; then mv -f -- "$log" "$log.1"; fi
     echo "grobid: starting (log: $log)" >&2
     # The JVM outlives this script: give it only stdin/stdout/stderr (redirected below), so it holds
     # no caller pipe (a caller reading one would never see EOF) and not the lock on fd 9.
@@ -99,7 +106,7 @@ start_locked() {  # start_locked <state dir> <timeout>; runs holding the lock
     fi
     sleep 1
   done
-  echo "grobid: not answering after ${t}s; last 40 log lines ($log):" >&2
+  echo "grobid: not answering after ${t}s (if a JVM is hung, run \`grobid stop\` and retry); last 40 log lines ($log):" >&2
   tail -n 40 -- "$log" >&2 || true
   exit 1
 }
@@ -119,7 +126,7 @@ cmd_stop() {
 }
 
 cmd_convert() {  # cmd_convert <endpoint> <in.pdf> <out.xml>
-  local ep=$1 src=$2 out=$3 abs code rc=0
+  local ep=$1 src=$2 out=$3 abs code rc tries=0 delay=1 deadline rem
   [ -f "$src" ] && [ -r "$src" ] || die "cannot read '$src'"
   if [ -d "$out" ]; then die "'$out' is a directory"; fi
   abs=$(realpath -- "$src") || die "cannot resolve '$src'"
@@ -129,11 +136,25 @@ cmd_convert() {  # cmd_convert <endpoint> <in.pdf> <out.xml>
   # The upload is a symlink named in.pdf, sent by relative path from inside tmpd: curl's
   # `-F input=@file` mis-parses names with ';' or ',' (and quotes), which real paper titles have.
   ln -s -- "$abs" "$tmpd/in.pdf"
-  code=$(cd -- "$tmpd" && lcurl -sS --connect-timeout 5 -m 600 -o body -w '%{http_code}' \
-      -F 'input=@in.pdf;type=application/pdf' \
-      -F consolidateHeader=0 -F consolidateCitations=0 -F consolidateFunders=0 \
-      "$url/api/$ep") || rc=$?
-  [ "$rc" -eq 0 ] || die "request to $url/api/$ep failed (curl exit $rc, HTTP ${code:-none})"
+  # HTTP 503 means every GROBID engine is busy (concurrency 2): retry with backoff 1, 2, 4 ... 30 s,
+  # all tries within the same 600 s budget one request had. Any other status is final.
+  deadline=$((SECONDS + 600))
+  while :; do
+    rem=$((deadline - SECONDS))
+    [ "$rem" -ge 1 ] || die "GROBID busy (503) after $tries tries"
+    rm -f -- "$tmpd/body"
+    rc=0; tries=$((tries + 1))
+    code=$(cd -- "$tmpd" && lcurl -sS --connect-timeout 5 -m "$rem" -o body -w '%{http_code}' \
+        -F 'input=@in.pdf;type=application/pdf' \
+        -F consolidateHeader=0 -F consolidateCitations=0 -F consolidateFunders=0 \
+        "$url/api/$ep") || rc=$?
+    [ "$rc" -eq 0 ] || die "request to $url/api/$ep failed (curl exit $rc, HTTP ${code:-none})"
+    [ "$code" = 503 ] || break
+    [ $((SECONDS + delay)) -lt "$deadline" ] || die "GROBID busy (503) after $tries tries"
+    sleep "$delay"
+    delay=$((delay * 2 > 30 ? 30 : delay * 2))
+  done
+  [ -f "$tmpd/body" ] || : > "$tmpd/body"
 
   if [ "$code" = 200 ]; then
     # atomic: write a temp file next to the output, then rename it over the output

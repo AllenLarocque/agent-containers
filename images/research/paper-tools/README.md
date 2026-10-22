@@ -19,8 +19,8 @@ Installed versions are listed in `/opt/paper-tools/MANIFEST`. Do not install any
 
 ## GROBID details
 - Exit codes: 0 ok, 1 error, 2 no text layer (run `ocrmypdf` first).
-- Memory: it holds about 4 GB while running (the JVM is capped by `-Xmx4g`).
-  Run `grobid stop` after a batch.
+- Memory: one paper measured ~3.8 GB peak. Worst case is roughly 8 GB with two big papers in
+  flight (the JVM plus up to two pdfalto processes at <=2 GB each). Run `grobid stop` after a batch.
 - Offline: consolidation is always off. Env: `GROBID_JAVA_OPTS` (default `-Xmx4g`),
   `GROBID_START_TIMEOUT` (seconds, default 180).
 - Log and pidfile: `${XDG_STATE_HOME:-$HOME/.local/state}/grobid`.
