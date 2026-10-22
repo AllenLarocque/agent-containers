@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+# grobid: run the local GROBID (CRF only) on demand, on 127.0.0.1:8070, and convert PDFs to TEI XML.
+# Offline: consolidation (Crossref) is always sent as 0. Runtime state (pidfile, log) lives in
+# ${XDG_STATE_HOME:-$HOME/.local/state}/grobid, never in the install dir.
+# Nothing GROBID returns is parsed or eval'd; the body is only searched for NO_BLOCKS.
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: grobid <command> [args]
+  start                        start the local service if it is not answering (idempotent)
+  stop                         stop the service started by `grobid start`
+  status                       exit 0 if the service answers, 1 otherwise
+  fulltext <in.pdf> <out.xml>  full text + references as TEI (starts the service if needed)
+  header   <in.pdf> <out.xml>  header (title, authors, abstract) only, as TEI
+Exit codes: 0 ok, 1 error, 2 the PDF has no text layer (run `ocrmypdf --output-type pdf` first).
+Environment: GROBID_JAVA_OPTS (default -Xmx4g), GROBID_START_TIMEOUT (seconds, default 180),
+  GROBID_HOME_DIR (default /opt/paper-tools/grobid).
+EOF
+}
+
+home=${GROBID_HOME_DIR:-/opt/paper-tools/grobid}
+url=http://127.0.0.1:8070
+
+die() { printf 'grobid: %s\n' "$*" >&2; exit 1; }
+
+state_dir() { printf '%s/grobid' "${XDG_STATE_HOME:-${HOME:?HOME is not set}/.local/state}"; }
+
+# localhost only: ignore any proxy settings and the user's ~/.curlrc (-q must come first)
+lcurl() { curl -q --noproxy '*' "$@"; }
+
+alive() { lcurl -sf --connect-timeout 2 -m 5 -o /dev/null "$url/api/isalive"; }
+
+# running <pid>: the process exists and is not a zombie
+running() {
+  local s
+  s=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+  s=${s##*) }
+  [ "${s%% *}" != Z ]
+}
+
+# ours <pid>: running, and its command line is GROBID's (guards against a reused pid)
+ours() {
+  local c
+  running "$1" || return 1
+  c=$(tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null) || return 1
+  [[ $c == *grobid* ]]
+}
+
+# pid recorded in the pidfile, if it is a valid number
+pidfile_pid() {
+  local p
+  [ -f "$1" ] || return 1
+  p=$(head -c 32 -- "$1")
+  [[ $p =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "$p"
+}
+
+cmd_start() {
+  alive && return 0
+  local st t
+  st=$(state_dir)
+  t=${GROBID_START_TIMEOUT:-180}
+  [[ $t =~ ^[0-9]+$ ]] || die "GROBID_START_TIMEOUT must be a whole number of seconds, not '$t'"
+  [ -x "$home/grobid-service/bin/grobid-service" ] || die "no GROBID at $home"
+  mkdir -p -- "$st"
+  exec 9> "$st/lock"          # one starter at a time (the JVM below does not inherit fd 9)
+  flock -w "$((t + 30))" 9 || die "timed out waiting for another 'grobid start'"
+  start_locked "$st" "$t"
+  exec 9>&-                   # release the lock
+}
+
+start_locked() {  # start_locked <state dir> <timeout>; runs holding the lock
+  local st=$1 t=$2 pidf=$1/grobid.pid log=$1/grobid.log pid deadline
+  alive && return 0           # someone else started it while we waited for the lock
+  if pid=$(pidfile_pid "$pidf") && ours "$pid"; then
+    echo "grobid: already starting (pid $pid), waiting" >&2
+  else
+    rm -f -- "$pidf"           # stale: the process is gone (crash, kill -9) or the pid was reused
+    echo "grobid: starting (log: $log)" >&2
+    # The JVM outlives this script: give it only stdin/stdout/stderr (redirected below), so it holds
+    # no caller pipe (a caller reading one would never see EOF) and not the lock on fd 9.
+    ( for f in /proc/self/fd/*; do n=${f##*/}; if [ "$n" -gt 2 ]; then exec {n}>&-; fi; done
+      cd -- "$home" && exec env JAVA_OPTS="${GROBID_JAVA_OPTS:--Xmx4g}" \
+        GROBID_SERVICE_OPTS='--add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED --add-opens java.base/java.io=ALL-UNNAMED' \
+        LD_LIBRARY_PATH=grobid-home/lib/lin-64 \
+        nohup ./grobid-service/bin/grobid-service ) >> "$log" 2>&1 < /dev/null &
+    pid=$!
+    printf '%s\n' "$pid" > "$pidf"
+  fi
+
+  deadline=$((SECONDS + t))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    alive && { echo "grobid: up (pid $pid)" >&2; return 0; }
+    if ! running "$pid"; then
+      echo "grobid: the service exited during startup; last 40 log lines:" >&2
+      tail -n 40 -- "$log" >&2 || true
+      rm -f -- "$pidf"; exit 1
+    fi
+    sleep 1
+  done
+  echo "grobid: not answering after ${t}s; last 40 log lines ($log):" >&2
+  tail -n 40 -- "$log" >&2 || true
+  exit 1
+}
+
+cmd_stop() {
+  local st pidf pid i
+  st=$(state_dir); pidf=$st/grobid.pid
+  if pid=$(pidfile_pid "$pidf") && ours "$pid"; then
+    kill -TERM "$pid" 2>/dev/null || true
+    for ((i = 0; i < 20; i++)); do running "$pid" || break; sleep 1; done
+    if running "$pid"; then kill -KILL "$pid" 2>/dev/null || true; sleep 1; fi
+    running "$pid" && die "pid $pid survived SIGKILL"
+  fi
+  rm -f -- "$pidf"
+  if alive; then die "a GROBID not started by 'grobid start' is still answering on $url"; fi
+  return 0
+}
+
+cmd_convert() {  # cmd_convert <endpoint> <in.pdf> <out.xml>
+  local ep=$1 src=$2 out=$3 abs code rc=0
+  [ -f "$src" ] && [ -r "$src" ] || die "cannot read '$src'"
+  if [ -d "$out" ]; then die "'$out' is a directory"; fi
+  abs=$(realpath -- "$src") || die "cannot resolve '$src'"
+  cmd_start
+
+  tmpd=$(mktemp -d) || die "mktemp failed"
+  # The upload is a symlink named in.pdf, sent by relative path from inside tmpd: curl's
+  # `-F input=@file` mis-parses names with ';' or ',' (and quotes), which real paper titles have.
+  ln -s -- "$abs" "$tmpd/in.pdf"
+  code=$(cd -- "$tmpd" && lcurl -sS --connect-timeout 5 -m 600 -o body -w '%{http_code}' \
+      -F 'input=@in.pdf;type=application/pdf' \
+      -F consolidateHeader=0 -F consolidateCitations=0 -F consolidateFunders=0 \
+      "$url/api/$ep") || rc=$?
+  [ "$rc" -eq 0 ] || die "request to $url/api/$ep failed (curl exit $rc, HTTP ${code:-none})"
+
+  if [ "$code" = 200 ]; then
+    # atomic: write a temp file next to the output, then rename it over the output
+    otmp=$(mktemp -- "$out.XXXXXX") || die "cannot write next to '$out'"
+    cat -- "$tmpd/body" > "$otmp"
+    chmod "$(printf '%o' $((0666 & ~$(umask))))" -- "$otmp"
+    mv -f -- "$otmp" "$out"
+    otmp=
+    return 0
+  fi
+  if grep -q NO_BLOCKS -- "$tmpd/body"; then
+    echo "grobid: no text layer: run \`ocrmypdf --output-type pdf\` first (ocrmypdf --output-type pdf in.pdf ocr.pdf), then grobid on ocr.pdf" >&2
+    exit 2
+  fi
+  echo "grobid: HTTP $code from /api/$ep; first lines of the response:" >&2
+  sed -n '1,5p' -- "$tmpd/body" | LC_ALL=C tr -d '\000-\010\013-\037\177' >&2
+  exit 1
+}
+
+tmpd='' otmp=''
+cleanup() {
+  if [ -n "$otmp" ]; then rm -f -- "$otmp"; fi
+  if [ -n "$tmpd" ]; then rm -rf -- "$tmpd"; fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+[ "$#" -ge 1 ] || { usage >&2; exit 1; }
+case $1 in
+  -h|--help|help) usage; exit 0 ;;
+  start)    [ "$#" -eq 1 ] || die "usage: grobid start"; cmd_start ;;
+  stop)     [ "$#" -eq 1 ] || die "usage: grobid stop"; cmd_stop ;;
+  status)   [ "$#" -eq 1 ] || die "usage: grobid status"; if alive; then echo running; else echo "not running"; exit 1; fi ;;
+  fulltext) [ "$#" -eq 3 ] || die "usage: grobid fulltext <in.pdf> <out.tei.xml>"; cmd_convert processFulltextDocument "$2" "$3" ;;
+  header)   [ "$#" -eq 3 ] || die "usage: grobid header <in.pdf> <out.tei.xml>"; cmd_convert processHeaderDocument "$2" "$3" ;;
+  *)        usage >&2; exit 1 ;;
+esac

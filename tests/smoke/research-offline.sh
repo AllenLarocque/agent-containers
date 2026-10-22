@@ -2,6 +2,7 @@
 # Paper-tool checks. Run by scripts/build-publish.sh with --network none (spec §6.1): nothing may reach out.
 set -euo pipefail
 fail=0
+exec 3>&1   # the real stdout: INFO lines from inside a check (whose output is captured) go here
 # On failure, print the command, its exit code and the last 40 lines of its output (stdout+stderr).
 check(){
   local d="$1"; shift; local out rc=0
@@ -51,8 +52,98 @@ ocr_scanned_page() {
   n=$(pdftotext "$w/scan.pdf" - | tr -d '[:space:]' | wc -c)
   echo "text chars in the image-only PDF: $n"
   [ "$n" -lt 20 ] || return 1
-  ocrmypdf --output-type pdf --sidecar "$w/scan.txt" "$w/scan.pdf" "$w/scan-ocr.pdf" || return 1
+  # Peak RSS of ocrmypdf and its children (tesseract), INFO only: printed to the log via fd 3.
+  local info rc=0
+  info=$(/opt/paper-tools/venv/bin/python -I -c '
+import resource, subprocess, sys
+r = subprocess.run(sys.argv[1:], stdout=sys.stderr)
+print("INFO: ocrmypdf peak RSS: %d KiB" % resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
+sys.exit(r.returncode)' ocrmypdf --output-type pdf --sidecar "$w/scan.txt" "$w/scan.pdf" "$w/scan-ocr.pdf") || rc=$?
+  printf '%s\n' "$info" >&3
+  [ "$rc" -eq 0 ] || return 1
   grep -qi seamless "$w/scan.txt"
+}
+
+# --- GROBID (CRF only) through the `grobid` wrapper, on 127.0.0.1:8070 ---
+Y=/opt/paper-tools/grobid/grobid-home/config/grobid.yaml
+grobid_installed() {
+  grep -Eq '^grobid: grobid/grobid:0\.9\.1-crf@sha256:[0-9a-f]{64} ' "$M" || { echo "MANIFEST:"; cat "$M"; return 1; }
+  grep -Eq '^[[:space:]]+concurrency: 2[[:space:]]*$' "$Y" || { grep -n concurrency "$Y"; return 1; }
+  grep -Eq '^[[:space:]]+memoryLimitMb: 2048[[:space:]]*$' "$Y" || { grep -n memoryLimitMb "$Y"; return 1; }
+  local v; v=$(java -version 2>&1) || return 1
+  echo "$v"; [[ $v == *'version "21'* ]]
+}
+java_count() { local n; n=$(pgrep -cx java) || true; echo "${n:-0}"; }
+start_idempotent() {
+  local n pid i
+  grobid start || return 1
+  grobid start || return 1
+  n=$(java_count); [ "$n" -eq 1 ] || { echo "java processes after two starts: $n"; ps -eo pid,stat,args; return 1; }
+  pid=$(pgrep -x java) || return 1
+  kill -9 "$pid" || return 1   # a crash: the pidfile is now stale
+  for ((i = 0; i < 20; i++)); do [ -e "/proc/$pid" ] || break; sleep 0.5; done
+  grobid start || return 1
+  n=$(java_count); [ "$n" -eq 1 ] || { echo "java processes after crash + start: $n"; ps -eo pid,stat,args; return 1; }
+}
+loopback_only() {  # every socket listening on 8070/8071 is bound to 127.0.0.1
+  local l addr seen=0 bad=0
+  l=$(ss -Hltn) || return 1
+  printf '%s\n' "$l"
+  while read -r _ _ _ addr _; do
+    case $addr in
+      *:8070|*:8071)
+        case $addr in *:8070) seen=1 ;; esac
+        case $addr in 127.0.0.1:*|'[::ffff:127.0.0.1]:'*) ;; *) bad=1 ;; esac ;;
+    esac
+  done <<< "$l"
+  [ "$seen" -eq 1 ] && [ "$bad" -eq 0 ]
+}
+tei_ok() {  # tei_ok <tei>: the main title mentions Rcpp; prints what it found
+  local t
+  [ -s "$1" ] || { echo "no TEI at $1"; return 1; }
+  t=$(grep -o '<title level="a" type="main"[^>]*>[^<]*' "$1") || { echo "no main title"; return 1; }
+  echo "title: $t"
+  [[ $t == *Rcpp* ]]
+}
+grobid_fulltext() {
+  local b h
+  grobid fulltext "$S" "$w/a.tei.xml" || return 1
+  tei_ok "$w/a.tei.xml" || return 1
+  b=$(grep -o '<biblStruct' "$w/a.tei.xml" | wc -l)
+  h=$(grep -oE '<head[ >]' "$w/a.tei.xml" | wc -l)
+  echo "biblStruct: $b, head: $h"
+  [ "$b" -ge 10 ] && [ "$h" -ge 3 ]
+}
+grobid_hostile_name() {
+  cp "$S" "$w/A paper; v2, final.pdf" || return 1
+  grobid fulltext "$w/A paper; v2, final.pdf" "$w/A paper; v2, final.tei.xml" || return 1
+  tei_ok "$w/A paper; v2, final.tei.xml"
+}
+grobid_image_only() {  # exit 2 with the ocrmypdf hint on stderr, and no output file (nor temp file) left
+  local rc=0 err left
+  err=$(grobid fulltext "$w/scan.pdf" "$w/s.tei.xml" 2>&1 >/dev/null) || rc=$?
+  echo "exit $rc; stderr: $err"
+  [ "$rc" -eq 2 ] || return 1
+  [[ $err == *ocrmypdf* ]] || return 1
+  [ ! -e "$w/s.tei.xml" ] || { echo "s.tei.xml was created"; return 1; }
+  left=$(compgen -G "$w/s.tei.xml.*") && { echo "temp file left: $left"; return 1; }
+  return 0
+}
+grobid_after_ocr() {
+  grobid fulltext "$w/scan-ocr.pdf" "$w/so.tei.xml" || return 1
+  tei_ok "$w/so.tei.xml"
+}
+info_jvm_rss() {  # INFO only, no threshold
+  local pid hwm
+  pid=$(pgrep -x java) || { echo "INFO: grobid JVM peak RSS: (no JVM running)"; return 0; }
+  hwm=$(awk '/^VmHWM:/{print $2, $3}' "/proc/$pid/status")
+  echo "INFO: grobid JVM peak RSS: $hwm"
+}
+grobid_stop() {
+  local rc=0
+  grobid stop || return 1
+  grobid status || rc=$?
+  [ "$rc" -eq 1 ] || { echo "grobid status after stop: exit $rc"; return 1; }
 }
 
 check "MANIFEST lists exactly the specs"            manifest_exact
@@ -65,4 +156,13 @@ check "pdfimages -list"                             pdfimages -list "$S"
 check "qpdf --check"                                qpdf --check "$S"
 check "qpdf rebuilds a copy with its xref tail cut off"         qpdf_repairs
 check "OCR of a scanned page"                       ocr_scanned_page
+check "grobid installed"                            grobid_installed
+check "grobid start is idempotent (also after a crash)"  start_idempotent
+check "grobid listens on 127.0.0.1 only"            loopback_only
+check "grobid fulltext"                             grobid_fulltext
+check "grobid on a hostile file name"               grobid_hostile_name
+check "grobid on image-only PDF"                    grobid_image_only
+check "scan -> OCR -> GROBID"                       grobid_after_ocr
+info_jvm_rss || true
+check "grobid stop"                                 grobid_stop
 [ "$fail" -eq 0 ] && echo "SMOKE research-offline: ALL PASSED" || { echo "SMOKE research-offline: FAILURES"; exit 1; }
