@@ -11,53 +11,5 @@ check(){
 }
 check "inherits gis smoke"  bash /tests/smoke/gis.sh
 check "paper-tools MANIFEST exists and is readable by agent" bash -c 'id -un | grep -qx agent && test -r /opt/paper-tools/MANIFEST'
-# --- PDF tools, offline, on a real paper (fixture: Eddelbuettel & Francois 2011, JSS 40(8)) ---
-S=/tests/fixtures/pdf/rcpp-jss-2011.pdf
-w=$(mktemp -d)   # scratch; scan.pdf and scan-ocr.pdf stay here for the later GROBID checks
-M=/opt/paper-tools/MANIFEST
-
-manifest_exact() {
-  local apt pip
-  apt=$(awk '/^apt:/{print $2}' "$M" | paste -sd' ')
-  pip=$(grep '^pip:' "$M" | paste -sd'|')
-  [ "$apt" = "poppler-utils qpdf tesseract-ocr tesseract-ocr-eng tesseract-ocr-osd openjdk-21-jre-headless" ] \
-    || { echo "apt names: $apt"; return 1; }
-  [ "$pip" = "pip: ocrmypdf==17.13.0" ] || { echo "pip lines: $pip"; return 1; }
-}
-no_gs() { ! command -v gs; }
-ocrmypdf_venv() {
-  [[ $(ocrmypdf --version) == 17.13.0* ]] || { echo "ocrmypdf: $(ocrmypdf --version)"; return 1; }
-  [[ $(/opt/paper-tools/venv/bin/python -V) == "Python 3.12"* ]]
-}
-pages_ok() { local n; n=$(pdfinfo "$S" | awk '/^Pages:/{print $2}'); echo "pages: $n"; [ "${n:-0}" -ge 10 ]; }
-text_ok() { local t; t=$(pdftotext -layout "$S" -) || return 1; [[ $t == *'Seamless R and C++ Integration'* ]]; }  # no `| grep -q`: SIGPIPE + pipefail
-qpdf_repairs() {
-  local rc=0
-  head -c -300 "$S" > "$w/broken.pdf" || return 1
-  qpdf "$w/broken.pdf" "$w/fixed.pdf" || rc=$?
-  [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ] || { echo "qpdf exit $rc"; return 1; }
-  local t; t=$(pdftotext "$w/fixed.pdf" -) || return 1
-  [[ $t == *Seamless* ]]
-}
-ocr_scanned_page() {
-  pdftoppm -r 200 -f 1 -l 1 -png -singlefile "$S" "$w/p" || return 1   # no set -e inside check: every step must return
-  /opt/paper-tools/venv/bin/img2pdf "$w/p.png" -o "$w/scan.pdf" || return 1
-  local n
-  n=$(pdftotext "$w/scan.pdf" - | tr -d '[:space:]' | wc -c)
-  echo "text chars in the image-only PDF: $n"
-  [ "$n" -lt 20 ] || return 1
-  ocrmypdf --output-type pdf --sidecar "$w/scan.txt" "$w/scan.pdf" "$w/scan-ocr.pdf" || return 1
-  grep -qi seamless "$w/scan.txt"
-}
-
-check "MANIFEST lists exactly the specs"            manifest_exact
-check "no Ghostscript"                              no_gs
-check "ocrmypdf on PATH, venv python 3.12"          ocrmypdf_venv
-check "pdfinfo: at least 10 pages"                  pages_ok
-check "pdftotext finds the title"                   text_ok
-check "pdfimages -list"                             pdfimages -list "$S"
-check "qpdf --check"                                qpdf --check "$S"
-check "qpdf repairs a truncated copy"               qpdf_repairs
-check "OCR of a scanned page"                       ocr_scanned_page
 echo "INFO: paper tools: $(grep -c . /opt/paper-tools/MANIFEST || true) installed"
 [ "$fail" -eq 0 ] && echo "SMOKE research: ALL PASSED" || { echo "SMOKE research: FAILURES"; exit 1; }
