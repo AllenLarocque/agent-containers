@@ -98,18 +98,19 @@ loopback_only() {  # every socket listening on 8070/8071 is bound to 127.0.0.1
   done <<< "$l"
   [ "$seen" -eq 1 ] && [ "$bad" -eq 0 ]
 }
-tei_ok() {  # tei_ok <tei>: the main title mentions Rcpp; prints what it found
+tei_ok() {  # tei_ok <tei> <word>: the header's main title (the first one; reference titles use the same element) contains <word>
   local t
   [ -s "$1" ] || { echo "no TEI at $1"; return 1; }
-  t=$(grep -o '<title level="a" type="main"[^>]*>[^<]*' "$1") || { echo "no main title"; return 1; }
+  t=$(grep -m1 -o '<title level="a" type="main"[^>]*>[^<]*' "$1") || { echo "no main title"; return 1; }
   echo "title: $t"
-  [[ $t == *Rcpp* ]]
+  [[ $t == *"$2"* ]]
 }
 grobid_fulltext() {
   local b h
   grobid fulltext "$S" "$w/a.tei.xml" || return 1
-  tei_ok "$w/a.tei.xml" || return 1
-  b=$(grep -o '<biblStruct' "$w/a.tei.xml" | wc -l)
+  tei_ok "$w/a.tei.xml" Rcpp || return 1
+  local refs; refs=$(sed -n '/<listBibl/,$p' "$w/a.tei.xml")   # references only, not the header's sourceDesc biblStruct
+  b=$(grep -o '<biblStruct' <<< "$refs" | wc -l)
   h=$(grep -oE '<head[ >]' "$w/a.tei.xml" | wc -l)
   echo "biblStruct: $b, head: $h"
   [ "$b" -ge 10 ] && [ "$h" -ge 3 ]
@@ -117,7 +118,7 @@ grobid_fulltext() {
 grobid_hostile_name() {
   cp "$S" "$w/A paper; v2, final.pdf" || return 1
   grobid fulltext "$w/A paper; v2, final.pdf" "$w/A paper; v2, final.tei.xml" || return 1
-  tei_ok "$w/A paper; v2, final.tei.xml"
+  tei_ok "$w/A paper; v2, final.tei.xml" Rcpp
 }
 grobid_image_only() {  # exit 2 with the ocrmypdf hint on stderr, and no output file (nor temp file) left
   local rc=0 err left
@@ -131,7 +132,8 @@ grobid_image_only() {  # exit 2 with the ocrmypdf hint on stderr, and no output 
 }
 grobid_after_ocr() {
   grobid fulltext "$w/scan-ocr.pdf" "$w/so.tei.xml" || return 1
-  tei_ok "$w/so.tei.xml"
+  # This tests the pipeline, not Tesseract's accuracy: at 200 dpi it reads "Rcpp" as "Rcepp", so check the plain words.
+  tei_ok "$w/so.tei.xml" Seamless && tei_ok "$w/so.tei.xml" Integration
 }
 info_jvm_rss() {  # INFO only, no threshold
   local pid hwm
