@@ -1,6 +1,6 @@
 # Research papers: the research bot downloads open-access papers and reads them in full (design spec)
 
-**Status:** approved 2026-10-19; stage 1 in progress · **Date:** 2026-10-19 · **Owner:** Allen Larocque
+**Status:** approved 2026-10-19; stage 1 done 2026-10-19; stage 2a in progress · **Date:** 2026-10-19 · **Owner:** Allen Larocque
 
 **Context.** The shared research container (spec 2026-10-03 §2.1, "Research profile") can reach the
 whole public internet, but in practice it reads papers through web fetches that return a summary of
@@ -112,6 +112,13 @@ sign-in; no telemetry, or telemetry that is off by default and fully disabled in
 offline once built (models baked in at build time, nothing downloaded at runtime); reasonable image
 size; maintained. Python tools go in their own pinned virtual environment and are run as CLIs, not
 installed into the system Python.
+
+**Approved tools (owner, 2026-10-21).** Stage 2a: `poppler-utils`, `qpdf`, `tesseract-ocr` with
+`tesseract-ocr-eng` and `tesseract-ocr-osd`, `ocrmypdf` (PyPI, pinned, in its own uv venv),
+`openjdk-21-jre-headless`, and GROBID (pinned by tag and digest, run locally, consolidation off).
+Stage 2b: Docling, as a separate PR. Rejected: Ghostscript, PyMuPDF, `unpaper` and
+`grobid-client-python`. Stage 2a is split from 2b so that the image can be built and smoke-tested
+before the heavy layout models are added.
 
 ### 4.3 Instructions: a papers section in `research.md`
 

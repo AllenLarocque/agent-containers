@@ -51,7 +51,9 @@ research_digest=$(digest_of "$registry/spades-research:$tag")
 # Smoke-test exactly what was pushed, pulled by digest (also proves pull-by-digest resolves).
 for img in base gis bio research; do
   case $img in base) d=$base_digest;; gis) d=$gis_digest;; bio) d=$bio_digest;; research) d=$research_digest;; esac
-  docker run --rm -v "$here/tests:/tests:ro" "$registry/spades-$img@$d" bash "/tests/smoke/$img.sh"
+  # research runs offline (spec §6.1): nothing may reach out at runtime (tesseract data, GROBID, uv).
+  net=(); [ "$img" = research ] && net=(--network none)
+  docker run --rm "${net[@]}" -v "$here/tests:/tests:ro" "$registry/spades-$img@$d" bash "/tests/smoke/$img.sh"
 done
 
 # Promote latest only after all built and smoke-passed.

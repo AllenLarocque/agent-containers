@@ -1,1 +1,7 @@
-# stage 2: filled from the vetting report, owner-approved; apt unpinned, PyPI pinned `name==x.y.z`
+# stage 2a (owner-approved 2026-10-21); apt unpinned (the weekly rebuild takes security patches), PyPI pinned `name==x.y.z`
+poppler-utils            # pdftotext, pdfinfo, pdfimages, pdftoppm
+qpdf                     # check and repair damaged PDFs
+tesseract-ocr            # OCR engine
+tesseract-ocr-eng        # English model, so nothing is fetched at runtime
+tesseract-ocr-osd        # orientation and script detection
+openjdk-21-jre-headless  # runtime for GROBID
