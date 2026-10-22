@@ -166,7 +166,7 @@ git commit -m "feat(images): paper tools 2a — poppler, qpdf, tesseract, ocrmyp
     - MANIFEST has a line matching `^grobid: grobid/grobid:0\.9\.1-crf@sha256:[0-9a-f]{64} `;
     - `grobid.yaml` has `concurrency: 2` and `memoryLimitMb: 2048`;
     - `java -version` reports 21.
-  - `start is idempotent`: `grobid start` twice, both exit 0; `pgrep -fc grobid-service` = 1. Then kill -9 the JVM, run `grobid start` again: exit 0, one JVM.
+  - `start is idempotent`: `grobid start` twice, both exit 0; `pgrep -cx java` = 1 (not `pgrep -f`: the check's own `bash -c` command line would match). Then kill -9 the JVM, run `grobid start` again: exit 0, `pgrep -cx java` = 1.
   - `grobid fulltext`:
     - `grobid fulltext "$S" "$w/a.tei.xml"` exits 0;
     - the main title (`<title level="a" type="main">`) contains `Rcpp`;
@@ -208,7 +208,7 @@ git commit -m "feat(images): GROBID 0.9.1 CRF in spades-research (digest-pinned 
   - memory: GROBID holds ~4–5 GB while running; `grobid stop` when done with a batch;
   - one line: no tables tool yet (Docling arrives in 2b; use the built-in PDF reader for tables).
 - Modify: `project-template/instructions/research.md`, the "PDF tools" bullet: point to `/opt/paper-tools/README.md` for how to use them. Keep the existing "never install tools yourself" rule unchanged.
-- Modify: `tests/smoke/research.sh`: `README readable by agent, names every MANIFEST tool`. For each `apt:` tool binary family (`pdftotext`, `qpdf`, `tesseract`, `ocrmypdf`, `grobid`), the README mentions it.
+- Modify: `tests/smoke/research.sh`: `README readable by agent, names every MANIFEST tool`. The README mentions each of `pdftotext`, `qpdf`, `tesseract`, `ocrmypdf` and `grobid`.
 - Modify: `docs/specs/2026-10-19-research-papers-design.md`: under the 2a paragraph, add the measured image size and peak-memory figures from CI (Tasks 1–2).
 
 **Interfaces:**
