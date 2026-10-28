@@ -36,15 +36,16 @@ GH_IP=$(a_of api.github.com | head -n 1)
 if [ -n "$GH_IP" ]; then rejected_here "$GH_IP" 7844 "allowlisted api.github.com ($GH_IP) on TCP 7844"
 else bad "api.github.com does not resolve"; fi
 
-# cloudflared, pinned to what T3 v0.1.0 itself downloads (packages/shared/src/relayClient.ts).
+# cloudflared, pinned to what T3 v0.1.3 itself downloads (packages/shared/src/relayClient.ts). 2026.10.4:
+# <= 2026.10.1 trust the compromised eMudhra intermediates (Cloudflare blog, 2026-10-20; GO-2026-6809).
 # A token for a tunnel that does not exist: reaching the edge = an error FROM THE SERVER SIDE. Over
 # QUIC the edge drops the registration as a control-stream failure, which only happens on an
 # ESTABLISHED QUIC connection (a blocked dial logs "failed to dial to edge with quic" instead).
-CF_URL=https://github.com/cloudflare/cloudflared/releases/download/2026.10.0/cloudflared-linux-amd64
-CF_SHA=d33ff2d14475178d2012c2c56beba87389ac5ded27649519f198a7d3134a99db
+CF_URL=https://github.com/cloudflare/cloudflared/releases/download/2026.10.4/cloudflared-linux-amd64
+CF_SHA=ae5e8add7884b0531d66bbca4570d1de491ff6da51e4ebe7eb160cdf241d9e42
 CF=$(mktemp -d)/cloudflared
 if curl -q -fsSL --max-time 120 -o "$CF" "$CF_URL" && echo "$CF_SHA  $CF" | sha256sum -c - >/dev/null 2>&1; then
-  chmod +x "$CF"; ok "cloudflared 2026.10.0 downloaded (github release, sha256 verified)"
+  chmod +x "$CF"; ok "cloudflared 2026.10.4 downloaded (github release, sha256 verified)"
 else
   bad "could not download/verify cloudflared"; CF=
 fi

@@ -520,10 +520,11 @@ processes, git and files, and clients only display and steer over authenticated 
 - Git worktrees for parallel threads are created inside the container's checkout.
 
 **T3 Connect, per-project opt-in (decided 2026-10-09, owner-approved).** T3 Connect = T3's relay
-(Clerk identity, `t3.codes`) + a Cloudflare Tunnel: the T3 server downloads `cloudflared` 2026.5.2
-from GitHub releases (sha256-pinned in T3) and runs `cloudflared tunnel --no-autoupdate run` with
-`TUNNEL_TOKEN`; cloudflared dials OUT to the edge found via SRV
-`_v2-origintunneld._tcp.argotunnel.com` on port 7844 (QUIC/UDP, HTTP2/TCP fallback).
+(Clerk identity, `t3.codes`) + a Cloudflare Tunnel: the T3 server downloads `cloudflared` (the
+version T3 pins: 2026.10.4 as of T3 0.1.3; 2026.10.0 in 0.1.0–0.1.2 trusts the compromised eMudhra
+intermediates) from GitHub releases (sha256-pinned in T3) and runs
+`cloudflared tunnel --no-autoupdate run` with `TUNNEL_TOKEN`; cloudflared dials OUT to the edge
+found via SRV `_v2-origintunneld._tcp.argotunnel.com` on port 7844 (QUIC/UDP, HTTP2/TCP fallback).
 - `T3_CONNECT=0|1|publish` in `project.conf` (amended 2026-10-11: `publish` mounts the switch like 1 but opens `t3.codes` only, no port 7844) (owner host config; `init` writes 0; absent = 0). `agent-up up`
   and `config` refuse any other value; `stop`/`down`/`status` never check it. `T3_CONNECT` and
   `TUNNEL_*` are reserved in `project.env` (cloudflared reads `TUNNEL_*` as flags).

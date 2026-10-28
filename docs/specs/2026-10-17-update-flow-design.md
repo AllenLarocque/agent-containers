@@ -79,6 +79,10 @@ versions:
   serious ones relevant to our setup matter (they make the delta big); routine ones ride along.
   How the agent learns them is the builder's call; if it needs a host not on the allowlist, ask the
   owner first.
+- cloudflared (amended 2026-10-27): not pinned by us, but by T3 (`CLOUDFLARED_VERSION`), which
+  downloads it for T3 Connect. The agent reports the version T3 pins and any security fix in newer
+  cloudflared releases; a serious one that the new T3 fixes is big. Trigger: the 2026-10-20
+  eMudhra CA compromise, where T3 0.1.0–0.1.2 kept an affected cloudflared and no advisory existed.
 - Eligible = published at least **2 days** ago (the same cooldown Dependabot uses today).
 
 **Stateless bundling.** Every run judges the *whole* delta from the pinned versions to the newest
