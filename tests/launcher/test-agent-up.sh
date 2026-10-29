@@ -1144,7 +1144,10 @@ OVR
     check "  ...codex accepts that config (login status: not logged in, no config error)" \
       bash -c 'out=$(docker exec -u agent "$1" codex login status 2>&1); echo "$out"; grep -q "Not logged in" <<<"$out"' _ "$CID"
     # T3 Code: reachable from the host through the published loopback port, and ONLY from the gateway.
-    check "T3 server started by the entrypoint" bash -c 'docker logs "$1" 2>&1 | grep -q "\[agent-t3\] server up"' _ "$CID"
+    # The port can answer before agent-t3 logs: its own probe (2 s per try, ~90 s in all) may still be
+    # retrying. Wait for its final line ("server up" or WARN), then require "server up".
+    check "T3 server started by the entrypoint" \
+      bash -c 'for _ in $(seq 1 60); do docker logs "$1" 2>&1 | grep -qE "\[agent-t3\] (server up|WARN)" && break; sleep 2; done; docker logs "$1" 2>&1 | grep -q "\[agent-t3\] server up"' _ "$CID"
     check "  ...reachable from the host at 127.0.0.1:<T3_PORT>" curl -fsS -o /dev/null --max-time 5 "http://127.0.0.1:$T3P/"
     check "  ...also under the per-project origin <project>.localhost" \
       curl -fsS -o /dev/null --max-time 5 -H "Host: $NAME.localhost:$T3P" "http://127.0.0.1:$T3P/"

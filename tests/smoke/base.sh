@@ -77,7 +77,8 @@ check "no ssh client in base (git uses HTTPS via gh)" bash -c '! command -v ssh'
 
 check "PE/AI on disk at pinned commit" bash -c 'git -C /opt/reference/pe-ai rev-parse HEAD | grep -q "^e7ae689751316dfe742f31b32d0d659accd0cc41$"'
 check "agent-init present"             test -x /usr/local/bin/agent-init.sh
-check "t3 0.1.0 (pinned)"              bash -c 't3 --version 2>/dev/null | grep -qE "(^|[^0-9.])0\.1\.0([^0-9.]|$)"'
+# The pin is ARG T3_VERSION, which only names the install dir; the update agent bumps it, not this file.
+check "t3 matches its pinned install dir" bash -c 'want=$(readlink /usr/local/bin/t3 | sed -nE "s#^/opt/t3/t3-([0-9][0-9.]*)-linux-x64/t3\$#\1#p"); [ -n "$want" ] && t3 --version 2>/dev/null | grep -qE "(^|[^0-9.])${want//./\\.}([^0-9.]|$)"'
 check "T3CODE_TELEMETRY_ENABLED=false set (t3 docs/user/telemetry.md; its PostHog host is not allowlisted either)" test "${T3CODE_TELEMETRY_ENABLED:-}" = false
 check "entrypoint + agent-t3 present"  test -x /usr/local/bin/agent-entrypoint -a -x /usr/local/bin/agent-t3
 # RStudio Server (spec §13.3): installed, pinned, configured; started only where the owner enabled it.
