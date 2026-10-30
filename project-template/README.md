@@ -601,9 +601,41 @@ versions). First time in a project: `claude` (log in with your subscription) and
 `codex login --device-auth` (ChatGPT plan: open the printed link on the host, enter the code).
 Both logins live in the project's volumes.
 
+**Debugging:** `gdb` is included (see "Debugging a crash (gdb)" below).
+
 Secrets: each `KEY=op://...` line in `project.env` becomes an environment variable in the
 container. `op run` resolves the values on the host when you run `agent-up up`; they are never
 written to disk.
+
+## Debugging a crash (gdb)
+
+`gdb` is in the image. Start the crashing program under it:
+
+```
+R -d gdb
+gdb --args Rscript script.R
+```
+
+At the `(gdb)` prompt type `run`; after the crash, `bt` prints the backtrace. For a non-interactive
+backtrace (what an agent should use):
+
+```
+gdb -batch -ex run -ex bt --args Rscript script.R
+```
+
+gdb can only debug processes it starts itself. It cannot attach to a running process (the T3 server,
+Claude, RStudio's `rsession`): the kernel's `ptrace_scope=1` forbids it, by design.
+
+Debug symbols (debuginfod) are off by default, because `debuginfod.ubuntu.com` is not on the base
+allowlist. To opt in for one project: add `debuginfod.ubuntu.com` to
+`~/.config/agent-containers/<project>/allowlist`, restart the project (`agent-up up <project>`), then:
+
+```
+DEBUGINFOD_URLS=https://debuginfod.ubuntu.com gdb -iex 'set debuginfod enabled on' --args Rscript script.R
+```
+
+It only helps for Ubuntu-built libraries (GDAL, GEOS, PROJ, libc), not for R itself (compiled by
+rocker), P3M binary R packages, or conda tools.
 
 ## Settings worth knowing
 
