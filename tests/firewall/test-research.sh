@@ -18,7 +18,8 @@ AGENT=(setpriv --reuid=1000 --regid=1000 --clear-groups --reset-env)
 as_agent(){ "${AGENT[@]}" "$@"; }
 # Reachable = any HTTP answer (code != 000): the firewall let DNS+TCP+TLS through. An HTTP error (rate limit,
 # a 5xx) is the site's answer, not a block; `curl -f` counted it as blocked and CI failed at random. One retry.
-reach(){ local c i; for i in 1 2; do c=$(as_agent curl -q -s -o /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 30 "$1" 2>/dev/null); [ "${c:-000}" != 000 ] && return 0; [ "$i" = 1 ] && sleep 3; done; REACH_CODE=${c:-000}; return 1; }
+# On failure REACH_CODE = "<http code> <ip tried> exit <curl exit>" (6 DNS, 7 refused, 28 timeout, 35/60 TLS).
+reach(){ local c rc i; for i in 1 2; do c=$(as_agent curl -q -s -o /dev/null -w '%{http_code} %{remote_ip}' --connect-timeout 10 --max-time 30 "$1" 2>/dev/null); rc=$?; [ -n "$c" ] && [ "${c%% *}" != 000 ] && return 0; [ "$i" = 1 ] && sleep 3; done; REACH_CODE="${c:-000} exit $rc"; return 1; }
 A_RE='^[0-9]+(\.[0-9]+){3}$'
 tcp_err(){ { timeout "$1" bash -c "</dev/tcp/$2/$3" >/dev/null; } 2>&1; }
 rejected_here(){ # $1 ip, $2 port, $3 label: a locally REJECTed SYN fails at once with "No route to host"
