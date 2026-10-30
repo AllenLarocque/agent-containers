@@ -223,7 +223,7 @@ if [ -e "$FTP_HOSTS_FILE" ]; then
   # The helper must exist BEFORE we change anything: without it the control connection would work
   # but every data connection would be rejected (nothing would expect it).
   if [ ! -d "$FTP_HELPER_SYS" ]; then
-    echo "ERROR: FTP hosts are set but the kernel has no FTP conntrack helper ($FTP_HELPER_SYS missing). A container cannot load it: load it on the HOST: sudo modprobe nf_conntrack_ftp (WSL2 kernels have it built in)"; exit 1
+    echo "ERROR: FTP hosts are set but the kernel has no FTP conntrack helper ($FTP_HELPER_SYS missing). A container cannot load it: load it on the HOST: sudo modprobe nf_conntrack_ftp (to load it at every boot, see the README: FTP uploads)"; exit 1
   fi
   mapfile -t FTP_DOMAINS < <(printf '%s\n' "${RAW_FTP[@]}" | tr 'A-Z' 'a-z' | sort -u)
   # argotunnel.com has its own set and dnsmasq takes one ipset= line per name: keep the two apart.

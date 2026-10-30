@@ -30,7 +30,8 @@ Host: Linux or WSL2 (GNU coreutils).
 | `bin/agent-up status \| stop \| down <project>` | `stop` keeps it stopped, even after a reboot; `down` removes the container; named volumes are kept |
 
 `<project>` is the project folder name, lowercased to `[a-z0-9_-]` (or `--name` at init). The
-container is `<project>-agent-1`.
+container is `<project>-agent-1`. Capitals are not allowed (Docker Compose rejects them); to change a
+name later, see [Renaming a project](#renaming-a-project).
 
 **After a reboot**, containers come back by themselves when Docker starts (`restart:
 unless-stopped`): the same container, image, settings and secrets as at the last `agent-up up`, and
@@ -38,6 +39,10 @@ the firewall is set up again. A container you stopped with `agent-up stop` (or D
 Stop) stays stopped; start it again with `agent-up up <project>`, or Docker Desktop's Start. Turn
 on Docker Desktop's "Start Docker Desktop when you sign in" so this happens without you. Containers
 created before this setting existed get it at their next `agent-up up` or `agent-up update`.
+After an `agent-up update` that said "updated, not started", start the project with
+`agent-up up <project>` only: Docker Desktop's Start (`docker start`) brings back the OLD container
+on the old image. Projects with `FTP_HOSTS` also need the FTP helper loaded after each reboot (see
+[FTP uploads](#ftp-uploads-sequence-archives)).
 
 ## T3 Code
 
@@ -242,12 +247,17 @@ relay, not Tailscale).
 3. Optional: `bin/agent-up busy --all` shows running R work and agents mid-task (exit 1 = busy).
 4. `bin/agent-up update --all` (or `update <project>...`). It moves each project to the new digest,
    leaves stopped projects stopped, and asks `[s]kip / [r]estart anyway / [q]uit` for busy ones
-   (default skip). It prints a summary table.
+   (default skip). It prints a summary table. A stopped project shows "updated, not started": start
+   it later with `bin/agent-up up <project>`, never with `docker start` or Docker Desktop's Start
+   (they bring back the old container on the old image). `update` checks the container too, so a
+   container left on an older image is never reported "current": it is restarted if running, or
+   reported "on the old image, not started" if stopped.
 5. If it lists pairing codes (T3 protocol changed), re-add each environment in the T3 app with
    its code. "Can't tell" means an old container without the marker: re-pair if the app complains.
    A code is valid 10 minutes; for a fresh one at any time, run `bin/agent-up pair <project>`.
 6. Now update the T3 apps. If the last line is a WARNING instead (projects skipped, failed or not
-   reached are still on the old image), finish them first with `bin/agent-up update <project>...`.
+   reached are still on the old image), first do what it says: `bin/agent-up update <project>...`,
+   `bin/agent-up up <project>` for a stopped one on the old image, or a rename for an invalid name.
 
 ## Research container
 
@@ -441,10 +451,26 @@ What `FTP_HOSTS` changes, and nothing else:
 those archives document it. Keep the list to the upload servers you use, and remove it when the
 upload is done.
 
-**The host kernel needs `nf_conntrack_ftp`** (a container cannot load kernel modules):
-- WSL2 (Docker in WSL): built into the kernel, nothing to do;
-- native Linux: `sudo modprobe nf_conntrack_ftp` (to keep it across reboots:
-  `echo nf_conntrack_ftp | sudo tee /etc/modules-load.d/nf_conntrack_ftp.conf`).
+**The host kernel needs `nf_conntrack_ftp`** (a container cannot load kernel modules). Older WSL2
+kernels (5.15) had it built in; newer ones (6.18, 2026-10) ship it as a module that is not loaded at
+boot. Check with `ls -d /sys/module/nf_conntrack_ftp`. If it is missing:
+- now: `sudo modprobe nf_conntrack_ftp` (in Ubuntu; every WSL distro, Docker Desktop's included,
+  shares one kernel);
+- at every boot, WSL2: add a boot command to `/etc/wsl.conf` in Ubuntu. Look at the file first
+  (`cat /etc/wsl.conf`): if it already has a `[boot]` section (e.g. `systemd=true`), add the
+  `command` line under it instead of a second `[boot]`:
+  ```ini
+  [boot]
+  command = /usr/sbin/modprobe nf_conntrack_ftp
+  ```
+  It runs as root when Ubuntu starts. If Docker Desktop starts an FTP project before Ubuntu has
+  started, its firewall fails and Docker retries it (`restart: unless-stopped`) until the helper is
+  there;
+- at every boot, native Linux:
+  `echo nf_conntrack_ftp | sudo tee /etc/modules-load.d/nf_conntrack_ftp.conf`.
+
+Loading it changes nothing by itself: since Linux 6.0 the helper only looks at connections a
+firewall rule hands to it, which here is only an FTP project's tcp 21 to its listed hosts.
 
 Without it the firewall refuses to start the container (`docker logs <project>-agent-1` says what to
 load), and `agent-up up` warns.
@@ -488,6 +514,67 @@ helper and the set are gone.
 | Change the allowlist | edit `~/.config/agent-containers/<project>/allowlist`; `agent-up up <project>` |
 | Change a secret | edit it in 1Password; `agent-up up <project>` (the env is fixed at container creation) |
 | Attach | VS Code → **Dev Containers: Attach to Running Container…** → `<project>-agent-1`, or `agent-up shell <project>` |
+| Rename a project | see [Renaming a project](#renaming-a-project) below |
+
+### Renaming a project
+
+The name is in many places: the config folder and its `PROJECT=`, the container and volume names,
+the 1Password item (and maybe the project's vault), the research exchange folder, and the browser
+address. A container and its volumes cannot be renamed in place, so you copy them. Nothing in the
+project folder (`PROJECT_DIR`) changes. The new name: lowercase letters, digits, `_` and `-` only.
+Run each block on its own; set the two names first:
+
+```bash
+OLD=spades_harvesting
+NEW=spades_pe
+```
+
+1. Let the agent finish and push (`agent-up busy $OLD`). The container's `/tmp` is not copied.
+2. Stop it, and stop Docker from restarting it. A container that was running at a reboot (or one
+   started by hand) is started again by Docker, and on Docker Desktop (2026-10-29) the old
+   container then created empty root-owned folders at its old paths (config folder, research
+   exchange folder, project folder), which `agent-up` and the research container trip over:
+   ```bash
+   agent-up stop $OLD
+   docker update --restart=no $OLD-agent-1
+   ```
+3. Rename the config folder and the research exchange folder (the second line only with
+   `RESEARCH=1` and the default `RESEARCH_DIR`):
+   ```bash
+   mv ~/.config/agent-containers/$OLD ~/.config/agent-containers/$NEW
+   mv ~/agent-research/$OLD ~/agent-research/$NEW
+   sed -i "s/^PROJECT=$OLD\$/PROJECT=$NEW/" ~/.config/agent-containers/$NEW/project.conf
+   grep '^PROJECT=' ~/.config/agent-containers/$NEW/project.conf
+   ```
+4. Copy the volumes (logins, T3 threads and pairings, agent notes, the R library; add `rstudio`
+   with `RSTUDIO=1`). The R library takes a few minutes:
+   ```bash
+   IMG=$(grep -m1 '^    image: ' ~/.config/agent-containers/$NEW/compose.yaml | awk '{print $2}')
+   for v in claude codex rlib t3; do docker volume create "$v-$NEW" && docker run --rm --user 0 --entrypoint cp -v "$v-$OLD:/from:ro" -v "$v-$NEW:/to" "$IMG" -a /from/. /to/; done
+   ```
+5. In 1Password, rename the Personal item `agent-<OLD> service account` to
+   `agent-<NEW> service account` (`agent-up update` looks it up by that title). Renaming the
+   project's vault is optional; if you do, change every `op://<old vault>/...` line in
+   `~/.config/agent-containers/$NEW/project.env` to match.
+6. Start it, and with `RESEARCH=1` also the research container, so it mounts the renamed exchange
+   folder:
+   ```bash
+   unset OP_SERVICE_ACCOUNT_TOKEN
+   export OP_SERVICE_ACCOUNT_TOKEN="$(op read "op://Personal/agent-$NEW service account/credential")"
+   agent-up up $NEW
+   unset OP_SERVICE_ACCOUNT_TOKEN
+   agent-up up research
+   ```
+   Compose warns that the copied volumes "already exist but were not created by Docker Compose":
+   harmless, it uses them.
+7. The browser address changes (`http://<NEW>.localhost:<T3_PORT>`, `_` becomes `-`): pair it again
+   with `agent-up pair $NEW`. The T3 port and the Tailscale address stay the same, so the apps keep
+   working. Through T3 Connect the environment keeps its old name until relinked (see the T3
+   Connect gotchas).
+8. When you are sure nothing is missing: `docker rm $OLD-agent-1`, then
+   `docker volume rm claude-$OLD codex-$OLD rlib-$OLD t3-$OLD` (plus `rstudio-$OLD` with
+   `RSTUDIO=1`). If you made empty root-owned folders by mistake earlier, check them with
+   `sudo find <folder> -not -type d` (prints nothing = only empty folders) before removing them.
 
 ## What the container gets (builder profile)
 
