@@ -186,6 +186,10 @@ They contain no secrets by design.
 - **OS tooling** (carried over from the current image): git, gh, zsh, fzf, jq, less, procps,
   curl/wget, vim/nano, unzip, man-db, dnsutils, iproute2, iptables, ipset, dnsmasq, aggregate.
   **New:** `tmux`, `libimage-exiftool-perl` (exiftool).
+  *Amended 2026-10-30:* `gdb` added (crash backtraces: `R -d gdb`, `gdb --args Rscript x.R`; it cannot
+  attach to running processes under `ptrace_scope=1`, by design). debuginfod is OFF by default via
+  `/etc/gdb/gdbinit.d/agent-debuginfod.gdb`, since `debuginfod.ubuntu.com` is not in the base allowlist;
+  a project opts in by allowlisting that host (README).
 - **Node 22** (NodeSource) + **Claude Code pinned to an exact version** (never `latest`).
   *Amended 2026-10-07:* Claude Code is proprietary and the images are public, so the image carries
   only an integrity-locked spec (`images/base/claude-code/package-lock.json`, sha512 per tarball).
@@ -407,7 +411,7 @@ also when agent-side enforcement of the merge gate (e.g. blocking `gh pr merge`)
   - a red result blocks the merge.
 - **Smoke tests:**
   - base: R starts; `Require` and `SpaDES.project` load; `terra` reads a bundled tiny GeoTIFF;
-    the firewall script parses the allowlist directory; `tmux`, `exiftool` and `claude --version`
+    the firewall script parses the allowlist directory; `tmux`, `exiftool`, `gdb` (debuginfod off) and `claude --version`
     run;
   - gis: `terra` reads a bundled tiny NetCDF; `gdalinfo --version`;
   - bio: `mafft --version`; `conda run -n sklearn python -c "import sklearn"`.

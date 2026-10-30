@@ -23,11 +23,17 @@ ARG RSTUDIO_VERSION=2026.09.0+174
 ARG RSTUDIO_SHA256=168bc577ef2f68abab1ad2ed684e830da1d244618b25b69fd20448e60716c5ba
 ENV TZ="$TZ" DEBIAN_FRONTEND=noninteractive
 
-# OS + agent tooling. tmux: detached long runs. exiftool: photo metadata (field data).
+# OS + agent tooling. tmux: detached long runs. exiftool: photo metadata (field data). gdb: crash backtraces (R -d gdb).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       less git procps sudo fzf zsh man-db unzip gnupg2 gh iptables ipset dnsmasq iproute2 conntrack libcap2-bin \
-      dnsutils aggregate jq nano vim curl wget ca-certificates tmux libimage-exiftool-perl \
+      dnsutils aggregate jq nano vim curl wget ca-certificates tmux libimage-exiftool-perl gdb \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# gdb: debuginfod OFF by default (debuginfod.ubuntu.com is not in the egress allowlist; otherwise gdb
+# prompts or its lookups hang/fail). Opt in per project: see the README ("Debugging a crash").
+RUN mkdir -p /etc/gdb/gdbinit.d \
+    && printf '%s\n' '# agent-containers: debuginfod.ubuntu.com is not allowlisted; opt in per project (README).' \
+         'set debuginfod enabled off' > /etc/gdb/gdbinit.d/agent-debuginfod.gdb
 
 # Node 22 (Claude Code requires engines.node >=22; Codex >=16).
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \

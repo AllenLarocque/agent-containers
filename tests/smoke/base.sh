@@ -19,6 +19,8 @@ check "geos/proj present"              bash -c 'dpkg -s libgeos-dev libproj-dev 
 check "no ubuntugis PPA"               bash -c 'f=(/etc/apt/sources.list.d/); [ -f /etc/apt/sources.list ] && f+=(/etc/apt/sources.list); test -d /etc/apt/sources.list.d; set +e; grep -rqi ubuntugis "${f[@]}" >/dev/null 2>&1; test $? -eq 1'
 check "tmux"                           tmux -V
 check "exiftool"                       exiftool -ver
+check "gdb"                            gdb --version
+check "gdb: debuginfod off by default" bash -c 'gdb -batch -ex "show debuginfod enabled" 2>&1 | grep -qi "\"off\""'
 check "gh"                             gh --version
 check "uv 0.12.19"                     bash -c 'uv --version | grep -qE "^uv 0\.12\.19( |$)"'
 check "node 22"                        bash -c 'node --version | grep -q "^v22\."'
