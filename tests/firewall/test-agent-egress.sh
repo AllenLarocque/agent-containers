@@ -53,8 +53,11 @@ if [ "${REQUIRE_DOCKER_DNS:-0}" = 1 ]; then
 fi
 
 # --- egress as the agent ---
-if curl --connect-timeout 10 -sSf https://api.github.com/zen >/dev/null 2>&1; then ok "agent reaches api.github.com"; else bad "agent cannot reach api.github.com"; fi
-if curl --connect-timeout 10 -sSf https://cloud.r-project.org/src/contrib/PACKAGES.gz >/dev/null 2>&1; then ok "agent reaches CRAN"; else bad "agent cannot reach CRAN"; fi
+# Reachable = any HTTP answer (code != 000): the firewall let DNS+TCP+TLS through. An HTTP error (rate limit,
+# a 5xx) is the site's answer, not a block; `curl -f` counted it as blocked and CI failed at random. One retry.
+reach(){ local c i; for i in 1 2; do c=$(curl -q -s -o /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 30 "$1" 2>/dev/null); [ "${c:-000}" != 000 ] && return 0; [ "$i" = 1 ] && sleep 3; done; REACH_CODE=${c:-000}; return 1; }
+if reach https://api.github.com/zen; then ok "agent reaches api.github.com"; else bad "agent cannot reach api.github.com (curl: $REACH_CODE)"; fi
+if reach https://cloud.r-project.org/src/contrib/PACKAGES.gz; then ok "agent reaches CRAN"; else bad "agent cannot reach CRAN (curl: $REACH_CODE)"; fi
 if curl --connect-timeout 5 -s https://1.1.1.1/ >/dev/null 2>&1; then bad "agent reached https://1.1.1.1/"; else ok "agent blocked from https://1.1.1.1/"; fi
 
 # --- I2b: the agent cannot change the firewall's inputs ---

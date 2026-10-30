@@ -16,6 +16,9 @@ bad(){ echo "FAIL: $*"; fail=1; [ "${ANNOTATE:-0}" != 1 ] || echo "::error title
 [ "$(id -u)" = 0 ] || { echo "FAIL: run as root"; exit 1; }
 AGENT=(setpriv --reuid=1000 --regid=1000 --clear-groups --reset-env)
 as_agent(){ "${AGENT[@]}" "$@"; }
+# Reachable = any HTTP answer (code != 000): the firewall let DNS+TCP+TLS through. An HTTP error (rate limit,
+# a 5xx) is the site's answer, not a block; `curl -f` counted it as blocked and CI failed at random. One retry.
+reach(){ local c i; for i in 1 2; do c=$(as_agent curl -q -s -o /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 30 "$1" 2>/dev/null); [ "${c:-000}" != 000 ] && return 0; [ "$i" = 1 ] && sleep 3; done; REACH_CODE=${c:-000}; return 1; }
 A_RE='^[0-9]+(\.[0-9]+){3}$'
 tcp_err(){ { timeout "$1" bash -c "</dev/tcp/$2/$3" >/dev/null; } 2>&1; }
 rejected_here(){ # $1 ip, $2 port, $3 label: a locally REJECTed SYN fails at once with "No route to host"
@@ -76,7 +79,7 @@ grep -q '^ipset=' "$conf" && bad "dnsmasq research config has ipset= lines" || o
 
 # --- as the agent: open public egress, any name, any port (TCP + UDP) ---
 [ -n "$(as_agent dig @127.0.0.1 example.com A +short +time=3 +tries=2 | grep -E "$A_RE")" ] && ok "dnsmasq resolves non-allowlisted example.com" || bad "example.com does not resolve"
-as_agent curl -q -fsS -o /dev/null --max-time 20 https://example.com/ && ok "agent reaches https://example.com (443, not allowlisted)" || bad "agent cannot reach https://example.com"
+reach https://example.com/ && ok "agent reaches https://example.com (443, not allowlisted)" || bad "agent cannot reach https://example.com (curl: $REACH_CODE)"
 as_agent curl -q -sS -o /dev/null --max-time 20 https://1.1.1.1/ && ok "agent reaches https://1.1.1.1 (literal public IP)" || bad "agent cannot reach https://1.1.1.1"
 e=$(as_agent bash -c "{ timeout 10 bash -c '</dev/tcp/$EDGE_IP/7844' >/dev/null; } 2>&1") && ok "agent reaches $EDGE_IP:7844 (an odd TCP port)" || bad "agent cannot reach $EDGE_IP:7844: $e"
 [ -n "$(as_agent dig @1.1.1.1 example.com A +short +time=3 +tries=2 | grep -E "$A_RE")" ] && ok "agent reaches UDP 53 at 1.1.1.1 directly (UDP open to public IPs)" || bad "UDP to 1.1.1.1:53 blocked"
