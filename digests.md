@@ -5,7 +5,7 @@ Updated by the `publish` workflow via PR — never edit by hand.
 
 | image | tag | digest |
 |---|---|---|
-| spades-base | 2026.10.30-ddf96d3 | `sha256:42dba700134d01de2b0bbcf23d61512d4dbc00cb36ca2fdd14b3ddc771b5746e` |
-| spades-gis | 2026.10.30-ddf96d3 | `sha256:b80459788573885178e478155b35e581a75866a7f5bdec53b884de3bdb1392d3` |
-| spades-bio | 2026.10.30-ddf96d3 | `sha256:64280fd7cec00737111134a44d768e346aa1bef5cab0218c325ea360bf4350d5` |
-| spades-research | 2026.10.30-ddf96d3 | `sha256:57f203c4f9e04ca251c3fab537c92008e54570b429c50aee5f3ba4af31b94d13` |
+| spades-base | 2026.10.30-8299ac4 | `sha256:cff6c150cc93b677256b2c176ea92c6062e108d5597bebd358599c708a417766` |
+| spades-gis | 2026.10.30-8299ac4 | `sha256:3cbc1400d5286a7426e19049d62aa1cd20a193c9a71576485a84e5ea346d50b1` |
+| spades-bio | 2026.10.30-8299ac4 | `sha256:f1d0db9e6ac4106e22060315df46544fcae5e8832a1ba847e50fe811c6838385` |
+| spades-research | 2026.10.30-8299ac4 | `sha256:5e196676f906dff6c93c700ce59679608277d5efd6c71cf817685482de3493c3` |
