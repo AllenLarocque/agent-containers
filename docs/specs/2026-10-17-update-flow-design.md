@@ -174,6 +174,10 @@ update" fix: the wait must cover a first start after an image update.
 3. **Stopped projects stay stopped.** `update` changes their digest in `compose.yaml` and reports
    "updated, not started"; their next `agent-up up` uses the new image. No version check or pairing
    code for them.
+   *Amended 2026-10-29:* `docker start` (or Docker Desktop's Start) revives the OLD container, after
+   which compose alone looks current. So "current" now also requires the container (if any) to have
+   been created from the new digest: a running one on an older image is restarted like an outdated
+   one, a stopped one is reported "on the old image, not started" (start it with `agent-up up`).
 4. **Busy means working, not open.** Busy = an `Rscript` process, or an R/`rsession` process that
    used CPU recently (builder picks the threshold), or an agent mid-task. An idle RStudio session or
    idle R console is listed in the output but does not stop the run, so the prompt only appears when

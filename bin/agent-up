@@ -27,6 +27,7 @@ usage:
 USAGE
   exit 2
 }
+valid_name(){ [[ $1 =~ ^[a-z0-9][a-z0-9_-]*$ ]]; }   # $1 name: what Docker Compose accepts as a project name
 normalise(){ printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9_-]/-/g; s/^[^a-z0-9]*//'; }
 conf_get(){ sed -n "s/^$2=//p" "$1" | tail -n 1; }   # $1 project.conf, $2 KEY
 next_t3_port(){ # lowest port >= 3773 not used by another project's config
@@ -210,6 +211,12 @@ FINALEOF
 cfg_dir(){ # $1 project -> its config dir (must exist)
   local p; p="$(normalise "$1")"
   [ -n "$p" ] || die "empty project name"
+  if [ ! -d "$CFG_ROOT/$p" ]; then
+    local d bad=""   # a dir that differs from $p only by capitals (or the raw argument itself) is the likely culprit
+    [[ $1 == */* ]] || [ ! -d "$CFG_ROOT/$1" ] || bad="$1"   # a plain name only: never a path like ../x
+    [ -n "$bad" ] || for d in "$CFG_ROOT"/*/; do d="${d%/}"; d="${d##*/}"; [ "$(printf '%s' "$d" | tr 'A-Z' 'a-z')" = "$p" ] && { bad="$d"; break; }; done
+    [ -z "$bad" ] || die "config dir '$bad' is not a valid project name (lowercase letters, digits, _ and - only: Docker Compose rejects capitals). Rename it to '$p' and set PROJECT=$p in its project.conf (README: Renaming a project)"
+  fi
   [ -d "$CFG_ROOT/$p" ] || die "no config for '$p' in $CFG_ROOT (run: agent-up init <project-dir>)"
   printf '%s' "$CFG_ROOT/$p"
 }
@@ -227,6 +234,7 @@ check_files(){
     [ -f "$1/$f" ] || die "missing $1/$f (re-create it from agent-containers/project-template/config)"
   done
   cfgname="$(basename "$1")"
+  valid_name "$cfgname" || die "config dir '$cfgname' is not a valid project name (lowercase letters, digits, _ and - only: Docker Compose rejects capitals). Rename it to '$(normalise "$cfgname")' and set PROJECT=$(normalise "$cfgname") in its project.conf (README: Renaming a project)"
   proj="$(conf_get "$1/project.conf" PROJECT)"
   [ "$proj" = "$cfgname" ] || die "PROJECT in $1/project.conf ($proj) must equal the config dir name ($cfgname)"
   if [ "$prof" = research ] && [ "$proj" != research ]; then
@@ -330,7 +338,7 @@ exchange_projects(){ # $1 research root -> the complete project subfolders, one 
     d="${d%/}"; p="${d##*/}"
     [ "$p" != _general ] || continue   # not a project: its own mount (general_dir)
     [ -d "$d" ] && [ ! -L "$d" ] || continue
-    if [[ ! $p =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then echo "agent-up: research: skipped '$d' (not a project name)" >&2; continue; fi
+    if ! valid_name "$p"; then echo "agent-up: research: skipped '$d' (not a project name)" >&2; continue; fi
     if [ ! -d "$d/briefs" ] || [ ! -d "$d/reports" ] || [ ! -d "$d/downloads" ] \
        || [ -L "$d/briefs" ] || [ -L "$d/reports" ] || [ -L "$d/downloads" ]; then
       echo "agent-up: research: skipped '$d' (needs real briefs/, reports/ and downloads/ folders)" >&2; continue
@@ -787,7 +795,7 @@ cmd_up(){
   if ftp_on "$cfg"; then
     echo "agent-up: FTP uploads ON (tcp 21 + conntrack ftp helper; cleartext) to: $(ftp_list "$cfg" | paste -sd' ' -)"
     # A hint only: the Docker daemon's kernel may not be this one (it is, on WSL2 and native Linux).
-    [ -d /sys/module/nf_conntrack_ftp ] || echo "agent-up: WARNING: nf_conntrack_ftp is not loaded in this kernel: the container's firewall will refuse to start. Run: sudo modprobe nf_conntrack_ftp"
+    [ -d /sys/module/nf_conntrack_ftp ] || echo "agent-up: WARNING: nf_conntrack_ftp is not loaded in this kernel: the container's firewall will refuse to start. Run: sudo modprobe nf_conntrack_ftp (at every boot: README, FTP uploads)"
   fi
   if [ "$(rstudio "$cfg")" = 1 ]; then
     echo "agent-up: RStudio Server at http://$(rstudio_host "$name"):$(conf_get "$cfg/project.conf" RSTUDIO_PORT) (user and password: agent-up rstudio $name)"
@@ -859,6 +867,7 @@ cmd_rstudio(){
   echo "Its own browser origin keeps this project's RStudio sign-in apart from other projects' (and from T3)."
   echo "If your browser cannot open it, use: http://localhost:$port"
 }
+container_digest(){ local i; i="$(docker inspect -f '{{.Config.Image}}' "$1" 2>/dev/null)"; [[ $i =~ @(sha256:[0-9a-f]{64})$ ]] && printf '%s' "${BASH_REMATCH[1]}"; return 0; }   # $1 container -> the sha256:<hex> its image was created from, empty if none/unpinned
 is_running(){ [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = true ]; }   # $1 container
 busy_scan(){ # $1 container -> BUSY:/IDLE: lines; exit 1 if anything is busy, 0 otherwise (also when not running)
   is_running "$1" || return 0
@@ -1003,7 +1012,7 @@ cmd_update(){
   [ -f "$digests" ] || die "no digests.md at $digests"
   update_guard
   unset OP_SERVICE_ACCOUNT_TOKEN   # `op read` uses the owner's own session, never a project's token
-  local rc=0 res ver rep quit=0 c img name_img old new tok oldp newp ans bs cur pairs=() unknowns=()
+  local rc=0 res ver rep quit=0 cdig c img name_img old new tok oldp newp ans bs cur pairs=() unknowns=()
   local rows=()
   for n in "${names[@]}"; do
     if [ "$quit" = 1 ]; then rows+=("$n|not reached (you quit)|-|-"); continue; fi
@@ -1011,11 +1020,13 @@ cmd_update(){
     # The image line: <registry>/<name>@sha256:<64 hex>
     cur="$(sed -nE 's/^[[:space:]]*image:[[:space:]]*([^[:space:]]+)@(sha256:[0-9a-f]{64})[[:space:]]*$/\1 \2/p' "$cfg/compose.yaml" | head -n 1)"
     img="${cur% *}"; old="${cur#* }"; name_img="${img##*/}"
-    if [ -z "$cur" ]; then res="SKIP (no pinned image: line in compose.yaml)"; rc=1
+    if ! valid_name "$n"; then res="SKIP (invalid project name '$n': rename it to '$(normalise "$n")'; README: Renaming a project)"; rc=1
+    elif [ -z "$cur" ]; then res="SKIP (no pinned image: line in compose.yaml)"; rc=1
     elif new="$(digest_for "$name_img" "$digests")"; [ -z "$new" ]; then res="SKIP (image $name_img not in digests.md)"; rc=1
-    elif [ "$new" = "$old" ]; then res="current"
+    elif [ "$new" = "$old" ] && { cdig=$(container_digest "$c"); [ -z "$cdig" ] || [ "$cdig" = "$new" ]; }; then res="current"   # compose is current; a container left on an older image is not
     elif ! is_running "$c"; then
-      rewrite_digest "$cfg/compose.yaml" "$new"; res="updated, not started"
+      if [ "$new" = "$old" ]; then res="on the old image, not started (compose is current; start with: agent-up up $n, not docker start)"
+      else rewrite_digest "$cfg/compose.yaml" "$new"; res="updated, not started (start with: agent-up up $n)"; fi
     else
       if ! bs="$(busy_scan "$c" </dev/null)"; then
         echo "== $n is busy:"; printf '%s\n' "$bs"
@@ -1067,12 +1078,22 @@ cmd_update(){
     for n in "${unknowns[@]}"; do "$0" pair "$n" </dev/null || { echo "agent-up: could not pair '$n' (agent-up pair $n)" >&2; rc=1; }; done
   fi
   [ "${#pairs[@]}" -gt 0 ] || [ "${#unknowns[@]}" -gt 0 ] || echo "No re-pairing needed."
-  local behind=() row
+  local behind=() redo=() starts=() renames=() row msg
   for row in "${rows[@]}"; do   # <name>|<result>|...
-    case "${row#*|}" in "updated|"*|"current|"*|"updated, not started|"*) ;; *) behind+=("${row%%|*}") ;; esac
+    case "${row#*|}" in
+      "updated|"*|"current|"*|"updated, not started"*) ;;
+      "on the old image, not started"*) behind+=("${row%%|*}"); starts+=("${row%%|*}") ;;   # update would only say so again
+      "SKIP (invalid project name"*) behind+=("${row%%|*}"); renames+=("${row%%|*}") ;;      # ...and so would this one
+      *) behind+=("${row%%|*}"); redo+=("${row%%|*}") ;;
+    esac
   done
   if [ "${#behind[@]}" -gt 0 ]; then
-    echo "WARNING: still on the old image: ${behind[*]}. Updating the T3 apps now may disconnect them; finish with: agent-up update ${behind[*]} first."
+    local acts=() a
+    [ "${#redo[@]}" -eq 0 ] || acts+=("agent-up update ${redo[*]}")
+    for a in "${starts[@]}"; do acts+=("agent-up up $a"); done
+    [ "${#renames[@]}" -eq 0 ] || acts+=("rename ${renames[*]} (README: Renaming a project)")
+    msg="$(printf '%s; ' "${acts[@]}")"
+    echo "WARNING: still on the old image: ${behind[*]}. Updating the T3 apps now may disconnect them; finish with: ${msg%; } first."
   else
     echo "Now update the T3 apps on your phone and desktop (and turn their auto-update back off if an update turned it on)."
   fi

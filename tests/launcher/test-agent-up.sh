@@ -54,6 +54,8 @@ case "$*" in
   "inspect -f {{.State.Running}} "*)
     sd="$(dirname "$DLOG")"
     if { [ -f "$sd/RUNNING" ] && [ "$(cat "$sd/RUNNING")" = 0 ]; } || { [ -f "$sd/RUNNING.$4" ] && [ "$(cat "$sd/RUNNING.$4")" = 0 ]; }; then echo false; else echo true; fi ;;
+  "inspect -f {{.Config.Image}} "*)   # the image reference a container was created from: $sd/cimage.<c>, else nothing
+    sd="$(dirname "$DLOG")"; cat "$sd/cimage.$4" 2>/dev/null || true ;;
   "exec "*" ps -eo pid=,ppid=,etimes=,cputimes=,comm=,args=")   # first call: $sd/ps.<c>.1, second: .2 (per container: busy --all scans in parallel)
     sd="$(dirname "$DLOG")"; n=$(( $(cat "$sd/ps.$2.count" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$sd/ps.$2.count"
     cat "$sd/ps.$2.$n" 2>/dev/null || true ;;
@@ -1441,6 +1443,44 @@ uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
 check "update: stopped project -> digest rewritten, 'updated, not started'" bash -c '[ "$1" -eq 0 ] && grep -q "updated, not started" <<<"$2" && grep -q "sha256:$3" "$4"' _ "$rc" "$uout" "$GISD" "$(ucfg alpha)"
 check "  ...no up, and no token read" bash -c '[ "$(grep -c " up -d" "$1")" -eq 0 ] && ! grep -q "^OP: read" "$2"' _ "$DLOG" "$OPLOG"
 check "  ...'updated, not started' still ends with the phone/desktop reminder" test "$(tail -n 1 <<<"$uout")" = "Now update the T3 apps on your phone and desktop (and turn their auto-update back off if an update turned it on)."
+# compose current but the container is still on an old image (docker start revived it after "updated, not started")
+GIMG=ghcr.io/allenlarocque/spades-gis; rm -f "$T/RUNNING.alpha-agent-1"
+ureset alpha; uset alpha "$GIMG" "$GISD"; echo "$GIMG@sha256:$OLD1" > "$T/cimage.alpha-agent-1"
+uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: compose current + running container on an old digest -> restarted, 'updated', exit 0" bash -c '[ "$1" -eq 0 ] && grep -q "alpha: updated" <<<"$2" && [ "$3" -eq 1 ]' _ "$rc" "$uout" "$(uup alpha)"
+ureset alpha; uset alpha "$GIMG" "$GISD"; echo 0 > "$T/RUNNING.alpha-agent-1"
+uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: compose current + stopped container on an old digest -> not started, hint to use agent-up up, no up" \
+  bash -c '[ "$1" -eq 0 ] && grep -qF "on the old image, not started (compose is current; start with: agent-up up alpha, not docker start)" <<<"$2" && [ "$3" -eq 0 ]' _ "$rc" "$uout" "$(uup alpha)"
+check "  ...last line is the WARNING: start it with agent-up up alpha (update would only repeat this)" \
+  bash -c 'l="$(tail -n 1 <<<"$1")"; [[ $l == WARNING:* ]] && grep -qF "finish with: agent-up up alpha first." <<<"$l" && ! grep -qF "agent-up update" <<<"$l"' _ "$uout"
+ureset alpha beta; uset alpha "$GIMG" "$GISD"; echo 0 > "$T/RUNNING.alpha-agent-1"; touch "$T/OPREAD_FAIL_beta"
+uout="$(au update alpha beta </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: one to start, one to update again -> both named, each with its own command" \
+  bash -c 'l="$(tail -n 1 <<<"$1")"; [ "$l" = "WARNING: still on the old image: alpha beta. Updating the T3 apps now may disconnect them; finish with: agent-up update beta; agent-up up alpha first." ]' _ "$uout"
+rm -f "$T/OPREAD_FAIL_beta"
+rm -f "$T/RUNNING.alpha-agent-1"
+ureset alpha; uset alpha "$GIMG" "$GISD"; echo "$GIMG@sha256:$GISD" > "$T/cimage.alpha-agent-1"
+uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: compose current + container on the new digest -> 'current', no up" bash -c '[ "$1" -eq 0 ] && grep -q "alpha: current" <<<"$2" && [ "$3" -eq 0 ]' _ "$rc" "$uout" "$(uup alpha)"
+rm -f "$T"/cimage.*
+ureset alpha; uset alpha "$GIMG" "$GISD"
+uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: compose current + no container image known -> 'current', no up" bash -c '[ "$1" -eq 0 ] && grep -q "alpha: current" <<<"$2" && [ "$3" -eq 0 ]' _ "$rc" "$uout" "$(uup alpha)"
+ureset alpha
+
+# invalid project names (capitals): Docker Compose rejects them
+mkdir -p "$UR/Bad_X"; cp "$UR/alpha/compose.yaml" "$UR/alpha/project.conf" "$UR/Bad_X/"; uset Bad_X "$GIMG" "$OLD1"
+uout="$(au update --all </dev/null 2>&1)" && rc=0 || rc=$?
+check "update --all: a capitalised config dir -> SKIP row naming the rename, exit non-zero, compose untouched" \
+  bash -c '[ "$1" -ne 0 ] && grep -qF "SKIP (invalid project name '"'"'Bad_X'"'"': rename it to '"'"'bad_x'"'"'" <<<"$2" && grep -q "sha256:$4" "$3"' _ "$rc" "$uout" "$(ucfg Bad_X)" "$OLD1"
+check "  ...the WARNING says to rename it (not to update it again)" bash -c 'l="$(tail -n 1 <<<"$1")"; [[ $l == WARNING:* ]] && grep -qF "rename Bad_X (README: Renaming a project) first." <<<"$l" && ! grep -qF "agent-up update Bad_X" <<<"$l"' _ "$uout"
+rm -rf "$UR/Bad_X"
+mkdir -p "$UR/Name_X"
+refuses "up Name_X: config dir with capitals -> says it is not a valid project name" "config dir '.*Name_X' is not a valid project name.*Rename it to 'name_x'" au up Name_X
+refuses "up name_x (case-insensitive match of an invalid dir) -> same message" "is not a valid project name" au up name_x
+refuses "status ../x (a path, not a name) -> the plain 'no config' message, never 'rename'" "no config for" au status ../upd-cfg
+rm -rf "$UR/Name_X"
 # rewrite_digest: only the image line the digest was read from changes
 ureset alpha; printf '  sidecar:\n    image: ghcr.io/allenlarocque/spades-gis@sha256:%s\n' "$OLD1" >> "$(ucfg alpha)"
 uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
