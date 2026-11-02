@@ -16,6 +16,15 @@
 **Needed by:** the week of 2026-10-05 (new GIS / predictive-modelling / fire-modelling SpaDES
 project; transition to team work).
 
+> **2026-11-01 amendment (digests.md retired).** The `digests.md` file and the digests PR that
+> `publish` opened after every run are gone. `agent-up update` and `agent-new` resolve the digest
+> that ghcr.io's `latest` tag points to (anonymously, `scripts/registry-digest.sh`) and pin THAT
+> digest in the project's `compose.yaml` exactly as before, so the pinning model is unchanged.
+> The trust root is now the `latest` tag: only `publish` on `main` (after every image built and
+> passed its smoke tests by digest) and the owner can move it. Wherever this spec says "copy the
+> digest from `digests.md`" or "update `digests.md`" (§8 and the checklists), read: run
+> `scripts/registry-digest.sh spades-<image>`, or `agent-up update`.
+
 ## 1. Purpose
 
 Replace the single, hand-maintained `spades-dev-environment` devcontainer with a small system

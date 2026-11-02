@@ -39,9 +39,9 @@ MACHINE_USER=<machine-user-login>
      project wherever they're missing.
 
 2. **Set the image digest.** In `~/.config/agent-containers/<project>/compose.yaml`, replace
-   `REPLACE_WITH_DIGEST_FROM_digests.md` with the digest from `agent-containers/digests.md` (the
-   matching `spades-gis` or `spades-bio` row). `agent-up up` refuses to run until it's a real
-   digest.
+   `REPLACE_WITH_DIGEST` with the digest `latest` points to:
+   `agent-containers/scripts/registry-digest.sh spades-gis` (or `spades-bio`) prints it. (`agent-new`
+   does this for you.) `agent-up up` refuses to run until it's a real digest.
 3. **Run the vault runbook** (when storing the GitHub token with `read -rs`, run that line ON ITS OWN: pasted together with the next line, `read` swallows that line as the "token"): [1password-project-vault.md](1password-project-vault.md) (vault,
    service account, host token). `project.env` already names the vault `agent-<project>`.
 4. **Machine user, "set up" half (before `agent-up up`):**

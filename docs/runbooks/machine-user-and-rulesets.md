@@ -39,8 +39,7 @@ Step 1 is done once. Steps 2 and 4 are done per repo. Step 3 is done once per pr
 
    *Why: with "Require review from Code Owners" (step 4), only an approval from you counts. Without it, any account that is allowed to approve could satisfy the "1 approval" rule.* (`agent-containers` already has this file.)
 3. Repo → Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve pull requests":
-   - **`agent-containers` ONLY: tick it and Save.** The `publish` workflow needs it to open the digests PR.
-   - **On every project repo it must stay OFF.** If it is on, a workflow can approve a PR. With Code Owners required (step 4) a bot approval cannot satisfy the gate, so this is defence in depth rather than the only barrier, but there is no reason to leave it on.
+   - **It must stay OFF on every repo, `agent-containers` included** (since 2026-11-01 `publish` no longer opens a PR; if it was ticked on `agent-containers` for the old digests PR, untick it). If it is on, a workflow can approve a PR. With Code Owners required (step 4) a bot approval cannot satisfy the gate, so this is defence in depth rather than the only barrier, but there is no reason to leave it on.
 
 ## 3. Create the machine user's GitHub token
 
@@ -126,7 +125,6 @@ Finally, as **you** in the browser: open the PR, approve it, and merge it (or cl
 After the first run of the `publish` workflow:
 
 1. GitHub → your profile → Packages → `spades-base`, then `spades-gis`, `spades-research` (later `spades-bio`) → Package settings. Confirm the package is **linked to the `agent-containers` repo**, then Danger Zone → **Change visibility → Public**. *Why: public images pull without credentials.*
-2. Open the auto-created `chore/digests-*` PR and confirm a `build-test` run appears as a check on it. *Why: PRs opened by Actions do not trigger workflows by themselves; `publish` dispatches CI explicitly, and this proves it worked.* If it does not appear, **stop and decide**: the fallback is a GitHub App token, which would be a documented exception to the "no extra credentials" rule.
-3. Review and merge that PR yourself. Copy the digest from `digests.md` into projects as in [new-project.md](new-project.md).
+2. Check anonymously that `latest` resolves: `scripts/registry-digest.sh spades-gis` prints a `sha256:` digest. Pin it in projects as in [new-project.md](new-project.md). *Why: `agent-up update` and `agent-new` read `latest` without credentials, so a still-private package fails with "could not resolve".*
 
-**A package added later** (e.g. `spades-research`): its first `chore/digests-*` PR shows a red `build-test`, because CI checks digests anonymously and a new package starts private. Make it public (step 1), re-run the failed job (or `gh workflow run ci.yml --ref chore/digests-<tag>`), then merge.
+**A package added later** (e.g. `spades-research`): a new package starts private. Make it public (step 1) before the first `agent-up update` that needs it.

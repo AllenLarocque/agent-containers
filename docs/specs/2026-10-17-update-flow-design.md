@@ -191,3 +191,17 @@ update" fix: the wait must cover a first start after an image update.
 - How the agent updates the CLI lockfiles (e.g. `npm install --package-lock-only` at the eligible
   version).
 - Exact flag names and output wording of `agent-up update`.
+
+## Amendment 2026-11-01: no digests PR
+
+Decision 9 is amended. The `digests.md` file and the digests PR are retired: `agent-up update`
+(and `agent-new`) read the digest ghcr.io's `latest` tag points to, anonymously, and pin it in
+`compose.yaml` as before. The Monday `publish` rebuild now moves `latest` when it succeeds, so its
+OS patches reach each project at the owner's next `agent-up update` (no longer "with the next
+bundle"). The update day is: merge the update PR, wait for `publish` to succeed on `main`,
+`git pull`, run `agent-up update --all`. The trust root is the `latest` tag, which only `publish`
+on `main` (after all images are built and smoke-tested by digest) and the owner can move; `publish`
+refuses to run off `main` for that reason. The clone guard (on `main`, not behind `origin/main`)
+stays, because the launcher and template must match the images built from main. An image outside
+`ghcr.io/allenlarocque/spades-*`, or one whose `latest` cannot be resolved, is skipped with a reason
+and exit code 1. The body text above (the digests PR in the goals, §5 and §8) is historical.

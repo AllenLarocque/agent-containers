@@ -141,7 +141,8 @@ rules).
   "end of support", "will stop working", "minimum version" for old versions.
 - **OS patches, every week (Ubuntu 24.04 "noble", base image `rocker/r-ver` in
   `images/base/Dockerfile`).** Since the last publish
-  (`git log -1 --format=%cs origin/main -- digests.md`), look for Ubuntu security notices (USNs) for
+  (the date of the last successful publish run:
+  `gh api 'repos/AllenLarocque/agent-containers/actions/workflows/publish.yml/runs?branch=main&status=success&per_page=1' --jq '.workflow_runs[0].created_at'`), look for Ubuntu security notices (USNs) for
   packages the images install (the `apt-get install` lines in `images/*/Dockerfile`, plus core
   packages such as libc6, openssl, sudo, openssh, curl, git). The only source to try is
   GitHub-hosted:
@@ -370,7 +371,7 @@ this repo). Exactly these five parts, in this order:
 - Restart: yes (always; the images are rebuilt, so pending OS patches come too)
 - Re-add environments: <yes | no | unsure> — <one-line evidence, e.g. the protocol constant at both tags>
 - New app needed: <yes | no>
-- Steps: merge this PR; merge the digests PR the `publish` workflow then opens; `git pull` on the
+- Steps: merge this PR; wait for the `publish` run it triggers on `main` to succeed; `git pull` on the
   host; run `bin/agent-up update --all` (it checks for busy R work first and prints pairing codes
   only where the T3 protocol changed); re-add environments only if it tells you to; then update the
   T3 phone and desktop apps (not before). On your first `agent-up update` (containers started
@@ -404,7 +405,7 @@ for you". The body ends with the `🤖 Generated with` line exactly as shown.
 
 **Issue body (route D):** the same five parts and ending, with these differences:
 - OS issue, "What it means for you": restart: yes; re-add environments: no; new app needed: no;
-  steps: on GitHub, Actions → publish → Run workflow on `main`; merge the digests PR it opens;
+  steps: on GitHub, Actions → publish → Run workflow on `main`, and wait for it to succeed;
   `git pull` on the host; `bin/agent-up update --all`; no app update needed. "What's new": "No
   version changes; the rebuild picks up the patched OS packages." (You never run the workflow
   yourself.)
