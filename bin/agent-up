@@ -23,7 +23,7 @@ usage:
   agent-up rstudio <project>             print the RStudio Server address, user and password (RSTUDIO=1)
   agent-up status|stop|down <project>
   agent-up busy --all | <project>...     is R work or an agent running? (exit 1 = busy)
-  agent-up update --all | <project>...   move projects to the digests in digests.md (asks before restarting a busy one)
+  agent-up update --all | <project>...   move projects to the images ghcr.io's `latest` points to (asks before restarting a busy one)
 USAGE
   exit 2
 }
@@ -155,7 +155,7 @@ CONFEOF
   cat <<FINALEOF
 agent-up: created $cfg
 Next (docs/runbooks/new-project.md):
-  1. set the image digest in $cfg/compose.yaml (from agent-containers/digests.md)
+  1. set the image digest in $cfg/compose.yaml (agent-containers/scripts/registry-digest.sh spades-$image prints the current digest)
   2. vault agent-$name + service account + scoped GitHub token (docs/runbooks/1password-project-vault.md)
   3. add the project's domains to $cfg/allowlist
   4. replace @OWNER in $dir/.github/CODEOWNERS
@@ -201,7 +201,7 @@ CONFEOF
   cat <<FINALEOF
 agent-up: created $cfg (the shared research container: no secrets, no 1Password vault)
 Next (project-template/README.md "Research container"):
-  1. set the image digest in $cfg/compose.yaml (the spades-$image row of agent-containers/digests.md)
+  1. set the image digest in $cfg/compose.yaml (agent-containers/scripts/registry-digest.sh spades-$image prints the current digest)
   2. set RESEARCH=1 in each builder project's project.conf that should use it
   3. agent-up up research; then log in once: agent-up shell research -> claude, codex login --device-auth
   4. agent-up pair research (T3 Code; its project is /research/_general, which persists; create T3 projects only under /research/_general or /research/<project>)
@@ -506,7 +506,7 @@ ts_url(){ # $1 config dir -> the phone address (placeholder host when TAILSCALE_
 }
 check_digest(){
   grep -Eq '^[[:space:]]*image:[[:space:]]*[^[:space:]]+@sha256:[0-9a-f]{64}[[:space:]]*$' "$1" \
-    || die "$1: the image is not pinned to a real digest (@sha256:<64 hex>). Copy one from agent-containers/digests.md."
+    || die "$1: the image is not pinned to a real digest (@sha256:<64 hex>). agent-containers/scripts/registry-digest.sh spades-<image> prints the current one."
 }
 check_project_env(){ # op:// references only; never echo a line (it could hold a pasted secret)
   local bad reserved
@@ -956,9 +956,13 @@ cmd_busy(){
   if [ "${#busy[@]}" -gt 0 ]; then echo "Busy: $(IFS=,; echo "${busy[*]}" | sed 's/,/, /g')"; return 1; fi
   echo "Nothing busy."
 }
-digest_for(){ # $1 image name, $2 digests.md -> sha256:<64 hex> from its table row, or nothing
-  awk -F'|' -v n="$1" '{ a = $2; gsub(/[ \t]/, "", a); d = $4; gsub(/[ \t`]/, "", d)
-    if (a == n && d ~ /^sha256:[0-9a-f]{64}$/) { print d; exit } }' "$2"
+latest_digest(){ # $1 image name (spades-x): sets LD_OUT to the digest ghcr.io's latest points to, or the error; rc 1 on failure. Needs REG_RC/REG_OUT (cmd_update's per-run cache: each image is resolved once)
+  local k="$1" e
+  if [ -z "${REG_RC[$k]+x}" ]; then
+    if e="$("$HERE/../scripts/registry-digest.sh" "$k" latest </dev/null 2>&1)"; then REG_RC[$k]=0; else REG_RC[$k]=1; fi
+    REG_OUT[$k]="$(printf '%s' "$e" | tr '\n' ' ' | sed 's/^registry-digest: //; s/ *$//')"
+  fi
+  LD_OUT="${REG_OUT[$k]}"; return "${REG_RC[$k]}"
 }
 t3_protocol_of(){ # $1 container -> its T3_PROTOCOL value, or nothing
   { docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$1" </dev/null 2>/dev/null || true; } | sed -n 's/^T3_PROTOCOL=//p' | head -n 1
@@ -986,20 +990,21 @@ update_versions(){ # $1 project: "t3 <v>; <CLI>: <v>; ..." once the CLIs are ins
   lines="$(sed "s/: MISSING or container not running.*/: installing (check later: agent-up status $1)/" <<<"$lines")"
   printf 't3 %s; %s' "$(docker exec -u agent "$c" t3 --version 2>/dev/null </dev/null || echo '?')" "$(paste -sd';' - <<<"$lines" | sed 's/;/; /g')"
 }
-update_guard(){ # the digests.md in this clone must be current: on main, not behind origin/main
+update_guard(){ # this clone must be current: on main, not behind origin/main (the launcher and template must match the images built from main)
   local clone="$HERE/.."
   [ "${AGENT_UP_SKIP_GIT_CHECK:-}" != 1 ] || return 0
   git -C "$clone" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
-  [ "$(git -C "$clone" rev-parse --abbrev-ref HEAD 2>/dev/null)" = main ] || die "pull main in $clone first: digests.md is not current"
+  [ "$(git -C "$clone" rev-parse --abbrev-ref HEAD 2>/dev/null)" = main ] || die "pull main in $clone first: the launcher must match the published images"
   if GIT_TERMINAL_PROMPT=0 git -C "$clone" fetch -q origin main </dev/null 2>/dev/null; then   # a credential problem warns, never prompts
-    [ "$(git -C "$clone" rev-list --count HEAD..FETCH_HEAD 2>/dev/null || echo 0)" -eq 0 ] || die "pull main in $clone first: digests.md is not current"
+    [ "$(git -C "$clone" rev-list --count HEAD..FETCH_HEAD 2>/dev/null || echo 0)" -eq 0 ] || die "pull main in $clone first: the launcher must match the published images"
   else
-    echo "agent-up: WARNING: could not fetch origin main; digests.md may not be current" >&2
+    echo "agent-up: WARNING: could not fetch origin main; the launcher may not match the published images" >&2
   fi
 }
 cmd_update(){
   [ $# -ge 1 ] || usage
-  local all=() names=() n cfg wanted=" " digests="${AGENT_UP_DIGESTS:-$HERE/../digests.md}"
+  local all=() names=() n cfg wanted=" "
+  local -A REG_RC=() REG_OUT=()   # latest_digest's cache
   mapfile -t all < <(project_names)
   if [ "$1" = --all ]; then
     [ $# -eq 1 ] || usage
@@ -1009,7 +1014,6 @@ cmd_update(){
     for n in "$@"; do cfg="$(cfg_dir "$n")"; wanted="$wanted$(basename "$cfg") "; done
     for n in "${all[@]}"; do [[ $wanted == *" $n "* ]] && names+=("$n"); done   # project_names order: the clone's own project last
   fi
-  [ -f "$digests" ] || die "no digests.md at $digests"
   update_guard
   unset OP_SERVICE_ACCOUNT_TOKEN   # `op read` uses the owner's own session, never a project's token
   local rc=0 res ver rep quit=0 cdig c img name_img old new tok oldp newp ans bs cur pairs=() unknowns=()
@@ -1022,8 +1026,9 @@ cmd_update(){
     img="${cur% *}"; old="${cur#* }"; name_img="${img##*/}"
     if ! valid_name "$n"; then res="SKIP (invalid project name '$n': rename it to '$(normalise "$n")'; README: Renaming a project)"; rc=1
     elif [ -z "$cur" ]; then res="SKIP (no pinned image: line in compose.yaml)"; rc=1
-    elif new="$(digest_for "$name_img" "$digests")"; [ -z "$new" ]; then res="SKIP (image $name_img not in digests.md)"; rc=1
-    elif [ "$new" = "$old" ] && { cdig=$(container_digest "$c"); [ -z "$cdig" ] || [ "$cdig" = "$new" ]; }; then res="current"   # compose is current; a container left on an older image is not
+    elif [[ ! $img =~ ^ghcr\.io/allenlarocque/spades-[a-z]+$ ]]; then res="SKIP (image $img is not ghcr.io/allenlarocque/spades-*; only our own images are updated)"; rc=1
+    elif ! latest_digest "$name_img"; then res="SKIP (could not resolve $name_img:latest on ghcr.io: $LD_OUT)"; rc=1
+    elif new="$LD_OUT"; [ "$new" = "$old" ] && { cdig=$(container_digest "$c"); [ -z "$cdig" ] || [ "$cdig" = "$new" ]; }; then res="current"   # compose is current; a container left on an older image is not
     elif ! is_running "$c"; then
       if [ "$new" = "$old" ]; then res="on the old image, not started (compose is current; start with: agent-up up $n, not docker start)"
       else rewrite_digest "$cfg/compose.yaml" "$new"; res="updated, not started (start with: agent-up up $n)"; fi

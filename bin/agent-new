@@ -8,7 +8,6 @@ unset OP_SERVICE_ACCOUNT_TOKEN # agent-new acts as the owner; the SA token is on
 
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 CFG_ROOT="${AGENT_CONTAINERS_CONFIG:-$HOME/.config/agent-containers}"
-DIGESTS="${AGENT_NEW_DIGESTS:-$HERE/../digests.md}"
 
 say(){ printf 'agent-new: %s\n' "$*"; }
 skip(){ printf 'agent-new: SKIP (done): %s\n' "$*"; }
@@ -79,10 +78,9 @@ project_config(){
   local img digest compose="$CFG_ROOT/$PROJ/compose.yaml"
   img="$(sed -n 's/^IMAGE=//p' "$CFG_ROOT/$PROJ/project.conf" | tail -n1)"; img="spades-${img:-gis}"
   if grep -q REPLACE_WITH_DIGEST "$compose"; then
-    digest="$(awk -F'|' -v i=" $img " '$2==i {gsub(/[` ]/,"",$4); d=$4} END{print d}' "$DIGESTS")"
-    [ -n "$digest" ] || die "no digest for $img in $DIGESTS"
+    digest="$("$HERE/../scripts/registry-digest.sh" "$img" latest 2>&1)" || die "could not resolve $img:latest on ghcr.io: $digest"
     say "pinning $img@$digest"
-    sed -i "s/REPLACE_WITH_DIGEST_FROM_digests.md/${digest#sha256:}/" "$compose"
+    sed -i "s/REPLACE_WITH_DIGEST\(_FROM_digests\.md\)\?/${digest#sha256:}/" "$compose"   # the old placeholder name is accepted too
     grep -q "$digest" "$compose" || sed -i "/^[[:space:]]*image:.*spades-/ s|@.*$|@$digest|" "$compose"
   else skip "digest already pinned"; fi
   set_conf RESEARCH "$RESEARCH"; set_conf T3_CONNECT "$T3MODE"

@@ -120,7 +120,7 @@ check "project.conf: RSTUDIO=0 (RStudio Server is opt-in)" grep -qx "RSTUDIO=0" 
 check "project.conf: first project gets RSTUDIO_PORT=8787" grep -qx "RSTUDIO_PORT=8787" "$CFG/project.conf"
 check "project.env names this project's vault" grep -q "op://agent-$NAME/github-agent/token" "$CFG/project.env"
 check "compose uses spades-gis by default, digest placeholder kept" \
-  grep -q "spades-gis@sha256:REPLACE_WITH_DIGEST_FROM_digests.md" "$CFG/compose.yaml"
+  grep -q "spades-gis@sha256:REPLACE_WITH_DIGEST" "$CFG/compose.yaml"
 check "repo seed CODEOWNERS copied into the project" grep -q "^\* @OWNER" "$P/.github/CODEOWNERS"
 check "repo seed .gitignore copied into the project (incl. .Rproj.user/)" grep -qx ".Rproj.user/" "$P/.gitignore"
 check "repo seed gitleaks workflow copied into the project" grep -q "ghcr.io/gitleaks/gitleaks:v8.30.1" "$P/.github/workflows/gitleaks.yml"
@@ -173,7 +173,7 @@ check "  ...config is x" test -d "$CFGROOT/x"
 TOK=tok
 refuses "up refuses an unknown project" 'no config' au up nosuch
 refuses "up refuses the placeholder digest" 'not pinned to a real digest' au up "$NAME"
-sed -i "s/REPLACE_WITH_DIGEST_FROM_digests.md/$H64/" "$CFG/compose.yaml"
+sed -i "s/REPLACE_WITH_DIGEST/$H64/" "$CFG/compose.yaml"
 cp "$CFG/compose.yaml" "$T/compose-img.bak"
 sed -i -E "s|^( *image: *).*|\\1ghcr.io/allenlarocque/spades-research@sha256:$H64|" "$CFG/compose.yaml"
 refuses "up refuses a builder pinned to spades-research" 'spades-research is for the research container only' au up "$NAME"
@@ -622,7 +622,7 @@ RCFG="$CFGROOT/research"; RD="$H/agent-research"
 refuses "init --profile research refuses another name" "always named 'research'" au init --profile research --name foo
 rinit="$(au init --profile research 2>&1)" && rrc=0 || rrc=$?
 check "init --profile research (no project dir)" test "$rrc" -eq 0
-check "  ...the Next text names the spades-research row" grep -q "the spades-research row" <<<"$rinit"
+check "  ...the Next text names registry-digest.sh spades-research" grep -q "registry-digest.sh spades-research" <<<"$rinit"
 check "  ...config dir 'research', mode 700" test "$(stat -c %a "$RCFG")" = 700
 check "  ...holds compose.yaml + project.conf ONLY (no project.env: no secrets; no allowlist)" \
   test "$(ls -A "$RCFG" | sort | paste -sd' ' -)" = "compose.yaml project.conf"
@@ -631,11 +631,11 @@ check "  ...project.conf: PROFILE=research, IMAGE=research, RESEARCH_DIR, T3_POR
 check "  ...and NO project folder, spades.ai or memory settings" bash -c '! grep -Eq "^(PROJECT_DIR|SPADES_AI_DIR|AGENT_MEMORY_DIR)=" "$1"' _ "$RCFG/project.conf"
 check "  ...its T3_PORT is unique" bash -c '[ "$(grep -h "^T3_PORT=" "$1"/*/project.conf | sort | uniq -d)" = "" ]' _ "$CFGROOT"
 check "  ...compose: the research seed (spades-research, 16g, cwd /research, own volumes)" \
-  bash -c 'grep -q "spades-research@sha256:REPLACE_WITH_DIGEST_FROM_digests.md" "$1" && grep -qE "^    mem_limit: 16g" "$1" && grep -qE "^    working_dir: /research" "$1" && ! sed "s/#.*//" "$1" | grep -Eq "[^_]PROJECT_DIR|SPADES_AI_DIR|AGENT_MEMORY_DIR|require-cache|npm-cache-shared|allowlist|/workspace"' _ "$RCFG/compose.yaml"
+  bash -c 'grep -q "spades-research@sha256:REPLACE_WITH_DIGEST" "$1" && grep -qE "^    mem_limit: 16g" "$1" && grep -qE "^    working_dir: /research" "$1" && ! sed "s/#.*//" "$1" | grep -Eq "[^_]PROJECT_DIR|SPADES_AI_DIR|AGENT_MEMORY_DIR|require-cache|npm-cache-shared|allowlist|/workspace"' _ "$RCFG/compose.yaml"
 check "  ...created the research exchange root" test -d "$RD"
 refuses "init --profile research never overwrites" 'already exists' au init --profile research
 refuses "up research refuses the placeholder digest" 'not pinned to a real digest' au up research
-sed -i "s/REPLACE_WITH_DIGEST_FROM_digests.md/$H64/" "$RCFG/compose.yaml"
+sed -i "s/REPLACE_WITH_DIGEST/$H64/" "$RCFG/compose.yaml"
 RC="compose --env-file $RCFG/project.conf -f $RCFG/compose.yaml -f $RCFG/.generated/env-passthrough.yaml -f $RCFG/.generated/t3-connect.yaml -f $RCFG/.generated/research.yaml -f $RCFG/.generated/rstudio.yaml -f $RCFG/.generated/ftp.yaml -f $RCFG/.generated/hostname.yaml -f $RCFG/.generated/restart.yaml --project-directory $RCFG -p research"
 : > "$DLOG"; rm -f "$OPLOG"; TOK=""
 AMBIENT=(OP_SERVICE_ACCOUNT_TOKEN=owner-op-token GH_TOKEN=owner-gh-token)
@@ -1357,7 +1357,7 @@ printf '%s\n' "$BASEPS" | snap pb-agent-1 1; printf '%s\n' "$BASEPS" | snap pb-a
 refuses "busy pa pb: several names behave like --all" '== pa' au busy pa pb
 # A launcher clone fixture (a copy of agent-up with an ssh-form origin) and a startable project whose
 # PROJECT_DIR is a SEPARATE clone of the same GitHub repo (https form, other case): it goes last.
-LC="$T/lclone"; mkdir -p "$LC/bin" "$LC/images/base"; cp "$AU" "$LC/bin/agent-up"; cp -r "$ROOT/project-template" "$LC/"; cp -r "$ROOT/images/base/agent-clis" "$LC/images/base/"
+LC="$T/lclone"; mkdir -p "$LC/bin" "$LC/images/base"; cp "$AU" "$LC/bin/agent-up"; mkdir -p "$LC/scripts"; cp "$ROOT/scripts/registry-digest.sh" "$LC/scripts/"; cp -r "$ROOT/project-template" "$LC/"; cp -r "$ROOT/images/base/agent-clis" "$LC/images/base/"
 git -C "$LC" init -q; git -C "$LC" remote add origin git@github.com:allenlarocque/Agent-Containers.git
 SELFREPO="$T/selfrepo"; mkdir -p "$SELFREPO"; git -C "$SELFREPO" init -q; git -C "$SELFREPO" remote add origin https://github.com/AllenLarocque/agent-containers.git
 auc(){ ( cd "$LC" && env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/dstub:$T/bin:$PATH" "${AMBIENT[@]}" "$LC/bin/agent-up" "$@" ); }
@@ -1375,19 +1375,13 @@ check "project_names: ssh:// origin form matches too" \
   test "$(auc busy --all 2>&1 | grep '^==' | tr '\n' ' ')" = "== ab == ac == pa == pb == pc == research == aa "
 rm -f "$T/RUNNING.pc-agent-1"; AMBIENT=()
 
-# ---- update: agent-up update --all | <project>... (owner-run; moves projects to the digests in digests.md)
+# ---- update: agent-up update --all | <project>... (owner-run; moves projects to the digests ghcr.io's latest points to; a stub curl plays ghcr.io)
 UR="$T/upd-cfg"; mkdir -p "$UR"
 OLD1=$(printf '1%.0s' $(seq 64))
 GISD=$(printf 'c%.0s' $(seq 64)); BASED=$(printf 'b%.0s' $(seq 64))
-cat > "$T/digests.md" <<DIGESTS
-# Image digests
-
-| image | tag | digest |
-|---|---|---|
-| spades-base | 2026.10.17-x | \`sha256:$BASED\` |
-| spades-gis | 2026.10.17-x | \`sha256:$GISD\` |
-DIGESTS
-uenv(){ AMBIENT=(AGENT_UP_BUSY_SAMPLE=0 AGENT_CONTAINERS_CONFIG="$UR" AGENT_UP_DIGESTS="$T/digests.md" AGENT_UP_SKIP_GIT_CHECK=1); }
+cp "$ROOT/tests/launcher/stubs/curl" "$T/bin/curl"; export REG_TABLE="$T/reg-table" CURL_LOG="$T/curl.log"   # fake ghcr.io: "<image> <tag> <digest>"
+printf 'spades-base latest sha256:%s\nspades-gis latest sha256:%s\n' "$BASED" "$GISD" > "$REG_TABLE"
+uenv(){ AMBIENT=(AGENT_UP_BUSY_SAMPLE=0 AGENT_CONTAINERS_CONFIG="$UR" AGENT_UP_SKIP_GIT_CHECK=1); }
 ucfg(){ echo "$UR/$1/compose.yaml"; }
 uset(){ # $1 project, $2 image path, $3 digest hex: rewrite the compose image line
   sed -i -E "s|^( *image: *).*|\1$2@sha256:$3|" "$(ucfg "$1")"; }
@@ -1541,24 +1535,46 @@ check "update: CLIs still missing when the wait expires -> 'installing (check la
   bash -c '[ "$1" -eq 0 ] && grep -qF "Claude Code: installing (check later: agent-up status alpha)" <<<"$2" && grep -qF "Codex: installing (check later: agent-up status alpha)" <<<"$2" && ! grep -qF "MISSING" <<<"$2"' _ "$rc" "$uout"
 rm -f "$T/CLI_FAILS" "$T/cli.count"; uenv
 
-# an image not in digests.md
-ureset alpha; uset alpha ghcr.io/x/custom "$OLD1"; cp "$(ucfg alpha)" "$T/alpha.compose.before"
+# an image outside ghcr.io/allenlarocque/spades-*
+ureset alpha; uset alpha ghcr.io/x/custom "$OLD1"; cp "$(ucfg alpha)" "$T/alpha.compose.before"; : > "$CURL_LOG"
 uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
-check "update: image not in digests.md -> SKIP (image custom not in digests.md), non-zero, file unchanged" \
-  bash -c '[ "$1" -ne 0 ] && grep -qF "SKIP (image custom not in digests.md)" <<<"$2" && cmp -s "$3" "$4" && [ "$5" -eq 0 ]' _ "$rc" "$uout" "$(ucfg alpha)" "$T/alpha.compose.before" "$(uup alpha)"
+check "update: foreign image -> SKIP (image ghcr.io/x/custom is not ghcr.io/allenlarocque/spades-*), non-zero, file unchanged, no lookup" \
+  bash -c '[ "$1" -ne 0 ] && grep -qF "SKIP (image ghcr.io/x/custom is not ghcr.io/allenlarocque/spades-*" <<<"$2" && cmp -s "$3" "$4" && [ "$5" -eq 0 ] && [ ! -s "$6" ]' _ "$rc" "$uout" "$(ucfg alpha)" "$T/alpha.compose.before" "$(uup alpha)" "$CURL_LOG"
+ureset alpha; uset alpha ghcr.io/allenlarocque/other "$OLD1"
+uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: allenlarocque but not spades-* (ghcr.io/allenlarocque/other) -> SKIP, non-zero" bash -c '[ "$1" -ne 0 ] && grep -qF "is not ghcr.io/allenlarocque/spades-*" <<<"$2"' _ "$rc" "$uout"
+ureset alpha; uset alpha docker.io/allenlarocque/spades-gis "$OLD1"
+uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: another registry with a spades-gis name (docker.io/allenlarocque/spades-gis) -> SKIP, non-zero" bash -c '[ "$1" -ne 0 ] && grep -qF "is not ghcr.io/allenlarocque/spades-*" <<<"$2"' _ "$rc" "$uout"
+
+# registry lookup failure: that project SKIPs (rc 1), the others are still updated; each image is looked up once per run
+cp "$REG_TABLE" "$T/reg-table.good"
+ureset alpha beta research; uset research ghcr.io/allenlarocque/spades-base "$OLD1"; : > "$CURL_LOG"
+printf 'spades-base latest FAIL\nspades-gis latest sha256:%s\n' "$GISD" > "$REG_TABLE"
+uout="$(au update --all </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: base:latest unresolvable -> research SKIP (could not resolve spades-base:latest on ghcr.io: ...), exit non-zero" \
+  bash -c '[ "$1" -ne 0 ] && grep -qF "research: SKIP (could not resolve spades-base:latest on ghcr.io: " <<<"$2" && grep -q "sha256:$4" "$3"' _ "$rc" "$uout" "$(ucfg research)" "$OLD1"
+check "  ...the builders were still updated" bash -c 'grep -q "sha256:$2" "$1/alpha/compose.yaml" && grep -q "sha256:$2" "$1/beta/compose.yaml" && [ "$3" -eq 1 ] && [ "$4" -eq 1 ]' _ "$UR" "$GISD" "$(uup alpha)" "$(uup beta)"
+check "  ...research was not restarted; the WARNING names it" bash -c '[ "$(grep -cE "^ARGS: compose .* -p research up -d" "$1")" -eq 0 ] && tail -n 1 <<<"$2" | grep -qF "still on the old image: research"' _ "$DLOG" "$uout"
+check "  ...each image looked up once per run (gis for two projects, base for one)" bash -c '[ "$(grep -c "^spades-gis latest" "$1")" -eq 1 ] && [ "$(grep -c "^spades-base latest" "$1")" -eq 1 ]' _ "$CURL_LOG"
+cp "$T/reg-table.good" "$REG_TABLE"
+ureset alpha; REG_TOKEN_FAIL=1 uout="$(REG_TOKEN_FAIL=1 au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: ghcr.io token request fails -> SKIP, non-zero, compose untouched" bash -c '[ "$1" -ne 0 ] && grep -qF "SKIP (could not resolve spades-gis:latest on ghcr.io: " <<<"$2" && grep -q "sha256:$4" "$3"' _ "$rc" "$uout" "$(ucfg alpha)" "$OLD1"
+ureset alpha
+
 refuses "update: unknown project" 'no config for' au update nosuch
 refuses "update: no arguments prints usage" 'usage:' au update
 
 # the git guard: a clone not on main is refused (the test-only override is off)
-GC="$T/gitclone"; mkdir -p "$GC/bin" "$GC/project-template"; cp "$AU" "$GC/bin/agent-up"; git -C "$GC" init -q -b side; git -C "$GC" -c user.email=t@t -c user.name=t commit -q --allow-empty -m x
-refuses "update: refuses when the clone is not on main" "pull main in .* first: digests.md is not current" \
-  env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" PATH="$T/dstub:$T/bin:$PATH" AGENT_CONTAINERS_CONFIG="$UR" AGENT_UP_DIGESTS="$T/digests.md" "$GC/bin/agent-up" update --all
+GC="$T/gitclone"; mkdir -p "$GC/bin" "$GC/project-template"; cp "$AU" "$GC/bin/agent-up"; mkdir -p "$GC/scripts"; cp "$ROOT/scripts/registry-digest.sh" "$GC/scripts/"; git -C "$GC" init -q -b side; git -C "$GC" -c user.email=t@t -c user.name=t commit -q --allow-empty -m x
+refuses "update: refuses when the clone is not on main" "pull main in .* first: the launcher must match the published images" \
+  env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" PATH="$T/dstub:$T/bin:$PATH" AGENT_CONTAINERS_CONFIG="$UR" "$GC/bin/agent-up" update --all
 # the fetch never prompts for credentials (GIT_TERMINAL_PROMPT=0): a failing fetch takes the warning path
 git -C "$GC" branch -q -m side main
 REALGIT="$(command -v git)"; mkdir -p "$T/gitstub"
 printf '#!/bin/sh\ncase " $* " in *" fetch "*) echo "GTP=${GIT_TERMINAL_PROMPT-<unset>}" >> "%s"; exit 128 ;; esac\nexec "%s" "$@"\n' "$T/git.log" "$REALGIT" > "$T/gitstub/git"; chmod +x "$T/gitstub/git"
 uset alpha ghcr.io/allenlarocque/spades-gis "$GISD"; rm -f "$T/git.log"
-gout="$(env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/gitstub:$T/dstub:$T/bin:$PATH" AGENT_UP_BUSY_SAMPLE=0 AGENT_CONTAINERS_CONFIG="$UR" AGENT_UP_DIGESTS="$T/digests.md" "$GC/bin/agent-up" update alpha </dev/null 2>&1)" || true
+gout="$(env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/gitstub:$T/dstub:$T/bin:$PATH" AGENT_UP_BUSY_SAMPLE=0 AGENT_CONTAINERS_CONFIG="$UR" "$GC/bin/agent-up" update alpha </dev/null 2>&1)" || true
 check "update: git fetch runs with GIT_TERMINAL_PROMPT=0; its failure is a warning" \
   bash -c 'grep -qx "GTP=0" "$1" && grep -qF "WARNING: could not fetch origin main" <<<"$2"' _ "$T/git.log" "$gout"
 

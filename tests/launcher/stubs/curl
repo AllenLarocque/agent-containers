@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Stub curl for scripts/registry-digest.sh (tests copy it to a PATH dir). Fake ghcr.io: $REG_TABLE has lines "<image> <tag> <digest>"
+# (digest "FAIL" or a missing line = HTTP error, curl rc 22). Every manifest lookup is logged to $CURL_LOG as "<image> <tag>".
+url=""; auth=0
+for a in "$@"; do
+  case "$a" in https://*) url=$a ;; "Authorization: Bearer stubtoken") auth=1 ;; esac
+done
+case "$url" in
+  https://ghcr.io/token\?scope=repository:allenlarocque/*:pull)
+    [ -n "${REG_TOKEN_FAIL:-}" ] && exit 22
+    printf '{"token":"stubtoken","access_token":"stubtoken","expires_in":300}\n' ;;
+  https://ghcr.io/v2/allenlarocque/*/manifests/*)
+    [ "$auth" = 1 ] || exit 22
+    rest=${url#https://ghcr.io/v2/allenlarocque/}; img=${rest%%/*}; tag=${rest##*/manifests/}
+    [ -z "${CURL_LOG:-}" ] || echo "$img $tag" >> "$CURL_LOG"
+    d=$(awk -v i="$img" -v t="$tag" '$1==i && $2==t {print $3; exit}' "${REG_TABLE:-/dev/null}")
+    { [ -n "$d" ] && [ "$d" != FAIL ]; } || exit 22
+    printf 'HTTP/2 200 \r\ncontent-type: application/vnd.oci.image.index.v1+json\r\ndocker-content-digest: %s\r\n\r\n' "$d" ;;
+  *) echo "stub curl: unexpected URL '$url'" >&2; exit 6 ;;
+esac

@@ -114,7 +114,7 @@ echo "AU${OP_SERVICE_ACCOUNT_TOKEN:+(tok)}: $*" >> "$AULOG"
 if [ "$1" = init ]; then
   p="$(basename "$2" | tr 'A-Z' 'a-z')"
   mkdir -p "$AGENT_CONTAINERS_CONFIG/$p" "$2/.github/workflows"
-  printf 'image: ghcr.io/x/spades-gis@sha256:REPLACE_WITH_DIGEST_FROM_digests.md\n' > "$AGENT_CONTAINERS_CONFIG/$p/compose.yaml"
+  printf 'image: ghcr.io/x/spades-gis@sha256:REPLACE_WITH_DIGEST\n' > "$AGENT_CONTAINERS_CONFIG/$p/compose.yaml"
   printf 'PROJECT=%s\nT3_PORT=3778\nT3_CONNECT=0\nRESEARCH=0\n' "$p" > "$AGENT_CONTAINERS_CONFIG/$p/project.conf"
   printf '* @OWNER\n' > "$2/.github/CODEOWNERS"
   touch "$2/.github/workflows/gitleaks.yml" "$2/.gitignore"
@@ -132,7 +132,10 @@ esac
 STUB
 chmod +x "$T/bin/tailscale.exe"
 mkdir -p "$T/repo-root"
-printf '| image | tag | digest |\n|---|---|---|\n| spades-gis | 2026.10.12 | `sha256:aaa111` |\n| spades-bio | 2026.10.12 | `sha256:bbb222` |\n' > "$T/repo-root/digests.md"
+# fake ghcr.io for scripts/registry-digest.sh (real script, stub curl): latest digests for gis and bio
+GA=$(printf 'a%.0s' $(seq 64)); GB=$(printf 'b%.0s' $(seq 64))
+cp "$ROOT/tests/launcher/stubs/curl" "$T/bin/curl"; export REG_TABLE="$T/reg-table"
+printf 'spades-gis latest sha256:%s\nspades-bio latest sha256:%s\n' "$GA" "$GB" > "$REG_TABLE"
 run(){ HOME="$H" AGENT_CONTAINERS_CONFIG="$CFGROOT" PATH="$T/bin:$PATH" "$AN" "$@"; }
 
 echo "== task 1: CLI and preflight =="
@@ -299,13 +302,12 @@ unset TMPDIR
 
 echo "== task 5: project steps 1-6 =="
 newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
-export AGENT_NEW_DIGESTS="$T/repo-root/digests.md"
 export AGENT_NEW_STOP_AFTER=token
 PROJHOME="$H/GitHub"; mkdir -p "$PROJHOME"
 check "fresh project run (stops after token)" run project NewProj --token-from agent-old < /dev/null
 check "  repo created"            grep -q '^GH: repo create allen/NewProj --private --clone' "$GHLOG"
 check "  agent-up init called"    grep -q '^AU: init' "$AULOG"
-check "  digest injected"         grep -q 'sha256:aaa111' "$CFGROOT/newproj/compose.yaml"
+check "  digest injected"         grep -q "sha256:$GA" "$CFGROOT/newproj/compose.yaml"
 check "  RESEARCH=1 single line"  test "$(grep -c '^RESEARCH=' "$CFGROOT/newproj/project.conf")" = 1
 check "  RESEARCH value 1"        grep -qx 'RESEARCH=1' "$CFGROOT/newproj/project.conf"
 check "  T3_CONNECT=publish"      grep -qx 'T3_CONNECT=publish' "$CFGROOT/newproj/project.conf"
@@ -523,9 +525,25 @@ export AGENT_NEW_STOP_AFTER=token
 mkdir -p "$CFGROOT/fbproj"; printf 'PROJECT=fbproj\nT3_PORT=3779\n' > "$CFGROOT/fbproj/project.conf"
 printf '# maintainer: me@example.com\nimage: ghcr.io/x/spades-gis@REPLACE_WITH_DIGEST\n' > "$CFGROOT/fbproj/compose.yaml"
 run project FbProj --token-from agent-old < /dev/null >/dev/null 2>&1
-check "digest fallback rewrites the image line"      grep -qx 'image: ghcr.io/x/spades-gis@sha256:aaa111' "$CFGROOT/fbproj/compose.yaml"
+check "digest fallback rewrites the image line"      grep -qx "image: ghcr.io/x/spades-gis@sha256:$GA" "$CFGROOT/fbproj/compose.yaml"
 check "  leaves an unrelated @ line untouched"       grep -qx '# maintainer: me@example.com' "$CFGROOT/fbproj/compose.yaml"
 unset AGENT_NEW_STOP_AFTER
 rm -rf "$PROJHOME/FbProj" "$CFGROOT/fbproj"
+
+echo "== digest lookup: old placeholder still accepted; registry failure stops the run =="
+newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
+export AGENT_NEW_STOP_AFTER=token
+mkdir -p "$CFGROOT/oldph"; printf 'PROJECT=oldph\nT3_PORT=3780\nIMAGE=bio\n' > "$CFGROOT/oldph/project.conf"
+printf 'image: ghcr.io/allenlarocque/spades-bio@sha256:REPLACE_WITH_DIGEST_FROM_digests.md\n' > "$CFGROOT/oldph/compose.yaml"
+run project OldPh --token-from agent-old < /dev/null >/dev/null 2>&1
+check "old placeholder name pinned to the registry's latest (bio)" grep -qx "image: ghcr.io/allenlarocque/spades-bio@sha256:$GB" "$CFGROOT/oldph/compose.yaml"
+rm -rf "$PROJHOME/OldPh" "$CFGROOT/oldph"
+newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
+mkdir -p "$CFGROOT/nolatest"; printf 'PROJECT=nolatest\nT3_PORT=3781\nIMAGE=research\n' > "$CFGROOT/nolatest/project.conf"
+printf 'image: ghcr.io/allenlarocque/spades-research@sha256:REPLACE_WITH_DIGEST\n' > "$CFGROOT/nolatest/compose.yaml"
+refuses "registry lookup failure -> die, compose untouched" 'could not resolve spades-research:latest on ghcr.io' run project NoLatest --token-from agent-old < /dev/null
+check "  placeholder still in compose.yaml" grep -q 'REPLACE_WITH_DIGEST' "$CFGROOT/nolatest/compose.yaml"
+unset AGENT_NEW_STOP_AFTER
+rm -rf "$PROJHOME/NoLatest" "$CFGROOT/nolatest"
 
 [ "$fail" -eq 0 ] && echo "AGENT-NEW: ALL PASSED" || { echo "AGENT-NEW: FAILURES"; exit 1; }
