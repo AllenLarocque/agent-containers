@@ -647,6 +647,11 @@ rocker), P3M binary R packages, or conda tools.
   `bypassPermissions`), `check_for_update_on_startup = false` and `[analytics] enabled = false`.
   Your other keys are kept. `chatgpt.com` and `openai.com` are in the base allowlist (login, model
   backend); analytics would go to chatgpt.com too, so the config switch is what turns it off.
+- **T3's Codex setup**: at every start `agent-init` sets T3's Codex provider back to setup
+  `"existing"` (in `~/.t3/userdata/settings.json`): T3 runs the pinned `codex` with the
+  `~/.codex` login. A "managed" setup (one click in T3's provider settings) would download T3's own,
+  unpinned Codex and need a separate sign-in inside T3. Until then T3 says "Sign in with ChatGPT to
+  use managed Codex." while `codex` in a shell works. Fixed at the next start: `docker restart <container>`.
 - **`mem_limit`**: stated explicitly. Memory gates inside the container must read
   `/sys/fs/cgroup/memory.max`, not `/proc/meminfo`.
 - **Reserved for Phase 2 (T3 Code):** the commented `t3` volume and `127.0.0.1:3773` port.

@@ -27,8 +27,11 @@ inst claude-hud@claude-hud
 inst message-timestamps@zoharbabin-claude-tools
 
 # 2. Settings. Claude: statusLine, no hooks. Codex: no analytics, no update check, the container is the sandbox.
+#    Runs before the entrypoint's `agent-t3 start`, so T3 reads the corrected settings.
 node /usr/local/lib/agent/configure-claude-settings.js "$(command -v node)" || log "WARN settings not written"
 node /usr/local/lib/agent/configure-codex-config.js || log "WARN codex config not written"
+# T3: Codex setup "existing" (the pinned codex + ~/.codex login), never T3's own unpinned "managed" one.
+node /usr/local/lib/agent/configure-t3-settings.js || log "WARN T3 settings not written"
 
 # 3. GitHub: gh reads GH_TOKEN (tier A, scoped agent token) directly; make git use gh.
 if [ -n "${GH_TOKEN:-}" ]; then
