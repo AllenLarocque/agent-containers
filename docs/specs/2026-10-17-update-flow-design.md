@@ -191,3 +191,16 @@ update" fix: the wait must cover a first start after an image update.
 - How the agent updates the CLI lockfiles (e.g. `npm install --package-lock-only` at the eligible
   version).
 - Exact flag names and output wording of `agent-up update`.
+
+## Amendment 2026-11-01: `agent-up update` pulls main and checks for an open digests PR
+
+The digests PR stays: merging it is still the human gate. Two frictions are removed.
+- `agent-up update` no longer needs a manual `git pull`. The clone must still be on `main` (it never
+  switches branches). If it is behind origin/main, has no tracked changes and fast-forwards, update
+  pulls it and re-execs the new launcher once (`AGENT_UP_PULLED=1` prevents a loop), so the rest of
+  the run uses the new code and digests.md. A dirty or diverged `main` dies with what to do.
+- Before touching any project, update asks GitHub (anonymous API, 15 s timeout) for open PRs whose
+  head starts with `chore/digests-`. If one is open it names it and asks `[q]uit / [c]ontinue`
+  (default quit), so the owner does not silently get the older images. A failed lookup only warns.
+  `AGENT_UP_SKIP_GIT_CHECK=1` skips both the pull and this check; `AGENT_UP_PULLS_URL` points the
+  lookup elsewhere (tests).

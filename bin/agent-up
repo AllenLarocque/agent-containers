@@ -23,7 +23,7 @@ usage:
   agent-up rstudio <project>             print the RStudio Server address, user and password (RSTUDIO=1)
   agent-up status|stop|down <project>
   agent-up busy --all | <project>...     is R work or an agent running? (exit 1 = busy)
-  agent-up update --all | <project>...   move projects to the digests in digests.md (asks before restarting a busy one)
+  agent-up update --all | <project>...   pull main, then move projects to the digests in digests.md (asks before restarting a busy one)
 USAGE
   exit 2
 }
@@ -986,16 +986,41 @@ update_versions(){ # $1 project: "t3 <v>; <CLI>: <v>; ..." once the CLIs are ins
   lines="$(sed "s/: MISSING or container not running.*/: installing (check later: agent-up status $1)/" <<<"$lines")"
   printf 't3 %s; %s' "$(docker exec -u agent "$c" t3 --version 2>/dev/null </dev/null || echo '?')" "$(paste -sd';' - <<<"$lines" | sed 's/;/; /g')"
 }
-update_guard(){ # the digests.md in this clone must be current: on main, not behind origin/main
-  local clone="$HERE/.."
+update_guard(){ # $@ = update's own args. digests.md in this clone must be current: must be on main (never switched); behind origin/main
+  # -> fast-forward it (clean tracked tree only), then re-exec the NEW launcher once (AGENT_UP_PULLED=1 stops any loop)
+  local clone old new; clone="$(cd "$HERE/.." && pwd)"
   [ "${AGENT_UP_SKIP_GIT_CHECK:-}" != 1 ] || return 0
   git -C "$clone" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
-  [ "$(git -C "$clone" rev-parse --abbrev-ref HEAD 2>/dev/null)" = main ] || die "pull main in $clone first: digests.md is not current"
+  [ "$(git -C "$clone" rev-parse --abbrev-ref HEAD 2>/dev/null)" = main ] || die "$clone is not on main: digests.md is not current; switch it with: git -C $clone switch main"
   if GIT_TERMINAL_PROMPT=0 git -C "$clone" fetch -q origin main </dev/null 2>/dev/null; then   # a credential problem warns, never prompts
-    [ "$(git -C "$clone" rev-list --count HEAD..FETCH_HEAD 2>/dev/null || echo 0)" -eq 0 ] || die "pull main in $clone first: digests.md is not current"
+    [ "$(git -C "$clone" rev-list --count HEAD..FETCH_HEAD 2>/dev/null || echo 0)" -gt 0 ] || return 0
+    [ "${AGENT_UP_PULLED:-}" != 1 ] || die "main in $clone is still behind origin/main after pulling: run agent-up update again"
+    [ -z "$(git -C "$clone" status --porcelain --untracked-files=no 2>/dev/null)" ] || die "main in $clone is behind origin/main and has uncommitted changes: commit or stash them, then run: git -C $clone pull --ff-only"
+    git -C "$clone" merge-base --is-ancestor HEAD FETCH_HEAD 2>/dev/null || die "main in $clone has diverged from origin/main: resolve it by hand (git -C $clone status)"
+    old="$(git -C "$clone" rev-parse --short=7 HEAD)"
+    git -C "$clone" merge -q --ff-only FETCH_HEAD </dev/null >/dev/null 2>&1 || die "could not fast-forward main in $clone: run: git -C $clone pull --ff-only"
+    new="$(git -C "$clone" rev-parse --short=7 HEAD)"
+    echo "agent-up: pulled main ($old..$new)"
+    AGENT_UP_PULLED=1 exec "$clone/bin/agent-up" update "$@"
   else
     echo "agent-up: WARNING: could not fetch origin main; digests.md may not be current" >&2
   fi
+}
+update_pending_pr(){ # an open digests PR (head chore/digests-*) means digests.md is about to change: ask before using the old one.
+  # Anonymous GitHub API (AGENT_UP_PULLS_URL overrides, for tests); skipped with AGENT_UP_SKIP_GIT_CHECK=1; a failed lookup only warns.
+  [ "${AGENT_UP_SKIP_GIT_CHECK:-}" != 1 ] || return 0
+  local url="${AGENT_UP_PULLS_URL:-https://api.github.com/repos/AllenLarocque/agent-containers/pulls?state=open&per_page=100}" json prs ans=""
+  if ! json="$(curl -fsS --max-time 15 "$url" </dev/null 2>/dev/null)"; then
+    echo "agent-up: WARNING: could not check GitHub for an open digests PR" >&2; return 0
+  fi
+  # one "key": "value" per line, then pair each PR's own html_url (…/pull/N) with the head ref that follows it
+  prs="$(grep -oE '"(html_url|ref)": *"[^"]*"' <<<"$json" | awk -F'"' '$2=="html_url" && $4 ~ /\/pull\/[0-9]+$/ {u=$4} $2=="ref" && $4 ~ /^chore\/digests-/ && u!="" {print u; u=""}')" || true
+  [ -n "$prs" ] || return 0
+  while IFS= read -r url; do echo "agent-up: a digests PR is waiting: $url"; done <<<"$prs"
+  echo "Merge it first, or the projects get the older images in digests.md."
+  printf '[q]uit / [c]ontinue with the current digests.md (default q): '
+  read -r ans || ans=""
+  case "$ans" in c|C) ;; *) echo; exit 1 ;; esac
 }
 cmd_update(){
   [ $# -ge 1 ] || usage
@@ -1010,7 +1035,8 @@ cmd_update(){
     for n in "${all[@]}"; do [[ $wanted == *" $n "* ]] && names+=("$n"); done   # project_names order: the clone's own project last
   fi
   [ -f "$digests" ] || die "no digests.md at $digests"
-  update_guard
+  update_guard "$@"
+  update_pending_pr
   unset OP_SERVICE_ACCOUNT_TOKEN   # `op read` uses the owner's own session, never a project's token
   local rc=0 res ver rep quit=0 cdig c img name_img old new tok oldp newp ans bs cur pairs=() unknowns=()
   local rows=()

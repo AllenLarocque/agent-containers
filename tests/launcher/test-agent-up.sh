@@ -1551,7 +1551,7 @@ refuses "update: no arguments prints usage" 'usage:' au update
 
 # the git guard: a clone not on main is refused (the test-only override is off)
 GC="$T/gitclone"; mkdir -p "$GC/bin" "$GC/project-template"; cp "$AU" "$GC/bin/agent-up"; git -C "$GC" init -q -b side; git -C "$GC" -c user.email=t@t -c user.name=t commit -q --allow-empty -m x
-refuses "update: refuses when the clone is not on main" "pull main in .* first: digests.md is not current" \
+refuses "update: refuses when the clone is not on main" "is not on main: digests.md is not current" \
   env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" PATH="$T/dstub:$T/bin:$PATH" AGENT_CONTAINERS_CONFIG="$UR" AGENT_UP_DIGESTS="$T/digests.md" "$GC/bin/agent-up" update --all
 # the fetch never prompts for credentials (GIT_TERMINAL_PROMPT=0): a failing fetch takes the warning path
 git -C "$GC" branch -q -m side main
@@ -1561,6 +1561,80 @@ uset alpha ghcr.io/allenlarocque/spades-gis "$GISD"; rm -f "$T/git.log"
 gout="$(env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/gitstub:$T/dstub:$T/bin:$PATH" AGENT_UP_BUSY_SAMPLE=0 AGENT_CONTAINERS_CONFIG="$UR" AGENT_UP_DIGESTS="$T/digests.md" "$GC/bin/agent-up" update alpha </dev/null 2>&1)" || true
 check "update: git fetch runs with GIT_TERMINAL_PROMPT=0; its failure is a warning" \
   bash -c 'grep -qx "GTP=0" "$1" && grep -qF "WARNING: could not fetch origin main" <<<"$2"' _ "$T/git.log" "$gout"
+
+# update_guard pull + re-exec, and the pending digests PR check (a file:// URL stands in for the GitHub API)
+prjson(){ # $1 file, rest = head refs: a minimal pretty-printed pulls list (own html_url first, nested user/repo urls after)
+  local f="$1" i=0 r; shift; { echo '['; for r in "$@"; do i=$((i+1)); [ "$i" -eq 1 ] || echo ','; cat <<PR
+  {
+    "html_url": "https://github.com/AllenLarocque/agent-containers/pull/$((70+i))",
+    "title": "x \"ref\": \"chore/digests-fake\"",
+    "user": { "login": "a", "html_url": "https://github.com/a" },
+    "head": { "label": "AllenLarocque:$r", "ref": "$r", "repo": { "html_url": "https://github.com/AllenLarocque/agent-containers" } },
+    "base": { "ref": "main" }
+  }
+PR
+  done; echo ']'; } > "$f"; }
+OR="$T/origin.git"; GP="$T/pullclone"; GW="$T/pullwork"
+git init -q --bare -b main "$OR"; git clone -q "$OR" "$GW" 2>/dev/null
+mkdir -p "$GW/bin" "$GW/project-template"; cp "$AU" "$GW/bin/agent-up"; cp "$T/digests.md" "$GW/digests.md"
+gw(){ git -C "$GW" -c user.email=t@t -c user.name=t "$@"; }
+gw add -A; gw commit -q -m base; gw push -q origin HEAD:main
+git clone -q "$OR" "$GP" 2>/dev/null
+# upstream moves on: a new digests.md (gis -> OLD1, a digest the projects do not have) and a launcher that announces itself
+sed -i "s/$GISD/$OLD1/" "$GW/digests.md"; sed -i '0,/^HERE=/s//echo NEWLAUNCHER >\&2\nHERE=/' "$GW/bin/agent-up"
+gw commit -q -am "digests moved"; gw push -q origin HEAD:main
+echo '[]' > "$T/pulls0.json"; prjson "$T/pulls1.json" chore/digests-2026.11.01-x; prjson "$T/pulls2.json" feat/other chore/digests-2026.11.01-y; prjson "$T/pulls3.json" feat/other docs/x
+pup(){ # $1 clone, $2 pulls URL, rest = update args; stdin = the prompt answer
+  local c="$1" u="$2"; shift 2
+  env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/dstub:$T/bin:$PATH" AGENT_UP_BUSY_SAMPLE=0 AGENT_UP_PAIR_WAIT=1 AGENT_CONTAINERS_CONFIG="$UR" AGENT_UP_PULLS_URL="$u" "$c/bin/agent-up" update "$@" 2>&1; }
+export AGENT_UP_PULLS_URL="file://$T/pulls0.json"   # the earlier guard tests never reach the real API
+ureset alpha; uset alpha ghcr.io/allenlarocque/spades-gis "$GISD"; : > "$DLOG"
+# dirty tracked file: nothing pulled
+echo dirt >> "$GP/digests.md"; before="$(git -C "$GP" rev-parse HEAD)"
+pout="$(pup "$GP" "file://$T/pulls0.json" alpha </dev/null)" && rc=0 || rc=$?
+check "update: behind main + uncommitted tracked changes -> dies explaining, nothing pulled, no compose change" \
+  bash -c '[ "$1" -ne 0 ] && grep -qF "uncommitted changes" <<<"$2" && [ "$(git -C "$3" rev-parse HEAD)" = "$4" ] && ! grep -qF "pulled main" <<<"$2" && [ "$5" -eq 0 ]' _ "$rc" "$pout" "$GP" "$before" "$(uup alpha)"
+git -C "$GP" checkout -q digests.md
+# not on main: dies, never switches
+git -C "$GP" switch -q -c side2
+pout="$(pup "$GP" "file://$T/pulls0.json" alpha </dev/null)" && rc=0 || rc=$?
+check "update: not on main -> dies with a switch hint, branch unchanged" \
+  bash -c '[ "$1" -ne 0 ] && grep -qF "is not on main" <<<"$2" && [ "$(git -C "$3" rev-parse --abbrev-ref HEAD)" = side2 ]' _ "$rc" "$pout" "$GP"
+git -C "$GP" switch -q main
+# diverged: dies
+git -C "$GP" -c user.email=t@t -c user.name=t commit -q --allow-empty -m local; before="$(git -C "$GP" rev-parse HEAD)"
+pout="$(pup "$GP" "file://$T/pulls0.json" alpha </dev/null)" && rc=0 || rc=$?
+check "update: main diverged from origin -> dies, nothing pulled" \
+  bash -c '[ "$1" -ne 0 ] && grep -qF "diverged" <<<"$2" && [ "$(git -C "$3" rev-parse HEAD)" = "$4" ]' _ "$rc" "$pout" "$GP" "$before"
+git -C "$GP" reset -q --hard HEAD~1
+# behind + clean (an untracked file is fine): pulls, re-execs the new launcher once, applies the new digests.md
+echo junk > "$GP/untracked.txt"
+pout="$(pup "$GP" "file://$T/pulls0.json" alpha </dev/null)" && rc=0 || rc=$?
+check "update: behind main + clean -> pulls, re-execs the NEW launcher (pulls only once), uses the new digests.md" \
+  bash -c '[ "$1" -eq 0 ] && grep -Eq "agent-up: pulled main \([0-9a-f]{7}\.\.[0-9a-f]{7}\)" <<<"$2" && grep -q NEWLAUNCHER <<<"$2" && [ "$(grep -c "pulled main" <<<"$2")" -eq 1 ] && grep -q "sha256:$3" "$4" && [ "$(git -C "$5" rev-parse HEAD)" = "$(git -C "$6" rev-parse HEAD)" ]' _ "$rc" "$pout" "$OLD1" "$(ucfg alpha)" "$GP" "$GW"
+# open digests PR: default and q exit 1 without touching a project; c continues; others are ignored
+ureset alpha; uset alpha ghcr.io/allenlarocque/spades-gis "$GISD"; cp "$(ucfg alpha)" "$T/alpha.compose.before"; : > "$DLOG"
+pout="$(pup "$GP" "file://$T/pulls1.json" alpha </dev/null)" && rc=0 || rc=$?
+check "update: open digests PR, default answer -> lists it, exits 1, project untouched" \
+  bash -c '[ "$1" -eq 1 ] && grep -qF "agent-up: a digests PR is waiting: https://github.com/AllenLarocque/agent-containers/pull/71" <<<"$2" && grep -qF "Merge it first, or the projects get the older images in digests.md." <<<"$2" && grep -qF "(default q)" <<<"$2" && cmp -s "$3" "$4" && [ "$5" -eq 0 ]' _ "$rc" "$pout" "$(ucfg alpha)" "$T/alpha.compose.before" "$(uup alpha)"
+pout="$(pup "$GP" "file://$T/pulls2.json" alpha <<<q)" && rc=0 || rc=$?
+check "update: open digests PR, q -> exits 1, project untouched; only the chore/digests-* PR is listed" \
+  bash -c '[ "$1" -eq 1 ] && grep -qF "pull/72" <<<"$2" && ! grep -qF "pull/71" <<<"$2" && cmp -s "$3" "$4" && [ "$5" -eq 0 ]' _ "$rc" "$pout" "$(ucfg alpha)" "$T/alpha.compose.before" "$(uup alpha)"
+pout="$(pup "$GP" "file://$T/pulls1.json" alpha <<<c)" && rc=0 || rc=$?
+check "update: open digests PR, c -> continues with the current digests.md" \
+  bash -c '[ "$1" -eq 0 ] && grep -qF "digests PR is waiting" <<<"$2" && ! cmp -s "$3" "$4"' _ "$rc" "$pout" "$(ucfg alpha)" "$T/alpha.compose.before"
+ureset alpha; uset alpha ghcr.io/allenlarocque/spades-gis "$GISD"
+pout="$(pup "$GP" "file://$T/pulls3.json" alpha </dev/null)" && rc=0 || rc=$?
+check "update: open PRs that are not digests PRs are ignored (no prompt)" \
+  bash -c '[ "$1" -eq 0 ] && ! grep -qF "digests PR" <<<"$2"' _ "$rc" "$pout"
+ureset alpha; uset alpha ghcr.io/allenlarocque/spades-gis "$GISD"
+pout="$(pup "$GP" "file://$T/no-such-pulls.json" alpha </dev/null)" && rc=0 || rc=$?
+check "update: API failure -> one warning line, continues" \
+  bash -c '[ "$1" -eq 0 ] && [ "$(grep -c "could not check GitHub for an open digests PR" <<<"$2")" -eq 1 ]' _ "$rc" "$pout"
+check "update: AGENT_UP_SKIP_GIT_CHECK=1 skips the digests PR check too" \
+  bash -c 'out="$("$@" 2>&1 </dev/null)"; ! grep -qF "digests PR" <<<"$out"' _ \
+  env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/dstub:$T/bin:$PATH" AGENT_UP_BUSY_SAMPLE=0 AGENT_CONTAINERS_CONFIG="$UR" AGENT_UP_SKIP_GIT_CHECK=1 AGENT_UP_PULLS_URL="file://$T/pulls1.json" "$GP/bin/agent-up" update alpha
+uenv
 
 # pair: the default wait is 180 s (the first start after an image update installs the CLIs)
 AMBIENT=(); mkdir -p "$T/fastsleep"; printf '#!/bin/sh\nexit 0\n' > "$T/fastsleep/sleep"; chmod +x "$T/fastsleep/sleep"

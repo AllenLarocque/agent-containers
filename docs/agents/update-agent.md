@@ -370,8 +370,8 @@ this repo). Exactly these five parts, in this order:
 - Restart: yes (always; the images are rebuilt, so pending OS patches come too)
 - Re-add environments: <yes | no | unsure> — <one-line evidence, e.g. the protocol constant at both tags>
 - New app needed: <yes | no>
-- Steps: merge this PR; merge the digests PR the `publish` workflow then opens; `git pull` on the
-  host; run `bin/agent-up update --all` (it checks for busy R work first and prints pairing codes
+- Steps: merge this PR; merge the digests PR the `publish` workflow then opens; run
+  `bin/agent-up update --all` (it pulls `main` itself, warns if a digests PR is still open, checks for busy R work first and prints pairing codes
   only where the T3 protocol changed); re-add environments only if it tells you to; then update the
   T3 phone and desktop apps (not before). On your first `agent-up update` (containers started
   before the `T3_PROTOCOL` marker existed), it cannot compare protocols and prints a pairing code
@@ -405,7 +405,7 @@ for you". The body ends with the `🤖 Generated with` line exactly as shown.
 **Issue body (route D):** the same five parts and ending, with these differences:
 - OS issue, "What it means for you": restart: yes; re-add environments: no; new app needed: no;
   steps: on GitHub, Actions → publish → Run workflow on `main`; merge the digests PR it opens;
-  `git pull` on the host; `bin/agent-up update --all`; no app update needed. "What's new": "No
+  `bin/agent-up update --all` (it pulls `main` itself and warns if a digests PR is still open); no app update needed. "What's new": "No
   version changes; the rebuild picks up the patched OS packages." (You never run the workflow
   yourself.)
 - T3 verification issue, "What it means for you": restart: no; re-add environments: no; new app
