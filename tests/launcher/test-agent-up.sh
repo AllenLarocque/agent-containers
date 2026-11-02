@@ -1549,6 +1549,7 @@ check "update: image not in digests.md -> SKIP (image custom not in digests.md),
 refuses "update: unknown project" 'no config for' au update nosuch
 refuses "update: no arguments prints usage" 'usage:' au update
 
+echo '[]' > "$T/pulls0.json"; export AGENT_UP_PULLS_URL="file://$T/pulls0.json"   # no guard test below ever reaches the real GitHub API
 # the git guard: a clone not on main is refused (the test-only override is off)
 GC="$T/gitclone"; mkdir -p "$GC/bin" "$GC/project-template"; cp "$AU" "$GC/bin/agent-up"; git -C "$GC" init -q -b side; git -C "$GC" -c user.email=t@t -c user.name=t commit -q --allow-empty -m x
 refuses "update: refuses when the clone is not on main" "is not on main: digests.md is not current" \
@@ -1558,9 +1559,9 @@ git -C "$GC" branch -q -m side main
 REALGIT="$(command -v git)"; mkdir -p "$T/gitstub"
 printf '#!/bin/sh\ncase " $* " in *" fetch "*) echo "GTP=${GIT_TERMINAL_PROMPT-<unset>}" >> "%s"; exit 128 ;; esac\nexec "%s" "$@"\n' "$T/git.log" "$REALGIT" > "$T/gitstub/git"; chmod +x "$T/gitstub/git"
 uset alpha ghcr.io/allenlarocque/spades-gis "$GISD"; rm -f "$T/git.log"
-gout="$(env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/gitstub:$T/dstub:$T/bin:$PATH" AGENT_UP_BUSY_SAMPLE=0 AGENT_CONTAINERS_CONFIG="$UR" AGENT_UP_DIGESTS="$T/digests.md" "$GC/bin/agent-up" update alpha </dev/null 2>&1)" || true
-check "update: git fetch runs with GIT_TERMINAL_PROMPT=0; its failure is a warning" \
-  bash -c 'grep -qx "GTP=0" "$1" && grep -qF "WARNING: could not fetch origin main" <<<"$2"' _ "$T/git.log" "$gout"
+gout="$(env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/gitstub:$T/dstub:$T/bin:$PATH" AGENT_UP_BUSY_SAMPLE=0 AGENT_CONTAINERS_CONFIG="$UR" AGENT_UP_DIGESTS="$T/digests.md" "$GC/bin/agent-up" update alpha </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: git fetch runs with GIT_TERMINAL_PROMPT=0; its failure is a warning and the update goes on" \
+  bash -c 'grep -qx "GTP=0" "$1" && grep -qF "WARNING: could not fetch origin main" <<<"$2" && grep -qF "agent-up: alpha: " <<<"$2"' _ "$T/git.log" "$gout"
 
 # update_guard pull + re-exec, and the pending digests PR check (a file:// URL stands in for the GitHub API)
 prjson(){ # $1 file, rest = head refs: a minimal pretty-printed pulls list (own html_url first, nested user/repo urls after)
@@ -1583,11 +1584,10 @@ git clone -q "$OR" "$GP" 2>/dev/null
 # upstream moves on: a new digests.md (gis -> OLD1, a digest the projects do not have) and a launcher that announces itself
 sed -i "s/$GISD/$OLD1/" "$GW/digests.md"; sed -i '0,/^HERE=/s//echo NEWLAUNCHER >\&2\nHERE=/' "$GW/bin/agent-up"
 gw commit -q -am "digests moved"; gw push -q origin HEAD:main
-echo '[]' > "$T/pulls0.json"; prjson "$T/pulls1.json" chore/digests-2026.11.01-x; prjson "$T/pulls2.json" feat/other chore/digests-2026.11.01-y; prjson "$T/pulls3.json" feat/other docs/x
+prjson "$T/pulls1.json" chore/digests-2026.11.01-x; prjson "$T/pulls2.json" feat/other chore/digests-2026.11.01-y; prjson "$T/pulls3.json" feat/other docs/x
 pup(){ # $1 clone, $2 pulls URL, rest = update args; stdin = the prompt answer
   local c="$1" u="$2"; shift 2
   env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/dstub:$T/bin:$PATH" AGENT_UP_BUSY_SAMPLE=0 AGENT_UP_PAIR_WAIT=1 AGENT_CONTAINERS_CONFIG="$UR" AGENT_UP_PULLS_URL="$u" "$c/bin/agent-up" update "$@" 2>&1; }
-export AGENT_UP_PULLS_URL="file://$T/pulls0.json"   # the earlier guard tests never reach the real API
 ureset alpha; uset alpha ghcr.io/allenlarocque/spades-gis "$GISD"; : > "$DLOG"
 # dirty tracked file: nothing pulled
 echo dirt >> "$GP/digests.md"; before="$(git -C "$GP" rev-parse HEAD)"
@@ -1628,6 +1628,25 @@ pout="$(pup "$GP" "file://$T/pulls3.json" alpha </dev/null)" && rc=0 || rc=$?
 check "update: open PRs that are not digests PRs are ignored (no prompt)" \
   bash -c '[ "$1" -eq 0 ] && ! grep -qF "digests PR" <<<"$2"' _ "$rc" "$pout"
 ureset alpha; uset alpha ghcr.io/allenlarocque/spades-gis "$GISD"
+# a fork's chore/digests-* PR, and an own PR INTO a chore/digests-* base: neither counts
+cat > "$T/pulls4.json" <<'J'
+[{"html_url":"https://github.com/AllenLarocque/agent-containers/pull/90","head":{"label":"evil:chore/digests-x","ref":"chore/digests-x"},"base":{"label":"AllenLarocque:main","ref":"main"}},
+ {"html_url":"https://github.com/AllenLarocque/agent-containers/pull/91","head":{"label":"AllenLarocque:docs/fix","ref":"docs/fix"},"base":{"label":"AllenLarocque:chore/digests-stale","ref":"chore/digests-stale"}}]
+J
+pout="$(pup "$GP" "file://$T/pulls4.json" alpha </dev/null)" && rc=0 || rc=$?
+check "update: a fork's chore/digests-* PR and a PR into a chore/digests-* base -> no prompt" bash -c '! grep -qF "digests PR is waiting" <<<"$1" && grep -qF "agent-up: alpha: " <<<"$1"' _ "$pout"
+# not a pulls list (e.g. a redirect or error body): a warning, the update goes on
+echo '{"message":"Moved Permanently","url":"https://api.github.com/repositories/1/pulls"}' > "$T/pulls5.json"
+pout="$(pup "$GP" "file://$T/pulls5.json" alpha </dev/null)" && rc=0 || rc=$?
+check "update: a non-list API body -> warning, update goes on" bash -c 'grep -qF "could not check GitHub for an open digests PR" <<<"$1" && grep -qF "agent-up: alpha: " <<<"$1"' _ "$pout"
+# 100 open PRs: only the first page was read, so say so
+{ echo '['; for i in $(seq 100); do [ "$i" -eq 1 ] || echo ','; printf '{"html_url":"https://github.com/AllenLarocque/agent-containers/pull/%s","head":{"label":"AllenLarocque:feat/f%s"}}\n' "$i" "$i"; done; echo ']'; } > "$T/pulls6.json"
+pout="$(pup "$GP" "file://$T/pulls6.json" alpha </dev/null)" && rc=0 || rc=$?
+check "update: 100 open PRs -> warns that only the newest 100 were checked" bash -c 'grep -qF "only the newest 100 were checked" <<<"$1"' _ "$pout"
+# loop guard: already re-exec'd once (AGENT_UP_PULLED=1) and still behind -> dies, pulls nothing
+GP2="$T/pullclone2"; git clone -q "$OR" "$GP2" 2>/dev/null; git -C "$GP2" reset -q --hard HEAD~1; before="$(git -C "$GP2" rev-parse HEAD)"
+pout="$(AGENT_UP_PULLED=1 pup "$GP2" "file://$T/pulls0.json" alpha </dev/null)" && rc=0 || rc=$?
+check "update: AGENT_UP_PULLED=1 and still behind -> dies (no second pull)" bash -c '[ "$1" -ne 0 ] && grep -qF "still behind origin/main after pulling" <<<"$2" && [ "$(git -C "$3" rev-parse HEAD)" = "$4" ]' _ "$rc" "$pout" "$GP2" "$before"
 pout="$(pup "$GP" "file://$T/no-such-pulls.json" alpha </dev/null)" && rc=0 || rc=$?
 check "update: API failure -> one warning line, continues" \
   bash -c '[ "$1" -eq 0 ] && [ "$(grep -c "could not check GitHub for an open digests PR" <<<"$2")" -eq 1 ]' _ "$rc" "$pout"

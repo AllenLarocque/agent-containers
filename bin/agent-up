@@ -998,7 +998,7 @@ update_guard(){ # $@ = update's own args. digests.md in this clone must be curre
     [ -z "$(git -C "$clone" status --porcelain --untracked-files=no 2>/dev/null)" ] || die "main in $clone is behind origin/main and has uncommitted changes: commit or stash them, then run: git -C $clone pull --ff-only"
     git -C "$clone" merge-base --is-ancestor HEAD FETCH_HEAD 2>/dev/null || die "main in $clone has diverged from origin/main: resolve it by hand (git -C $clone status)"
     old="$(git -C "$clone" rev-parse --short=7 HEAD)"
-    git -C "$clone" merge -q --ff-only FETCH_HEAD </dev/null >/dev/null 2>&1 || die "could not fast-forward main in $clone: run: git -C $clone pull --ff-only"
+    git -C "$clone" merge -q --ff-only FETCH_HEAD </dev/null >/dev/null 2>&1 || die "could not fast-forward main in $clone (an untracked file in the way?): see git -C $clone pull --ff-only"
     new="$(git -C "$clone" rev-parse --short=7 HEAD)"
     echo "agent-up: pulled main ($old..$new)"
     AGENT_UP_PULLED=1 exec "$clone/bin/agent-up" update "$@"
@@ -1006,15 +1006,21 @@ update_guard(){ # $@ = update's own args. digests.md in this clone must be curre
     echo "agent-up: WARNING: could not fetch origin main; digests.md may not be current" >&2
   fi
 }
-update_pending_pr(){ # an open digests PR (head chore/digests-*) means digests.md is about to change: ask before using the old one.
-  # Anonymous GitHub API (AGENT_UP_PULLS_URL overrides, for tests); skipped with AGENT_UP_SKIP_GIT_CHECK=1; a failed lookup only warns.
+update_pending_pr(){ # an open digests PR (head AllenLarocque:chore/digests-*) means digests.md is about to change: ask before using the old one.
+  # Anonymous GitHub API (AGENT_UP_PULLS_URL overrides, for tests); skipped with AGENT_UP_SKIP_GIT_CHECK=1; a failed or incomplete lookup only warns.
   [ "${AGENT_UP_SKIP_GIT_CHECK:-}" != 1 ] || return 0
   local url="${AGENT_UP_PULLS_URL:-https://api.github.com/repos/AllenLarocque/agent-containers/pulls?state=open&per_page=100}" json prs ans=""
-  if ! json="$(curl -fsS --max-time 15 "$url" </dev/null 2>/dev/null)"; then
+  if ! json="$(curl -fsSL --max-time 15 "$url" </dev/null 2>/dev/null)" || [[ ! $json =~ ^[[:space:]]*\[ ]]; then   # a list, or it is not the pulls API
     echo "agent-up: WARNING: could not check GitHub for an open digests PR" >&2; return 0
   fi
-  # one "key": "value" per line, then pair each PR's own html_url (…/pull/N) with the head ref that follows it
-  prs="$(grep -oE '"(html_url|ref)": *"[^"]*"' <<<"$json" | awk -F'"' '$2=="html_url" && $4 ~ /\/pull\/[0-9]+$/ {u=$4} $2=="ref" && $4 ~ /^chore\/digests-/ && u!="" {print u; u=""}')" || true
+  [ "$(grep -oE '"html_url": *"[^"]*/pull/[0-9]+"' <<<"$json" | wc -l)" -lt 100 ] \
+    || echo "agent-up: WARNING: 100+ open PRs; only the newest 100 were checked for a digests PR" >&2
+  # Each PR's own html_url (…/pull/N), then the FIRST label inside its "head" object: the base label and forks' labels never count.
+  # (Quotes inside JSON strings are escaped, so a crafted title or body cannot forge these keys.)
+  prs="$(grep -oE '"(html_url|label)": *"[^"]*"|"head": *[{]' <<<"$json" | awk -F'"' '
+    $2=="html_url" && $4 ~ /\/pull\/[0-9]+$/ {u=$4; h=0; next}
+    $2=="head" {h=1; next}
+    $2=="label" && h {if (u!="" && tolower($4) ~ /^allenlarocque:chore\/digests-/) print u; u=""; h=0}')" || true
   [ -n "$prs" ] || return 0
   while IFS= read -r url; do echo "agent-up: a digests PR is waiting: $url"; done <<<"$prs"
   echo "Merge it first, or the projects get the older images in digests.md."
