@@ -652,6 +652,7 @@ rocker), P3M binary R packages, or conda tools.
   `~/.codex` login. A "managed" setup (one click in T3's provider settings) would download T3's own,
   unpinned Codex and need a separate sign-in inside T3. Until then T3 says "Sign in with ChatGPT to
   use managed Codex." while `codex` in a shell works. Fixed at the next start: `docker restart <container>`.
+  (A Binary path or CODEX_HOME path you set yourself in T3's Codex settings still applies.)
 - **`mem_limit`**: stated explicitly. Memory gates inside the container must read
   `/sys/fs/cgroup/memory.max`, not `/proc/meminfo`.
 - **Reserved for Phase 2 (T3 Code):** the commented `t3` volume and `127.0.0.1:3773` port.

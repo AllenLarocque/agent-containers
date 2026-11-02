@@ -121,14 +121,17 @@ check "codex config: user keys kept, analytics enforced" bash -c '
   cp "$d/config.toml" "$d/once"; CODEX_HOME="$d" node /usr/local/lib/agent/configure-codex-config.js >/dev/null; cmp "$d/once" "$d/config.toml"
   CODEX_HOME="$d" codex login status 2>&1 | grep -q "Not logged in"'
 # T3: a "managed" Codex setup (T3's own unpinned Codex + its own sign-in) goes back to "existing";
-# other providers, other keys and the file mode are kept; a second run changes nothing.
+# other providers, other keys and the file mode are kept; a second run changes nothing; a symlink stays one.
 check "T3 settings: Codex setup managed -> existing" bash -c '
   set -e; d=$(mktemp -d); mkdir -p "$d/userdata"; f="$d/userdata/settings.json"
-  printf "{\"x\":1,\"providerInstances\":{\"codex\":{\"driver\":\"codex\",\"config\":{\"binaryPath\":\"codex\",\"setupMode\":\"managed\"}},\"ag\":{\"driver\":\"antigravity\",\"config\":{\"setupMode\":\"managed\"}}}}" > "$f"; chmod 600 "$f"
+  printf "{\"x\":1,\"providerInstances\":{\"codex\":{\"driver\":\"codex\",\"config\":{\"binaryPath\":\"codex\",\"setupMode\":\"managed\"}},\"ag\":{\"driver\":\"antigravity\",\"config\":{\"setupMode\":\"managed\"}}}}" > "$f"; chmod 660 "$f"
   T3_BASE_DIR="$d" node /usr/local/lib/agent/configure-t3-settings.js >/dev/null
   jq -e ".x == 1 and .providerInstances.codex.config.setupMode == \"existing\" and .providerInstances.codex.config.binaryPath == \"codex\" and .providerInstances.ag.config.setupMode == \"managed\"" "$f" >/dev/null
-  [ "$(stat -c %a "$f")" = 600 ]
-  cp "$f" "$d/once"; T3_BASE_DIR="$d" node /usr/local/lib/agent/configure-t3-settings.js >/dev/null; cmp "$d/once" "$f"'
+  [ "$(stat -c %a "$f")" = 660 ]
+  cp "$f" "$d/once"; T3_BASE_DIR="$d" node /usr/local/lib/agent/configure-t3-settings.js >/dev/null; cmp "$d/once" "$f"
+  mv "$f" "$d/real.json"; ln -s ../real.json "$f"; jq ".providerInstances.codex.config.setupMode = \"managed\"" "$d/real.json" > "$d/m" && cat "$d/m" > "$d/real.json"
+  T3_BASE_DIR="$d" node /usr/local/lib/agent/configure-t3-settings.js >/dev/null
+  [ -L "$f" ]; jq -e ".providerInstances.codex.config.setupMode == \"existing\"" "$d/real.json" >/dev/null'
 check "zsh: .zshrc present, # comments work" zsh -ic 'echo ok # a comment' 
 # agent-init sets the git identity from the agent's GitHub account (stub gh: no token needed here).
 check "agent-init sets git identity from gh" bash -c '

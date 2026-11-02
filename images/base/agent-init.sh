@@ -31,7 +31,11 @@ inst message-timestamps@zoharbabin-claude-tools
 node /usr/local/lib/agent/configure-claude-settings.js "$(command -v node)" || log "WARN settings not written"
 node /usr/local/lib/agent/configure-codex-config.js || log "WARN codex config not written"
 # T3: Codex setup "existing" (the pinned codex + ~/.codex login), never T3's own unpinned "managed" one.
-node /usr/local/lib/agent/configure-t3-settings.js || log "WARN T3 settings not written"
+if pgrep -f '^t3 serve' >/dev/null 2>&1; then
+  log "NOTE T3 is running: its Codex setup is checked at the next container start"
+else
+  node /usr/local/lib/agent/configure-t3-settings.js || log "WARN T3 settings not written"
+fi
 
 # 3. GitHub: gh reads GH_TOKEN (tier A, scoped agent token) directly; make git use gh.
 if [ -n "${GH_TOKEN:-}" ]; then
