@@ -203,7 +203,7 @@ jobs:
           # 40-extra: last line has NO trailing newline (boundary with 50-project.txt)
           printf 'www.python.org' > /tmp/40-extra.txt
           # 50-project: CRLF first line, inline comment, blank, comment-only, last line w/o newline
-          printf 'www.r-project.org\r\ncran.r-project.org  # inline comment\n\n# comment only\nwww.mozilla.org' > /tmp/50-project.txt
+          printf 'www.rust-lang.org\r\nwww.cloudflare.com  # inline comment\n\n# comment only\nwww.mozilla.org' > /tmp/50-project.txt
           # A NON-allowlisted host that really listens on TCP 22, proven reachable from the runner,
           # so a block inside the container is the firewall (not a dead port).
           SSH_PROBE_IP=$(getent ahostsv4 gitlab.com | awk 'NR==1{print $1}')
@@ -231,7 +231,7 @@ jobs:
         if: always() && steps.mode.outputs.mode == 'full'
         run: |
           printf 'www.python.org' > /tmp/40-extra.txt
-          printf 'www.r-project.org\r\ncran.r-project.org  # inline comment\n\n# comment only\nwww.mozilla.org' > /tmp/50-project.txt
+          printf 'www.rust-lang.org\r\nwww.cloudflare.com  # inline comment\n\n# comment only\nwww.mozilla.org' > /tmp/50-project.txt
           # An EXPLICIT PROFILE=builder switch must give exactly the builder snapshot (test-firewall.sh).
           printf 'PROFILE=builder\n' > /tmp/profile-builder
           docker network create fwnet
@@ -259,7 +259,7 @@ jobs:
           # The owner's switch, mounted read-only exactly as agent-up's generated overlay does.
           printf 'T3_CONNECT=1\n' > /tmp/t3-connect
           printf 'www.python.org' > /tmp/40-extra.txt
-          printf 'www.r-project.org\r\ncran.r-project.org  # inline comment\n\n# comment only\nwww.mozilla.org' > /tmp/50-project.txt
+          printf 'www.rust-lang.org\r\nwww.cloudflare.com  # inline comment\n\n# comment only\nwww.mozilla.org' > /tmp/50-project.txt
           EDGE_IP=$(getent ahostsv4 region1.v2.argotunnel.com | awk 'NR==1{print $1}')
           timeout 8 bash -c "</dev/tcp/$EDGE_IP/7844" && echo "runner reaches $EDGE_IP:7844"
           docker network create t3net
@@ -290,7 +290,7 @@ jobs:
           # The owner's switch, mounted read-only exactly as agent-up's generated overlay does.
           printf 'T3_CONNECT=publish\n' > /tmp/t3-connect
           printf 'www.python.org' > /tmp/40-extra.txt
-          printf 'www.r-project.org\r\ncran.r-project.org  # inline comment\n\n# comment only\nwww.mozilla.org' > /tmp/50-project.txt
+          printf 'www.rust-lang.org\r\nwww.cloudflare.com  # inline comment\n\n# comment only\nwww.mozilla.org' > /tmp/50-project.txt
           EDGE_IP=$(getent ahostsv4 region1.v2.argotunnel.com | awk 'NR==1{print $1}')
           docker network create pubnet
           docker run -d --name fwpub --network pubnet --cap-add NET_ADMIN --cap-add NET_RAW \
@@ -349,7 +349,7 @@ jobs:
           # (a) agent-up's exact mount: the owner's host list, read-only -> exact filter + raw snapshot.
           printf '%s\n' "$FTP_HOST" > /tmp/ftp-hosts
           printf 'www.python.org' > /tmp/40-extra.txt
-          printf 'www.r-project.org\r\ncran.r-project.org  # inline comment\n\n# comment only\nwww.mozilla.org' > /tmp/50-project.txt
+          printf 'www.rust-lang.org\r\nwww.cloudflare.com  # inline comment\n\n# comment only\nwww.mozilla.org' > /tmp/50-project.txt
           docker network create ftpnet
           docker run -d --name fwftp --network ftpnet --cap-add NET_ADMIN --cap-add NET_RAW \
             -v "$GH_META_FIXTURE:/etc/firewall/github-meta.json:ro" \
@@ -388,7 +388,7 @@ jobs:
           od -An -tx1 -N16 /dev/urandom | tr -d ' \n' > /tmp/rstudio-password
           chmod 644 /tmp/rstudio-password   # CI-ONLY: the runner is not uid 1000 (in real use: 0600, host uid 1000)
           printf 'www.python.org' > /tmp/40-extra.txt
-          printf 'www.r-project.org\r\ncran.r-project.org  # inline comment\n\n# comment only\nwww.mozilla.org' > /tmp/50-project.txt
+          printf 'www.rust-lang.org\r\nwww.cloudflare.com  # inline comment\n\n# comment only\nwww.mozilla.org' > /tmp/50-project.txt
           ws=$(mktemp -d); cp tests/rstudio/fixture-Rprofile "$ws/.Rprofile"; cp tests/rstudio/fixture.Rproj "$ws/fixture.Rproj"
           sudo chown -R 1000:1000 "$ws"   # CI-ONLY (as for the acceptance project)
           docker run -d --name rs --cap-add NET_ADMIN --cap-add NET_RAW \
