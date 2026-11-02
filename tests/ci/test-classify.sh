@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests for scripts/ci-classify.sh: which change sets may skip the image build. A wrong "docs" or
-# "digests" would let an untested image change through, so every skip path is pinned here.
+# Tests for scripts/ci-classify.sh: which change sets may skip the image build. A wrong "docs"
+# would let an untested image change through, so every skip path is pinned here.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 CL="$ROOT/scripts/ci-classify.sh"
@@ -24,14 +24,7 @@ expect() {
   if [ "$got" = "$want" ]; then echo "OK:   $want <- $event $branch draft=$draft: $*"
   else echo "FAIL: want $want, got $got <- $event $branch draft=$draft: $*"; fail=1; fi
 }
-PR=pull_request; WD=workflow_dispatch; DG=chore/digests-2026.01.01-abcdef0
-expect digests $PR "$DG" false digests.md
-expect digests $WD "$DG" false digests.md                 # publish's dispatch on its own PR branch
-expect digests $PR "$DG" true  digests.md
-expect full    $PR feat/x    false digests.md              # digests.md by hand, off the bot branch
-expect full    $WD feat/x    false digests.md
-expect full    $PR "$DG" false digests.md scripts/x.sh     # anything else alongside: build
-expect full    $PR "$DG" false digests.md README.md        # digests.md is never "docs"
+PR=pull_request; WD=workflow_dispatch
 expect docs    $PR feat/x    false README.md docs/a/b.png project-template/README.md
 expect docs    $PR feat/x    true  docs/runbooks/x.md
 expect full    $WD feat/x    false README.md               # dispatch stays full

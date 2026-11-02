@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Build + push spades-base then spades-gis and spades-bio (children FROM base by REGISTRY digest), then spades-research (FROM gis by registry digest), then render digests.md.
+# Build + push spades-base then spades-gis and spades-bio (children FROM base by REGISTRY digest), then spades-research (FROM gis by registry digest), then print the four digests.
 # Used by both the publish workflow (REGISTRY=ghcr.io/allenlarocque) and the CI dry-run
 # (REGISTRY=localhost:5000/allenlarocque), so the dry-run exercises the exact same logic.
 # Only the dated tag is pushed during builds; all images are smoke-tested BY DIGEST, and only then
 # is `latest` promoted (so a partial failure leaves `latest` untouched).
-# Usage: scripts/build-publish.sh <registry-prefix> <tag> [digests-out-file]
+# Usage: scripts/build-publish.sh <registry-prefix> <tag>
 # CI sets BUILD_CACHE=gha: layers come from / go to the GitHub Actions cache, and SOURCE_DATE_EPOCH is
 # the last commit touching each image dir, so an unchanged base keeps its digest and the children's
 # cache still hits. Unset (the real publish): base is built --pull --no-cache, as before.
 set -euo pipefail
-registry=${1:?registry prefix}; tag=${2:?tag}; out=${3:-digests.md}
+registry=${1:?registry prefix}; tag=${2:?tag}
 here=$(cd "$(dirname "$0")/.." && pwd)
 
 build() {  # $1 image name; rest: extra buildx args
@@ -69,5 +69,9 @@ docker buildx imagetools create -t "$registry/spades-research:latest" "$registry
 [[ $(digest_of "$registry/spades-bio:latest") == "$bio_digest" ]] || { echo "latest != bio digest" >&2; exit 1; }
 [[ $(digest_of "$registry/spades-research:latest") == "$research_digest" ]] || { echo "latest != research digest" >&2; exit 1; }
 
-"$here/scripts/render-digests.sh" "$tag" "$base_digest" "$gis_digest" "$bio_digest" "$research_digest" > "$out"
-echo "--- $out ---"; cat "$out"
+# `latest` now IS the pin: agent-up update / agent-new resolve it with scripts/registry-digest.sh.
+echo "--- published $tag (latest == these digests) ---"
+for img in base gis bio research; do
+  case $img in base) d=$base_digest;; gis) d=$gis_digest;; bio) d=$bio_digest;; research) d=$research_digest;; esac
+  echo "spades-$img $d"
+done
