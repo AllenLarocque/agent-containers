@@ -1549,7 +1549,8 @@ check "update: image not in digests.md -> SKIP (image custom not in digests.md),
 refuses "update: unknown project" 'no config for' au update nosuch
 refuses "update: no arguments prints usage" 'usage:' au update
 
-echo '[]' > "$T/pulls0.json"; export AGENT_UP_PULLS_URL="file://$T/pulls0.json"   # no guard test below ever reaches the real GitHub API
+echo '[]' > "$T/pulls0.json"; echo '{"total_count": 0, "workflow_runs": []}' > "$T/runs0.json"
+export AGENT_UP_PULLS_URL="file://$T/pulls0.json" AGENT_UP_RUNS_URL="file://$T/runs0.json"   # no guard test below ever reaches the real GitHub API
 # the git guard: a clone not on main is refused (the test-only override is off)
 GC="$T/gitclone"; mkdir -p "$GC/bin" "$GC/project-template"; cp "$AU" "$GC/bin/agent-up"; git -C "$GC" init -q -b side; git -C "$GC" -c user.email=t@t -c user.name=t commit -q --allow-empty -m x
 refuses "update: refuses when the clone is not on main" "is not on main: digests.md is not current" \
@@ -1616,7 +1617,7 @@ check "update: behind main + clean -> pulls, re-execs the NEW launcher (pulls on
 ureset alpha; uset alpha ghcr.io/allenlarocque/spades-gis "$GISD"; cp "$(ucfg alpha)" "$T/alpha.compose.before"; : > "$DLOG"
 pout="$(pup "$GP" "file://$T/pulls1.json" alpha </dev/null)" && rc=0 || rc=$?
 check "update: open digests PR, default answer -> lists it, exits 1, project untouched" \
-  bash -c '[ "$1" -eq 1 ] && grep -qF "agent-up: a digests PR is waiting: https://github.com/AllenLarocque/agent-containers/pull/71" <<<"$2" && grep -qF "Merge it first, or the projects get the older images in digests.md." <<<"$2" && grep -qF "(default q)" <<<"$2" && cmp -s "$3" "$4" && [ "$5" -eq 0 ]' _ "$rc" "$pout" "$(ucfg alpha)" "$T/alpha.compose.before" "$(uup alpha)"
+  bash -c '[ "$1" -eq 1 ] && grep -qF "agent-up: a digests PR is waiting: https://github.com/AllenLarocque/agent-containers/pull/71" <<<"$2" && grep -qF "Do that first (merge the digests PR), or the projects get the older images in digests.md." <<<"$2" && grep -qF "(default q)" <<<"$2" && cmp -s "$3" "$4" && [ "$5" -eq 0 ]' _ "$rc" "$pout" "$(ucfg alpha)" "$T/alpha.compose.before" "$(uup alpha)"
 pout="$(pup "$GP" "file://$T/pulls2.json" alpha <<<q)" && rc=0 || rc=$?
 check "update: open digests PR, q -> exits 1, project untouched; only the chore/digests-* PR is listed" \
   bash -c '[ "$1" -eq 1 ] && grep -qF "pull/72" <<<"$2" && ! grep -qF "pull/71" <<<"$2" && cmp -s "$3" "$4" && [ "$5" -eq 0 ]' _ "$rc" "$pout" "$(ucfg alpha)" "$T/alpha.compose.before" "$(uup alpha)"
@@ -1643,6 +1644,12 @@ check "update: a non-list API body -> warning, update goes on" bash -c 'grep -qF
 { echo '['; for i in $(seq 100); do [ "$i" -eq 1 ] || echo ','; printf '{"html_url":"https://github.com/AllenLarocque/agent-containers/pull/%s","head":{"label":"AllenLarocque:feat/f%s"}}\n' "$i" "$i"; done; echo ']'; } > "$T/pulls6.json"
 pout="$(pup "$GP" "file://$T/pulls6.json" alpha </dev/null)" && rc=0 || rc=$?
 check "update: 100 open PRs -> warns that only the newest 100 were checked" bash -c 'grep -qF "only the newest 100 were checked" <<<"$1"' _ "$pout"
+# publish still running (no digests PR yet) -> the same prompt; default quits, no compose change
+echo '{"total_count": 1, "workflow_runs": [{"id": 1}]}' > "$T/runs1.json"; ureset alpha
+pout="$(AGENT_UP_RUNS_URL="file://$T/runs1.json" pup "$GP" "file://$T/pulls0.json" alpha </dev/null)" && rc=0 || rc=$?
+check "update: publish still running -> says so, default quits, no compose change" bash -c '[ "$1" -ne 0 ] && grep -qF "publish is still running" <<<"$2" && ! grep -qF "digests PR is waiting" <<<"$2" && grep -q "sha256:$4" "$3"' _ "$rc" "$pout" "$(ucfg alpha)" "$OLD1"
+pout="$(AGENT_UP_RUNS_URL="file://$T/no-such-runs.json" pup "$GP" "file://$T/pulls0.json" alpha </dev/null)" && rc=0 || rc=$?
+check "update: the runs lookup failing -> no prompt, update goes on" bash -c '! grep -qF "publish is still running" <<<"$1" && grep -qF "agent-up: alpha: " <<<"$1"' _ "$pout"
 # loop guard: already re-exec'd once (AGENT_UP_PULLED=1) and still behind -> dies, pulls nothing
 GP2="$T/pullclone2"; git clone -q "$OR" "$GP2" 2>/dev/null; git -C "$GP2" reset -q --hard HEAD~1; before="$(git -C "$GP2" rev-parse HEAD)"
 pout="$(AGENT_UP_PULLED=1 pup "$GP2" "file://$T/pulls0.json" alpha </dev/null)" && rc=0 || rc=$?
