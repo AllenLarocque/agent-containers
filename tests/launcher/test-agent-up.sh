@@ -1558,7 +1558,7 @@ check "  ...the builders were still updated" bash -c 'grep -q "sha256:$2" "$1/al
 check "  ...research was not restarted; the WARNING names it" bash -c '[ "$(grep -cE "^ARGS: compose .* -p research up -d" "$1")" -eq 0 ] && tail -n 1 <<<"$2" | grep -qF "still on the old image: research"' _ "$DLOG" "$uout"
 check "  ...each image looked up once per run (gis for two projects, base for one)" bash -c '[ "$(grep -c "^spades-gis latest" "$1")" -eq 1 ] && [ "$(grep -c "^spades-base latest" "$1")" -eq 1 ]' _ "$CURL_LOG"
 cp "$T/reg-table.good" "$REG_TABLE"
-ureset alpha; REG_TOKEN_FAIL=1 uout="$(REG_TOKEN_FAIL=1 au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
+ureset alpha; uout="$(REG_TOKEN_FAIL=1 au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
 check "update: ghcr.io token request fails -> SKIP, non-zero, compose untouched" bash -c '[ "$1" -ne 0 ] && grep -qF "SKIP (could not resolve spades-gis:latest on ghcr.io: " <<<"$2" && grep -q "sha256:$4" "$3"' _ "$rc" "$uout" "$(ucfg alpha)" "$OLD1"
 ureset alpha
 uout="$(REG_STDERR_NOISE=1 au update alpha </dev/null 2>&1)" && rc=0 || rc=$?

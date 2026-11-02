@@ -7,7 +7,7 @@
 # The changed files are `git diff base...head` (from the merge base, so a moving main is ignored).
 # Pushes to main and workflow_dispatch are always full.
 set -euo pipefail
-event=${1:?event}; base=${2:?base rev}; head=${3:?head rev}; branch=${4:?branch}; draft=${5:-false}
+event=${1:?event}; base=${2:?base rev}; head=${3:?head rev}; : "${4:?branch}"; draft=${5:-false}   # $4 (branch) is still passed by ci.yml; unused since the digests mode went
 
 mapfile -t files < <(git diff --name-only "$base...$head")
 printf 'changed: %s\n' "${files[@]:-<none>}" >&2
