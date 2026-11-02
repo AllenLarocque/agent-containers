@@ -70,7 +70,7 @@ Each container runs a T3 Code server (`t3 serve`, pinned in the image, telemetry
 ```bash
 CFG=~/.config/agent-containers/<project>
 cp ~/GitHub/agent-containers/project-template/config/compose.yaml "$CFG/compose.yaml"
-sed -i 's|/spades-gis@sha256:REPLACE_WITH_DIGEST|/spades-<image>@sha256:<digest>|' "$CFG/compose.yaml"   # <digest>: ~/GitHub/agent-containers/scripts/registry-digest.sh spades-<image>
+d=$(~/GitHub/agent-containers/scripts/registry-digest.sh spades-<image>) && sed -i "s|/spades-gis@sha256:REPLACE_WITH_DIGEST|/spades-<image>@$d|" "$CFG/compose.yaml"
 grep -h '^T3_PORT=' ~/.config/agent-containers/*/project.conf   # ports already taken
 grep -q '^T3_PORT=' "$CFG/project.conf" || echo 'T3_PORT=3773' >> "$CFG/project.conf"   # a FREE one; `up` refuses a duplicate
 agent-up up <project>

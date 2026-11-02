@@ -1561,6 +1561,9 @@ cp "$T/reg-table.good" "$REG_TABLE"
 ureset alpha; REG_TOKEN_FAIL=1 uout="$(REG_TOKEN_FAIL=1 au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
 check "update: ghcr.io token request fails -> SKIP, non-zero, compose untouched" bash -c '[ "$1" -ne 0 ] && grep -qF "SKIP (could not resolve spades-gis:latest on ghcr.io: " <<<"$2" && grep -q "sha256:$4" "$3"' _ "$rc" "$uout" "$(ucfg alpha)" "$OLD1"
 ureset alpha
+uout="$(REG_STDERR_NOISE=1 au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: curl retry noise on stderr -> compose gets the clean digest line" bash -c 'grep -qE "^[[:space:]]*image: ghcr\.io/allenlarocque/spades-gis@sha256:$2[[:space:]]*$" "$1" && ! grep -q "curl:" "$1"' _ "$(ucfg alpha)" "$GISD"
+ureset alpha
 
 refuses "update: unknown project" 'no config for' au update nosuch
 refuses "update: no arguments prints usage" 'usage:' au update

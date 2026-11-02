@@ -20,8 +20,9 @@ project; transition to team work).
 > `publish` opened after every run are gone. `agent-up update` and `agent-new` resolve the digest
 > that ghcr.io's `latest` tag points to (anonymously, `scripts/registry-digest.sh`) and pin THAT
 > digest in the project's `compose.yaml` exactly as before, so the pinning model is unchanged.
-> The trust root is now the `latest` tag: only `publish` on `main` (after every image built and
-> passed its smoke tests by digest) and the owner can move it. Wherever this spec says "copy the
+> The trust root is now the `latest` tag. The intent: only `publish` on `main` (after every image built and
+> passed its smoke tests by digest) and the owner can move it. OPEN (2026-11-01): a `workflow_dispatch` of
+> publish on an older branch runs that branch's unguarded publish.yml, so this is not yet enforced. Wherever this spec says "copy the
 > digest from `digests.md`" or "update `digests.md`" (§8 and the checklists), read: run
 > `scripts/registry-digest.sh spades-<image>`, or `agent-up update`.
 

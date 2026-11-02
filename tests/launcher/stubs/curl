@@ -2,6 +2,7 @@
 # Stub curl for scripts/registry-digest.sh (tests copy it to a PATH dir). Fake ghcr.io: $REG_TABLE has lines "<image> <tag> <digest>"
 # (digest "FAIL" or a missing line = HTTP error, curl rc 22). Every manifest lookup is logged to $CURL_LOG as "<image> <tag>".
 url=""; auth=0
+[ -z "${REG_STDERR_NOISE:-}" ] || echo "curl: (22) The requested URL returned error: 503" >&2   # what a retried-then-good request prints
 for a in "$@"; do
   case "$a" in https://*) url=$a ;; "Authorization: Bearer stubtoken") auth=1 ;; esac
 done

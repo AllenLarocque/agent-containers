@@ -21,6 +21,7 @@ err=$("$RD" spades-base 2>&1 >/dev/null); rc=$?
 { [ "$rc" -ne 0 ] && grep -q 'bad or missing Docker-Content-Digest' <<<"$err"; } && ok "malformed digest header -> non-zero" || bad "malformed digest (rc=$rc: $err)"
 err=$(REG_TOKEN_FAIL=1 "$RD" spades-bio 2>&1 >/dev/null); rc=$?
 { [ "$rc" -ne 0 ] && grep -q 'pull token' <<<"$err"; } && ok "token failure -> non-zero" || bad "token failure (rc=$rc: $err)"
+out=$(REG_STDERR_NOISE=1 "$RD" spades-bio 2>/dev/null) && [ "$out" = "sha256:$D1" ] && ok "stderr noise stays off stdout" || bad "stderr noise ($out)"
 for a in 'evil' 'spades-' 'spades-Bio' 'spades-bio/../x' 'spades-bio;id' ''; do
   "$RD" "$a" >/dev/null 2>&1 && bad "bad image name '$a' accepted" || ok "bad image name '$a' refused"
 done

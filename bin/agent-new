@@ -78,7 +78,8 @@ project_config(){
   local img digest compose="$CFG_ROOT/$PROJ/compose.yaml"
   img="$(sed -n 's/^IMAGE=//p' "$CFG_ROOT/$PROJ/project.conf" | tail -n1)"; img="spades-${img:-gis}"
   if grep -q REPLACE_WITH_DIGEST "$compose"; then
-    digest="$("$HERE/../scripts/registry-digest.sh" "$img" latest 2>&1)" || die "could not resolve $img:latest on ghcr.io: $digest"
+    digest="$("$HERE/../scripts/registry-digest.sh" "$img" latest)" || die "could not resolve $img:latest on ghcr.io (message above)"
+    [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || die "registry-digest.sh printed '$digest', not sha256:<64 hex>"
     say "pinning $img@$digest"
     sed -i "s/REPLACE_WITH_DIGEST\(_FROM_digests\.md\)\?/${digest#sha256:}/" "$compose"   # the old placeholder name is accepted too
     grep -q "$digest" "$compose" || sed -i "/^[[:space:]]*image:.*spades-/ s|@.*$|@$digest|" "$compose"

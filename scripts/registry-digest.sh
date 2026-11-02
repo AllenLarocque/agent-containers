@@ -7,7 +7,7 @@ img=${1:-}; tag=${2:-latest}; owner=allenlarocque
 [[ $img =~ ^spades-[a-z]+$ ]] || { echo "registry-digest: bad image name '$img' (want spades-<name>)" >&2; exit 2; }
 [[ $tag =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] || { echo "registry-digest: bad tag '$tag'" >&2; exit 2; }
 accept='application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json'
-cargs=(-fsS --retry 3 --max-time 30)
+cargs=(-fs --retry 3 --max-time 30)   # no -S: a retried-then-good request must not print errors; our messages say what failed
 
 resp=$(curl "${cargs[@]}" "https://ghcr.io/token?scope=repository:$owner/$img:pull") \
   || { echo "registry-digest: could not get a pull token for $owner/$img from ghcr.io" >&2; exit 1; }

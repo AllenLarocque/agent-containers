@@ -116,7 +116,7 @@ gh pr merge --squash --admin        # 5. expected: FAILS (the machine user is no
 **Item 3** is GitHub behaviour regardless of rulesets (nobody can approve their own PR), so it is a sanity check, not proof of the ruleset.
 **Item 4** must be rejected because of the protected branch or repository rule. A "non-fast-forward" rejection is not the right reason: it means the branch merely diverged, and the rule was not what stopped you.
 
-Pass criteria: 2, 4 and 5 fail as described (and 3 is refused). If any succeeds, stop: the ruleset is not active, the account has too much access, or its bypass is misconfigured. Also confirm that on **project repos** the "Allow GitHub Actions to create and approve pull requests" setting is OFF (on `agent-containers` it is ON by design). With "Require review from Code Owners", a bot approval cannot satisfy the gate anyway, so that setting is defence in depth.
+Pass criteria: 2, 4 and 5 fail as described (and 3 is refused). If any succeeds, stop: the ruleset is not active, the account has too much access, or its bypass is misconfigured. Also confirm that on **project repos** the "Allow GitHub Actions to create and approve pull requests" setting is OFF (and on `agent-containers` too, since publish no longer opens PRs). With "Require review from Code Owners", a bot approval cannot satisfy the gate anyway, so that setting is defence in depth.
 
 Finally, as **you** in the browser: open the PR, approve it, and merge it (or close it and delete the branch). Only your approval should count.
 

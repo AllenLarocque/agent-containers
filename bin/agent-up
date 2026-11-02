@@ -957,10 +957,12 @@ cmd_busy(){
   echo "Nothing busy."
 }
 latest_digest(){ # $1 image name (spades-x): sets LD_OUT to the digest ghcr.io's latest points to, or the error; rc 1 on failure. Needs REG_RC/REG_OUT (cmd_update's per-run cache: each image is resolved once)
-  local k="$1" e
+  local k="$1" d e
   if [ -z "${REG_RC[$k]+x}" ]; then
-    if e="$("$HERE/../scripts/registry-digest.sh" "$k" latest </dev/null 2>&1)"; then REG_RC[$k]=0; else REG_RC[$k]=1; fi
-    REG_OUT[$k]="$(printf '%s' "$e" | tr '\n' ' ' | sed 's/^registry-digest: //; s/ *$//')"
+    e="$(mktemp)"   # stdout is the digest only: curl's retry noise on stderr must never reach compose.yaml
+    if d="$("$HERE/../scripts/registry-digest.sh" "$k" latest </dev/null 2>"$e")" && [[ $d =~ ^sha256:[0-9a-f]{64}$ ]]; then REG_RC[$k]=0; REG_OUT[$k]="$d"
+    else REG_RC[$k]=1; REG_OUT[$k]="$(tr '\n' ' ' <"$e" | sed 's/^registry-digest: //; s/ *$//')"; [ -n "${REG_OUT[$k]}" ] || REG_OUT[$k]="bad digest '$d'"; fi
+    rm -f "$e"
   fi
   LD_OUT="${REG_OUT[$k]}"; return "${REG_RC[$k]}"
 }
