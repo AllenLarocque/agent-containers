@@ -173,11 +173,16 @@ if any of these holds (spec §2.4, §2.9, §8.2):
 5. **The T3 release asset fails verification** (step 5). This is a security finding.
 
 **T3 protocol change** (only if T3 moves). Decide from the source diff between the two tags, not
-from guessing. Clone without checkout (never run anything in it):
+from guessing. Fetch only the two tags, shallow and without checkout (never run anything in it).
+Do not use a partial (`--filter=blob:none`) clone: `git grep` then downloads files one at a time
+and does not finish within the 2-hour command limit (2026-11-02). The shallow fetch takes about a
+minute:
 
 ```sh
-git clone -q --filter=blob:none --no-checkout https://github.com/pingdotgg/t3code.git /tmp/update-work/t3code
+git init -q /tmp/update-work/t3code
 cd /tmp/update-work/t3code
+git remote add origin https://github.com/pingdotgg/t3code.git
+git fetch -q --depth 1 --no-tags origin tag v<pin> tag v<new>
 git grep -n -i -E 'protocol.?version|requires a newer (server|client)|newer server|newer client' v<pin> -- ':!*.md'
 git grep -n -i -E 'protocol.?version|requires a newer (server|client)|newer server|newer client' v<new> -- ':!*.md'
 git diff v<pin> v<new> -- ':!*.md' | grep -n -i -E 'protocol|requires a newer|newer server|newer client'
