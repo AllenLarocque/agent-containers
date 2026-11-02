@@ -37,8 +37,10 @@ allowed https://www.bioconductor.org/
 # 40-extra.txt : "www.python.org" with NO trailing newline (file-boundary glue test)
 # 50-project.txt: CRLF line, inline comment, blank, comment-only, last line w/o newline
 allowed https://www.python.org/
-allowed https://www.r-project.org/
-allowed https://cran.r-project.org/
+# The 50-project.txt hosts sit behind CDNs. Not www.r-project.org / cran.r-project.org: their single
+# WU Vienna server timed out from runners (curl exit 28, 2026-10-28 .. 11-02), like www.gnu.org did.
+allowed https://www.rust-lang.org/
+allowed https://www.cloudflare.com/
 # www.mozilla.org: Fastly CNAME + multiple A records (not www.gnu.org: it black-holes SYNs per source IP, see flake-report)
 allowed https://www.mozilla.org/
 
