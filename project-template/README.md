@@ -243,9 +243,8 @@ relay, not Tailscale).
 `agent-up update` (last step), so an app never gets ahead of the containers.
 
 1. Merge the update PR, then the digests PR.
-2. `git pull` in your agent-containers clone (it must be on an up-to-date `main`).
-3. Optional: `bin/agent-up busy --all` shows running R work and agents mid-task (exit 1 = busy).
-4. `bin/agent-up update --all` (or `update <project>...`). It moves each project to the new digest,
+2. Optional: `bin/agent-up busy --all` shows running R work and agents mid-task (exit 1 = busy).
+3. `bin/agent-up update --all` (or `update <project>...`). Your clone must be on `main`; update fast-forwards it from origin first (clean tracked tree only, then it restarts itself on the new code and digests.md). If a digests PR is still open, or `publish` is still building (so its PR is not there yet), it says so and asks `[q]uit / [c]ontinue` (default quit): merge it first. It moves each project to the new digest,
    leaves stopped projects stopped, and asks `[s]kip / [r]estart anyway / [q]uit` for busy ones
    (default skip). It prints a summary table. A stopped project shows "updated, not started": start
    it later with `bin/agent-up up <project>`, never with `docker start` or Docker Desktop's Start
