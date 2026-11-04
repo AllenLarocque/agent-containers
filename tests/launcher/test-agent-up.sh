@@ -787,6 +787,8 @@ check "google-drive: GOOGLE_DRIVE=0 -> agent: {}" gd_empty "$GDY"
 cp "$T/pconf-gd.bak" "$CFG/project.conf"
 au config "$NAME" >/dev/null 2>&1
 check "  ...removing GOOGLE_DRIVE=0 mounts it again" grep -q "GOOGLEDRIVE_AUTH" "$GDY"
+cp "$GDY" "$GDRY"   # a mount-bearing overlay left in the research config's .generated must be regenerated
+check "  ...(seeded: the research overlay holds a mount before config)" grep -q "GOOGLEDRIVE_AUTH" "$GDRY"
 au config research >/dev/null 2>&1 || true
 check "google-drive: research profile -> agent: {} (even with a shared key)" gd_empty "$GDRY"
 # a stale mount from an earlier builder life is regenerated, and a removed key leaves no dangling bind
@@ -819,6 +821,31 @@ refuses "  ...config refuses it too" 'chmod 600' au config "$NAME"
 check "  ...stop does not refuse" au stop "$NAME"
 chmod 400 "$SHKEY"
 check "google-drive: mode 0400 accepted" au config "$NAME"
+# the key or the folder it was found in is agent-writable (a symlink chain the agent could swap): refused
+cp "$CFG/project.conf" "$T/pconf-gdw.bak"
+gd_key "$P/sa.json"; rm -f "$SHKEY"; ln -s "$P/sa.json" "$SHKEY"
+refuses "google-drive: key symlinked into PROJECT_DIR refused" "is inside PROJECT_DIR \\($P\\), which the agent can write: keep the key under ~/.config/agent-containers" au up "$NAME"
+refuses "  ...also by config" 'is inside PROJECT_DIR' au config "$NAME"
+check "  ...stop does not refuse (render off)" au stop "$NAME"
+check "  ...and the overlay is off" gd_empty "$GDY"
+rm -f "$SHKEY" "$P/sa.json"; ln -s "$T/vault/sa.json" "$SHKEY"   # the target is safe; the link sits in an agent-writable folder
+sed -i "s|^AGENT_MEMORY_DIR=.*|AGENT_MEMORY_DIR=$CFGROOT/.shared|" "$CFG/project.conf"
+refuses "google-drive: the folder the key was found in is AGENT_MEMORY_DIR -> refused" "$SHKEY is inside AGENT_MEMORY_DIR" au config "$NAME"
+cp "$T/pconf-gdw.bak" "$CFG/project.conf"; rm -f "$SHKEY"; gd_key "$SHKEY"
+au config "$NAME" >/dev/null 2>&1
+check "  ...a normal key still mounts its canonical path" grep -qF "source: \"$(readlink -f "$SHKEY")\"" "$GDY"
+# not a service-account JSON object (no host JSON parser: shape checks)
+printf 'not-json "type":"service_account", "client_email": null\n' > "$SHKEY"; chmod 600 "$SHKEY"
+refuses "google-drive: not JSON, client_email null -> refused" 'not a Google service-account key' au config "$NAME"
+printf '%s' "${GDKEY:0:60}" > "$SHKEY"; chmod 600 "$SHKEY"
+refuses "google-drive: a truncated key -> refused" 'not a Google service-account key' au config "$NAME"
+printf '{"type": "service_account", "client_email": "", "private_key": "FAKE"}\n' > "$SHKEY"
+refuses "google-drive: empty client_email -> refused" 'not a Google service-account key' au config "$NAME"
+printf '{"type": "service_account", "client_email": "ci@x.iam.gserviceaccount.com"}\n' > "$SHKEY"
+refuses "google-drive: no private_key -> refused" 'not a Google service-account key' au config "$NAME"
+gd_key "$SHKEY"; chmod 000 "$SHKEY"
+refuses "google-drive: unreadable key -> 'not readable by you (uid N)'" "is not readable by you \\(uid $(id -u)\\)" au config "$NAME"
+chmod 600 "$SHKEY"
 cp "$CFG/project.env" "$T/penv-gd.bak"
 echo 'GOOGLEDRIVE_AUTH=op://v/i/f' >> "$CFG/project.env"
 refuses "project.env defines GOOGLEDRIVE_AUTH" 'reserved' au up "$NAME"
@@ -1248,7 +1275,8 @@ OVR
     check "GOOGLEDRIVE_AUTH is set in the container" \
       test "$(docker exec -u agent "$CID" printenv GOOGLEDRIVE_AUTH)" = /run/secrets/google-drive-sa.json
     check "  ...the key is readable by agent" docker exec -u agent "$CID" test -r /run/secrets/google-drive-sa.json
-    check "  ...and read-only" bash -c '! docker exec -u agent "$1" sh -c "echo x >> /run/secrets/google-drive-sa.json" 2>/dev/null' _ "$CID"
+    check "  ...and read-only (the write fails with Read-only file system)" \
+      bash -c 'e="$(docker exec -u agent "$1" sh -c "echo x >> /run/secrets/google-drive-sa.json" 2>&1)" && exit 1; grep -q "Read-only file system" <<<"$e"' _ "$CID"
     for host in www.googleapis.com oauth2.googleapis.com accounts.google.com drive.google.com drive.usercontent.google.com; do
       check "$host resolves (Google Drive via prepInputs/googledrive)" \
         bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 "$2" A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID" "$host"
@@ -1607,6 +1635,18 @@ uout="$(au update alpha beta </dev/null 2>&1)" && rc=0 || rc=$?
 check "update: a failing up -> FAILED, exit non-zero" bash -c '[ "$1" -ne 0 ] && grep -qF "FAILED (compose already on the new digest; fix, then: agent-up up alpha; logs: docker logs alpha-agent-1)" <<<"$2"' _ "$rc" "$uout"
 check "  ...the later project is still updated" bash -c 'grep -q "sha256:$2" "$1"' _ "$(ucfg beta)" "$GISD"
 rm -f "$T/UPFAIL.alpha"
+# a broken shared Google Drive key: every builder is NOT UPDATED (compose untouched, no up), research still updates
+mkdir -p "$UR/.shared"; printf '%s\n' "$GDKEY" > "$UR/.shared/google-drive-sa.json"; chmod 644 "$UR/.shared/google-drive-sa.json"
+ureset alpha beta; uset research ghcr.io/allenlarocque/spades-base "$OLD1"; uidle research
+uout="$(au update alpha beta research </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: broken shared Google Drive key -> NOT UPDATED (Google Drive key: ...), exit non-zero" \
+  bash -c '[ "$1" -ne 0 ] && grep -qE "agent-up: alpha: NOT UPDATED \(Google Drive key: .*chmod 600" <<<"$2" && grep -qE "agent-up: beta: NOT UPDATED \(Google Drive key: " <<<"$2"' _ "$rc" "$uout"
+check "  ...builders' compose image lines unchanged, no up for them" \
+  bash -c 'grep -qx "    image: ghcr.io/allenlarocque/spades-gis@sha256:$3" "$1" && grep -qx "    image: ghcr.io/allenlarocque/spades-gis@sha256:$3" "$2" && [ "$4$5" = 00 ]' _ "$(ucfg alpha)" "$(ucfg beta)" "$OLD1" "$(uup alpha)" "$(uup beta)"
+check "  ...no token read for them" bash -c '! grep -q "^OP: read" "$1"' _ "$OPLOG"
+check "  ...research (no key) still updated" bash -c 'grep -q "sha256:$2" "$1" && [ "$3" -eq 1 ]' _ "$(ucfg research)" "$BASED" "$(uup research)"
+check "  ...never the key's content" bash -c '! grep -q FAKE <<<"$1"' _ "$uout"
+rm -rf "$UR/.shared"; ureset alpha beta
 
 # re-pair markers: unknown (old empty, new 2), yes (1 -> 2), no (2 -> 2)
 ureset alpha beta; rm -f "$T"/proto.* "$T/pair.count"; echo 2 > "$T/proto.alpha-agent-1.new"
