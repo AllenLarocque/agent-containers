@@ -7,11 +7,7 @@
 # legacy endpoint FUNGuildR's get_funguild_db() defaults to.
 mycoportal.org
 stbates.org
-drive.google.com
-drive.usercontent.google.com
-www.googleapis.com
-oauth2.googleapis.com
-accounts.google.com
+# Google Drive hosts (drive.google.com, www.googleapis.com, ...) are in the base list.
 
 # Amplicon reference databases for the R-native DADA2/DECIPHER taxonomy pipeline
 # (prepInputs downloads these; IdTaxa trains on them).
