@@ -27,4 +27,19 @@ got <- reproducible::prepInputs(
 zips <- list.files(dl, pattern = "[.]zip$", full.names = TRUE)
 stopifnot(length(zips) >= 1, all(file.size(zips) > 0))
 cat("Google Drive (anonymous):", basename(zips), "->", length(list.files(dl)), "file(s)\n")
+# Private file through a service account (optional: CI sets GOOGLEDRIVE_AUTH + GDRIVE_PRIVATE_TEST_URL only
+# when the GDRIVE_SA_KEY secret exists). No drive_auth() here: reproducible's cascade reads GOOGLEDRIVE_AUTH.
+if (nzchar(Sys.getenv("GDRIVE_PRIVATE_TEST_URL"))) {
+  options(reproducible.gdriveNoAuth = FALSE)
+  googledrive::drive_deauth()
+  dl2 <- file.path(tempfile("gdrive-private"))
+  dir.create(dl2)
+  got2 <- reproducible::prepInputs(url = Sys.getenv("GDRIVE_PRIVATE_TEST_URL"),
+                                   destinationPath = dl2, fun = NA)
+  fs <- list.files(dl2, full.names = TRUE, recursive = TRUE)
+  stopifnot(length(fs) >= 1, all(file.size(fs) > 0))
+  cat("Google Drive (service account): OK\n")
+} else {
+  cat("Google Drive (service account): SKIPPED (no GDRIVE_PRIVATE_TEST_URL)\n")
+}
 cat("ACCEPTANCE: PASSED\n")

@@ -1110,7 +1110,13 @@ if [ -n "${TEMPLATE_IMAGE:-}" ]; then
   else
     echo "SKIP: FTP behavioural checks (nf_conntrack_ftp not loaded on this host: sudo modprobe nf_conntrack_ftp)"
   fi
+  # Google Drive service-account key: a fixture project key, rendered into the overlay now (the launcher
+  # reads it as the runner), so the real container below gets the read-only bind + GOOGLEDRIVE_AUTH.
+  gd_key "$PRKEY"
   au config "$NAME" >/dev/null 2>&1 || true   # (re)writes .generated/ (stub docker)
+  # CI-ONLY: the runner is uid 1001, the agent 1000: hand the (still 0600) key to the agent AFTER the
+  # render above, which needs to read it. In real use the host user IS uid 1000. Skipped without sudo.
+  if [ -n "${GITHUB_ACTIONS:-}" ] && sudo -n true 2>/dev/null; then sudo chown 1000:1000 "$PRKEY"; fi
   # CI-ONLY: the runner's uid is not 1000, so the agent could not read the 0600 password file.
   # In real use the host user IS uid 1000 (spec §3.1) and the file stays 0600.
   chmod 644 "$CFG/.generated/rstudio-password"
@@ -1239,6 +1245,10 @@ OVR
       check "$host resolves (Codex: ChatGPT login and backend)" \
         bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 "$2" A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID" "$host"
     done
+    check "GOOGLEDRIVE_AUTH is set in the container" \
+      test "$(docker exec -u agent "$CID" printenv GOOGLEDRIVE_AUTH)" = /run/secrets/google-drive-sa.json
+    check "  ...the key is readable by agent" docker exec -u agent "$CID" test -r /run/secrets/google-drive-sa.json
+    check "  ...and read-only" bash -c '! docker exec -u agent "$1" sh -c "echo x >> /run/secrets/google-drive-sa.json" 2>/dev/null' _ "$CID"
     for host in www.googleapis.com oauth2.googleapis.com accounts.google.com drive.google.com drive.usercontent.google.com; do
       check "$host resolves (Google Drive via prepInputs/googledrive)" \
         bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 "$2" A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID" "$host"
