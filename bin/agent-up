@@ -532,7 +532,7 @@ gd_problem(){ # $1 key as found -> what is wrong with it (never its content); no
   grep -Eq '"type"[[:space:]]*:[[:space:]]*"service_account"' "$t" 2>/dev/null && grep -Eq '"client_email"[[:space:]]*:' "$t" 2>/dev/null \
     || { echo "$t is not a Google service-account key (it needs \"type\": \"service_account\" and a client_email; an OAuth client JSON will not do). See docs/runbooks/google-drive-access.md"; return 0; }
   mode="$(stat -c %a "$t")"
-  [ $(( 8#$mode & 077 )) -eq 0 ] || echo "$t has mode $mode: group and other must have no access. Run: chmod 600 $t"
+  [ $(( 8#$mode & 077 )) -eq 0 ] || echo "$t has mode $mode: group and other must have no access. Run: chmod 600 $(printf %q "$t")"
 }
 google_drive_key(){ # $1 config dir -> the resolved key path to mount; nothing: off, none, research or invalid (stop/down never refuse)
   local f; f="$(gd_candidate "$1")"

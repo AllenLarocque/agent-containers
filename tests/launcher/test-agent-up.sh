@@ -771,7 +771,7 @@ check "up prints the service-account email" grep -qF "Google Drive: service acco
 check "  ...never the private_key" bash -c '! grep -q FAKE <<<"$1"' _ "$gdout"
 check "  ...nor the generated file" bash -c '! grep -q FAKE "$1"' _ "$GDY"
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-  gd_json(){ aureal config "$NAME" --format json | grep -q '"GOOGLEDRIVE_AUTH": "/run/secrets/google-drive-sa.json"'; }
+  gd_json(){ local j; j="$(aureal config "$NAME" --format json)" && grep -q '"GOOGLEDRIVE_AUTH": "/run/secrets/google-drive-sa.json"' <<<"$j"; }
   check "google-drive: config JSON shows GOOGLEDRIVE_AUTH" gd_json
 fi
 gd_key "$PRKEY"
