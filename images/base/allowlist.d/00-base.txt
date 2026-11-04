@@ -46,6 +46,18 @@ r2.ropensci.org
 bioconductor.org
 # Bioconductor's alternate source mirror (pak/BiocManager fall back to it).
 osn.xsede.org
+# --- Google Drive, for prepInputs(url = <Drive link>) via googledrive/gargle (owner decision
+# 2026-11-04). www.googleapis.com: the Drive API (file metadata, and the download itself:
+# files/<id>?alt=media). oauth2.googleapis.com: OAuth token exchange + refresh. accounts.google.com:
+# OAuth sign-in. drive.google.com, drive.usercontent.google.com: plain share-link downloads (the
+# "uc?export=download" redirect chain). www.googleapis.com ACCEPTS UPLOADS with a Drive token: the
+# token the agent is given can write to that Google account. Exact hosts only, never googleapis.com
+# or google.com (googleapis.com would cover storage.googleapis.com: anyone's bucket, an open way out).
+www.googleapis.com
+oauth2.googleapis.com
+accounts.google.com
+drive.google.com
+drive.usercontent.google.com
 # Require::internetExists() probes www.google.com; if blocked Require flips to offline mode and
 # every install fails.
 www.google.com
