@@ -590,6 +590,7 @@ NEW=spades_pe
 | `/etc/firewall/rstudio`, `/run/secrets/rstudio-password` (only with `RSTUDIO=1`) | `~/.config/agent-containers/<project>/.generated/rstudio{,-password}`, written by `agent-up` | **ro** |
 | `~/.local/share/rstudio` (only with `RSTUDIO=1`) | volume `rstudio-<project>` | persists across `up` |
 | `/etc/firewall/ftp-hosts` (only with `FTP_HOSTS`) | `~/.config/agent-containers/<project>/.generated/ftp-hosts` (mode 600), written by `agent-up` from `project.conf` | **ro** |
+| `/run/secrets/google-drive-sa.json` (builders only, when a valid key exists; env `GOOGLEDRIVE_AUTH` points at it) | `~/.config/agent-containers/<project>/google-drive-sa.json`, else `~/.config/agent-containers/.shared/google-drive-sa.json` (mode 600). Opt out with `GOOGLE_DRIVE=0`. See [docs/runbooks/google-drive-access.md](../docs/runbooks/google-drive-access.md) | **ro** |
 | `~/.claude`, `~/.codex`, the project R library | volumes `claude-<project>`, `codex-<project>`, `rlib-<project>` | persist across `up` |
 | Require's cache | volume `require-cache-shared` | shared by all projects |
 | npm's download cache (Claude Code and Codex install from it at each start, pinned + integrity-checked) | volume `npm-cache-shared` | shared by all projects |
@@ -671,6 +672,13 @@ On the host, treat all of them as untrusted:
 - Beware git-aware shell prompts: they run git in the current directory.
 - A host-side Claude Code session that imports spades.ai is reading agent-writable text.
 
+## Google Drive (read-only service account)
+
+A service-account key lets the agent read Drive files that you share with that account (as Viewer). It
+is **on whenever a valid key exists, and off otherwise**. `GOOGLE_DRIVE=0` in `project.conf` turns it off
+for one project. Builders only: the research container never gets it. Setup, sharing and revoking:
+[docs/runbooks/google-drive-access.md](../docs/runbooks/google-drive-access.md).
+
 ## Known residual risks
 
 The firewall confines the agent to allowlisted names on ports 22, 80 and 443 (plus 7844 to
@@ -682,6 +690,7 @@ and to DNS for allowlisted names only. It does not remove these risks:
   could be handed, is an exfiltration path: github.com with a foreign token, S3, Google Drive or
   googleapis, Zenodo, PyPI. A bucket-style entry such as `s3-us-west-2.amazonaws.com` covers every
   bucket under it. List the narrowest names you can.
+- **Google Drive service-account key** (`google-drive-sa.json`, where present). Anyone who holds it, the agent included, can read everything you shared with that account. Share as Viewer only, and only what the agent needs. Delete the key in the Cloud console to revoke. See [docs/runbooks/google-drive-access.md](../docs/runbooks/google-drive-access.md).
 - **Shared CDN IPs.** An allowed IP stays allowed, and CDN edge IPs serve many other sites. A
   connection to an allowed IP with a different Host/SNI can reach another site on the same CDN.
 - **DNS tunnelling through allowlisted domains** whose zones are delegated to users (dynamic-DNS
