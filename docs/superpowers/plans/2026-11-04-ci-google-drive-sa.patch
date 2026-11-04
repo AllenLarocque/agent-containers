@@ -1,0 +1,41 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index ac1f223..54e09b0 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -519,12 +519,25 @@ jobs:
+         run: bash tests/launcher/test-agent-new.sh
+       - name: Acceptance (setupProject behind firewall, plain Rscript)
+         if: steps.mode.outputs.mode == 'full'
++        env:
++          # Optional: a Drive service-account key + a file shared ONLY with it. Absent -> no mount, no env.
++          GDRIVE_SA_KEY: ${{ secrets.GDRIVE_SA_KEY }}
++          GDRIVE_PRIVATE_TEST_URL: ${{ vars.GDRIVE_PRIVATE_TEST_URL }}
+         run: |
+           # CI-ONLY: agent (UID 1000) must be able to write .Rprofile and the project library in the
+           # bind mount. Do NOT copy this chown into local scripts (it would hand your files to UID 1000).
+           sudo chown -R 1000:1000 tests/acceptance/minimal-project
++          sa=()
++          if [ -n "$GDRIVE_SA_KEY" ]; then
++            ( umask 077; printf '%s' "$GDRIVE_SA_KEY" > /tmp/gdrive-sa.json )
++            sudo chown 1000:1000 /tmp/gdrive-sa.json   # CI-ONLY (as above): the agent is uid 1000
++            sa=(-v /tmp/gdrive-sa.json:/run/secrets/google-drive-sa.json:ro
++                -e GOOGLEDRIVE_AUTH=/run/secrets/google-drive-sa.json
++                -e GDRIVE_PRIVATE_TEST_URL="$GDRIVE_PRIVATE_TEST_URL")
++          fi
+           docker run -d --name acc --cap-add NET_ADMIN --cap-add NET_RAW \
+             -v "$GH_META_FIXTURE:/etc/firewall/github-meta.json:ro" \
++            "${sa[@]}" \
+             -v "$PWD/tests/acceptance/minimal-project:/workspace" spades-gis:ci sleep infinity
+           docker exec acc sudo /usr/local/bin/init-firewall.sh
+           start=$(date +%s)
+@@ -535,7 +548,9 @@ jobs:
+           docker exec -u agent -w /workspace acc Rscript -e 'library(SpaDES.core); print(.libPaths()); p <- find.package("SpaDES.core"); cat("SpaDES.core from:", p, "\n"); stopifnot(startsWith(p, "/home/agent/.local/share/R/workspace/packages")); cat("second run OK\n")'
+       - name: Acceptance cleanup
+         if: always() && steps.mode.outputs.mode == 'full'
+-        run: docker rm -f acc || true
++        run: |
++          docker rm -f acc || true
++          sudo rm -f /tmp/gdrive-sa.json || rm -f /tmp/gdrive-sa.json
+ 
+   lint:
+     runs-on: ubuntu-24.04
