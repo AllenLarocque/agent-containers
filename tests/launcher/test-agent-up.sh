@@ -251,7 +251,7 @@ AMBIENT=(COMPOSE_FILE=evil.yaml COMPOSE_PROFILES=evil PROJECT_DIR=/evil SPADES_A
 rc=0; out=$(au up "$NAME" 2>&1) || rc=$?
 AMBIENT=()
 check "up succeeds (stub op + stub docker)" test "$rc" -eq 0
-C="compose --env-file $CFG/project.conf -f $CFG/compose.yaml -f $CFG/.generated/env-passthrough.yaml -f $CFG/.generated/t3-connect.yaml -f $CFG/.generated/research.yaml -f $CFG/.generated/rstudio.yaml -f $CFG/.generated/ftp.yaml -f $CFG/.generated/hostname.yaml -f $CFG/.generated/restart.yaml --project-directory $CFG -p $NAME"
+C="compose --env-file $CFG/project.conf -f $CFG/compose.yaml -f $CFG/.generated/env-passthrough.yaml -f $CFG/.generated/t3-connect.yaml -f $CFG/.generated/research.yaml -f $CFG/.generated/rstudio.yaml -f $CFG/.generated/ftp.yaml -f $CFG/.generated/google-drive.yaml -f $CFG/.generated/hostname.yaml -f $CFG/.generated/restart.yaml --project-directory $CFG -p $NAME"
 check "  ...op run resolves project.env, then runs docker compose" \
   grep -qxF "OP: run --env-file $CFG/project.env -- docker $C up -d --force-recreate" "$OPLOG"
 check "  ...docker compose gets ONLY the config dir's files" grep -qxF "ARGS: $C up -d --force-recreate" "$DLOG"
@@ -636,7 +636,7 @@ check "  ...created the research exchange root" test -d "$RD"
 refuses "init --profile research never overwrites" 'already exists' au init --profile research
 refuses "up research refuses the placeholder digest" 'not pinned to a real digest' au up research
 sed -i "s/REPLACE_WITH_DIGEST_FROM_digests.md/$H64/" "$RCFG/compose.yaml"
-RC="compose --env-file $RCFG/project.conf -f $RCFG/compose.yaml -f $RCFG/.generated/env-passthrough.yaml -f $RCFG/.generated/t3-connect.yaml -f $RCFG/.generated/research.yaml -f $RCFG/.generated/rstudio.yaml -f $RCFG/.generated/ftp.yaml -f $RCFG/.generated/hostname.yaml -f $RCFG/.generated/restart.yaml --project-directory $RCFG -p research"
+RC="compose --env-file $RCFG/project.conf -f $RCFG/compose.yaml -f $RCFG/.generated/env-passthrough.yaml -f $RCFG/.generated/t3-connect.yaml -f $RCFG/.generated/research.yaml -f $RCFG/.generated/rstudio.yaml -f $RCFG/.generated/ftp.yaml -f $RCFG/.generated/google-drive.yaml -f $RCFG/.generated/hostname.yaml -f $RCFG/.generated/restart.yaml --project-directory $RCFG -p research"
 : > "$DLOG"; rm -f "$OPLOG"; TOK=""
 AMBIENT=(OP_SERVICE_ACCOUNT_TOKEN=owner-op-token GH_TOKEN=owner-gh-token)
 rc=0; out=$(au up research 2>&1) || rc=$?
@@ -750,6 +750,81 @@ refuses "up refuses RESEARCH_CONTACT_EMAIL on a builder" 'for the research conta
 refuses "config refuses RESEARCH_CONTACT_EMAIL on a builder" 'for the research container only' au config "$NAME"
 cp "$T/pconf-ce.bak" "$CFG/project.conf"
 au config research >/dev/null 2>&1 || true
+
+# ---- Google Drive service-account key (read-only mount + GOOGLEDRIVE_AUTH); builders only
+GDY="$CFG/.generated/google-drive.yaml"; GDRY="$RCFG/.generated/google-drive.yaml"
+GDKEY='{"type": "service_account", "client_email": "ci@x.iam.gserviceaccount.com", "private_key": "FAKE"}'
+gd_empty(){ [ "$(grep -v '^#' "$1")" = "$(printf 'services:\n  agent: {}')" ]; }
+gd_key(){ printf '%s\n' "$GDKEY" > "$1"; chmod 600 "$1"; }   # $1 path
+mkdir -p "$CFGROOT/.shared"
+SHKEY="$CFGROOT/.shared/google-drive-sa.json"; PRKEY="$CFG/google-drive-sa.json"
+rm -f "$SHKEY" "$PRKEY"
+au config "$NAME" >/dev/null 2>&1 || true
+check "google-drive: no key -> agent: {}" gd_empty "$GDY"
+gd_key "$SHKEY"; TOK=tok
+rc=0; gdout="$(au up "$NAME" 2>&1)" || rc=$?
+check "google-drive: shared key -> up succeeds" test "$rc" -eq 0
+check "google-drive: shared key -> ro bind to /run/secrets/google-drive-sa.json" \
+  bash -c 'y="$1"; grep -qF "source: \"$2\"" "$y" && grep -qF "target: \"/run/secrets/google-drive-sa.json\"" "$y" && grep -qx "        read_only: true" "$y"' _ "$GDY" "$SHKEY"
+check "  ...and GOOGLEDRIVE_AUTH points at it" grep -qx '      GOOGLEDRIVE_AUTH: "/run/secrets/google-drive-sa.json"' "$GDY"
+check "up prints the service-account email" grep -qF "Google Drive: service account ci@x.iam.gserviceaccount.com (shared key, read-only mount)" <<<"$gdout"
+check "  ...never the private_key" bash -c '! grep -q FAKE <<<"$1"' _ "$gdout"
+check "  ...nor the generated file" bash -c '! grep -q FAKE "$1"' _ "$GDY"
+if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+  gd_json(){ aureal config "$NAME" --format json | grep -q '"GOOGLEDRIVE_AUTH": "/run/secrets/google-drive-sa.json"'; }
+  check "google-drive: config JSON shows GOOGLEDRIVE_AUTH" gd_json
+fi
+gd_key "$PRKEY"
+au config "$NAME" >/dev/null 2>&1
+check "google-drive: project key beats shared key" grep -qF "source: \"$PRKEY\"" "$GDY"
+gdout="$(au up "$NAME" 2>&1)" || true
+check "  ...up says (project key ...)" grep -qF "(project key, read-only mount)" <<<"$gdout"
+rm -f "$PRKEY"
+cp "$CFG/project.conf" "$T/pconf-gd.bak"
+echo 'GOOGLE_DRIVE=0' >> "$CFG/project.conf"
+au config "$NAME" >/dev/null 2>&1
+check "google-drive: GOOGLE_DRIVE=0 -> agent: {}" gd_empty "$GDY"
+cp "$T/pconf-gd.bak" "$CFG/project.conf"
+au config "$NAME" >/dev/null 2>&1
+check "  ...removing GOOGLE_DRIVE=0 mounts it again" grep -q "GOOGLEDRIVE_AUTH" "$GDY"
+au config research >/dev/null 2>&1 || true
+check "google-drive: research profile -> agent: {} (even with a shared key)" gd_empty "$GDRY"
+# a stale mount from an earlier builder life is regenerated, and a removed key leaves no dangling bind
+rm -f "$SHKEY"
+au up "$NAME" >/dev/null 2>&1 || true
+check "google-drive: key removed after up -> agent: {}" gd_empty "$GDY"
+# symlinks: resolved; the target is mounted; a dangling one is refused
+mkdir -p "$T/vault"; gd_key "$T/vault/sa.json"; ln -s "$T/vault/sa.json" "$SHKEY"
+au config "$NAME" >/dev/null 2>&1
+check "google-drive: symlinked key -> target mounted" grep -qF "source: \"$T/vault/sa.json\"" "$GDY"
+rm -f "$SHKEY"; ln -s "$T/vault/missing.json" "$SHKEY"
+refuses "google-drive: dangling symlink refused" 'dangling symlink' au up "$NAME"
+refuses "  ...also by config" 'dangling symlink' au config "$NAME"
+check "  ...stop/down do not refuse (render off)" au stop "$NAME"
+check "  ...and the overlay is off" gd_empty "$GDY"
+rm -f "$SHKEY"
+# a config root with a space: the bind source is quoted
+SP="$T/sp ace"; mkdir -p "$SP/.shared"; cp -r "$CFG" "$SP/$NAME"; gd_key "$SP/.shared/google-drive-sa.json"; rm -f "$SP/$NAME/google-drive-sa.json"
+( AGENT_CONTAINERS_CONFIG="$SP" au config "$NAME" >/dev/null 2>&1 ) || true
+check "google-drive: config root with a space -> source quoted" grep -qF "source: \"$SP/.shared/google-drive-sa.json\"" "$SP/$NAME/.generated/google-drive.yaml"
+rm -rf "$SP"
+# refusals (never the content)
+printf '{"installed": {"client_id": "x", "client_secret": "FAKE"}}\n' > "$SHKEY"; chmod 600 "$SHKEY"
+refuses "google-drive: OAuth client JSON" 'service-account key' au up "$NAME"
+msg="$(au up "$NAME" 2>&1 || true)"
+check "  ...the message never shows the file's content" bash -c '! grep -q FAKE <<<"$1"' _ "$msg"
+gd_key "$SHKEY"; chmod 644 "$SHKEY"
+refuses "google-drive: mode 0644" 'chmod 600' au up "$NAME"
+refuses "  ...config refuses it too" 'chmod 600' au config "$NAME"
+check "  ...stop does not refuse" au stop "$NAME"
+chmod 400 "$SHKEY"
+check "google-drive: mode 0400 accepted" au config "$NAME"
+cp "$CFG/project.env" "$T/penv-gd.bak"
+echo 'GOOGLEDRIVE_AUTH=op://v/i/f' >> "$CFG/project.env"
+refuses "project.env defines GOOGLEDRIVE_AUTH" 'reserved' au up "$NAME"
+cp "$T/penv-gd.bak" "$CFG/project.env"
+rm -f "$SHKEY"; TOK=""
+au config "$NAME" >/dev/null 2>&1 || true
 
 # builder opt-in: RESEARCH=1
 cp "$CFG/project.conf" "$T/pconf-res.bak"
@@ -954,7 +1029,7 @@ if docker compose version >/dev/null 2>&1; then
   # RStudio OFF must render exactly what the launcher rendered before RStudio existed (no overlay).
   JPRE="$(cd "$T" && env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u T3_PORT -u T3_CONNECT HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" \
           docker compose --env-file "$CFG/project.conf" -f "$CFG/compose.yaml" -f "$CFG/.generated/env-passthrough.yaml" \
-          -f "$CFG/.generated/t3-connect.yaml" -f "$CFG/.generated/research.yaml" -f "$CFG/.generated/hostname.yaml" -f "$CFG/.generated/restart.yaml" --project-directory "$CFG" -p "$NAME" config --format json)"
+          -f "$CFG/.generated/t3-connect.yaml" -f "$CFG/.generated/research.yaml" -f "$CFG/.generated/google-drive.yaml" -f "$CFG/.generated/hostname.yaml" -f "$CFG/.generated/restart.yaml" --project-directory "$CFG" -p "$NAME" config --format json)"
   check "rendered (RSTUDIO=0): identical to the config rendered without the RStudio overlay" \
     bash -c 'diff <(jq -S . <<<"$1") <(jq -S . <<<"$2")' _ "$JPRE" "$J"
   check "rendered (RSTUDIO=0): no rstudio volume, no 8787" \
@@ -976,7 +1051,7 @@ if docker compose version >/dev/null 2>&1; then
   # FTP_HOSTS unset must render exactly what the launcher rendered before FTP existed (no overlay).
   JNOFTP="$(cd "$T" && env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u T3_PORT -u T3_CONNECT HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" \
           docker compose --env-file "$CFG/project.conf" -f "$CFG/compose.yaml" -f "$CFG/.generated/env-passthrough.yaml" \
-          -f "$CFG/.generated/t3-connect.yaml" -f "$CFG/.generated/research.yaml" -f "$CFG/.generated/rstudio.yaml" -f "$CFG/.generated/hostname.yaml" -f "$CFG/.generated/restart.yaml" --project-directory "$CFG" -p "$NAME" config --format json)"
+          -f "$CFG/.generated/t3-connect.yaml" -f "$CFG/.generated/research.yaml" -f "$CFG/.generated/rstudio.yaml" -f "$CFG/.generated/google-drive.yaml" -f "$CFG/.generated/hostname.yaml" -f "$CFG/.generated/restart.yaml" --project-directory "$CFG" -p "$NAME" config --format json)"
   check "rendered (FTP_HOSTS unset): identical to the config rendered without the FTP overlay" \
     bash -c 'diff <(jq -S . <<<"$1") <(jq -S . <<<"$2")' _ "$JNOFTP" "$J"
   cp "$CFG/project.conf" "$T/pconf-ftp-render.bak"
@@ -1059,13 +1134,13 @@ services:
 OVR
   dc(){ env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u COMPOSE_FILE HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" GH_TOKEN=dummy-in-container \
           docker compose --env-file "$CFG/project.conf" -f "$CFG/compose.yaml" -f "$CFG/.generated/env-passthrough.yaml" \
-          -f "$CFG/.generated/t3-connect.yaml" -f "$CFG/.generated/research.yaml" -f "$CFG/.generated/rstudio.yaml" -f "$CFG/.generated/ftp.yaml" -f "$CFG/.generated/hostname.yaml" -f "$CFG/.generated/restart.yaml" -f "$T/override.yaml" --project-directory "$CFG" -p "$NAME" "$@"; }
+          -f "$CFG/.generated/t3-connect.yaml" -f "$CFG/.generated/research.yaml" -f "$CFG/.generated/rstudio.yaml" -f "$CFG/.generated/ftp.yaml" -f "$CFG/.generated/google-drive.yaml" -f "$CFG/.generated/hostname.yaml" -f "$CFG/.generated/restart.yaml" -f "$T/override.yaml" --project-directory "$CFG" -p "$NAME" "$@"; }
   # The research container: agent-up's exact arguments, with the owner's ambient secrets in compose's
   # environment (they must NOT reach the container).
   rdc(){ env -u PROJECT -u PROJECT_DIR -u SPADES_AI_DIR -u AGENT_MEMORY_DIR -u COMPOSE_FILE HOME="$H" DOCKER_CONFIG="$REAL_HOME/.docker" \
           GH_TOKEN=ambient-gh OP_SERVICE_ACCOUNT_TOKEN=ambient-op \
           docker compose --env-file "$RCFG/project.conf" -f "$RCFG/compose.yaml" -f "$RCFG/.generated/env-passthrough.yaml" \
-          -f "$RCFG/.generated/t3-connect.yaml" -f "$RCFG/.generated/research.yaml" -f "$RCFG/.generated/rstudio.yaml" -f "$RCFG/.generated/ftp.yaml" -f "$RCFG/.generated/hostname.yaml" -f "$RCFG/.generated/restart.yaml" -f "$T/override.yaml" --project-directory "$RCFG" -p research "$@"; }
+          -f "$RCFG/.generated/t3-connect.yaml" -f "$RCFG/.generated/research.yaml" -f "$RCFG/.generated/rstudio.yaml" -f "$RCFG/.generated/ftp.yaml" -f "$RCFG/.generated/google-drive.yaml" -f "$RCFG/.generated/hostname.yaml" -f "$RCFG/.generated/restart.yaml" -f "$T/override.yaml" --project-directory "$RCFG" -p research "$@"; }
   # The agent (uid 1000) writes into the project dir (e.g. RStudio's .Rproj.user): hand $T back to the
   # runner before removing it, or the EXIT trap's rm fails and turns a passing run into exit 1.
   reclaim(){ docker run --rm -u root -v "$T:/t" "$TEMPLATE_IMAGE" chown -R "$(id -u):$(id -g)" /t >/dev/null 2>&1 || true; }
