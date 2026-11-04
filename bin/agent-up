@@ -116,6 +116,7 @@ RESEARCH_DIR=$HOME/agent-research
 # Its host port (127.0.0.1 only), unique across all projects' T3_PORT and RSTUDIO_PORT.
 RSTUDIO=0
 RSTUDIO_PORT=$(next_rstudio_port)
+# Google Drive: a service-account key (project dir google-drive-sa.json, else .shared/google-drive-sa.json) is mounted read-only; set GOOGLE_DRIVE=0 to opt out.
 CONFEOF
   ftp_seed "$image" >> "$tmp/project.conf"
   chmod 600 "$tmp/compose.yaml" "$tmp/project.env" "$tmp/allowlist" "$tmp/project.conf"
@@ -510,10 +511,67 @@ check_digest(){
 }
 check_project_env(){ # op:// references only; never echo a line (it could hold a pasted secret)
   local bad reserved
-  reserved="$(grep -nE '^[[:space:]]*(PROJECT|PROJECT_DIR|PROFILE|IMAGE|SPADES_AI_DIR|AGENT_MEMORY_DIR|T3_PORT|T3_CONNECT|TAILSCALE_HTTPS_PORT|TAILSCALE_HOST|RESEARCH|RSTUDIO|FTP_HOSTS|PATH|HOME|COMPOSE|(COMPOSE|DOCKER|OP|TUNNEL|RESEARCH|RS|RSTUDIO)_[A-Za-z0-9_]*)=' "$1" | sed 's/^\([0-9]*\):[[:space:]]*\([A-Za-z0-9_]*\)=.*/line \1: \2/' | paste -sd, - || true)"
+  reserved="$(grep -nE '^[[:space:]]*(PROJECT|PROJECT_DIR|PROFILE|IMAGE|SPADES_AI_DIR|AGENT_MEMORY_DIR|T3_PORT|T3_CONNECT|TAILSCALE_HTTPS_PORT|TAILSCALE_HOST|RESEARCH|RSTUDIO|FTP_HOSTS|GOOGLE_DRIVE|GOOGLEDRIVE_AUTH|GARGLE_SERVICE_ACCOUNT|PATH|HOME|COMPOSE|(COMPOSE|DOCKER|OP|TUNNEL|RESEARCH|RS|RSTUDIO)_[A-Za-z0-9_]*)=' "$1" | sed 's/^\([0-9]*\):[[:space:]]*\([A-Za-z0-9_]*\)=.*/line \1: \2/' | paste -sd, - || true)"
   [ -z "$reserved" ] || die "$1 uses reserved key name(s) that would override compose or the launcher ($reserved); rename them"
   bad="$(grep -nEv '^[[:space:]]*(#|$)' "$1" | grep -Ev '^[0-9]+:[A-Za-z_][A-Za-z0-9_]*=op://[^[:space:]]+$' | cut -d: -f1 | paste -sd, - || true)"
   [ -z "$bad" ] || die "$1 may hold only KEY=op://... references; offending line number(s): $bad (values not shown)"
+}
+warn(){ printf 'agent-up: WARNING: %s\n' "$*" >&2; }
+GD_TARGET=/run/secrets/google-drive-sa.json
+gd_candidate(){ # $1 config dir -> the key file as found (project, else shared; may be a symlink); nothing: off/none/research
+  local f
+  [ "$(profile "$1")" = builder ] && [ "$(conf_get "$1/project.conf" GOOGLE_DRIVE)" != 0 ] || return 0
+  for f in "$1/google-drive-sa.json" "$CFG_ROOT/.shared/google-drive-sa.json"; do
+    if [ -e "$f" ] || [ -L "$f" ]; then printf '%s' "$f"; return 0; fi
+  done
+}
+gd_writable(){ # $1 config dir, $2 canonical key, $3 key as found -> why an agent could swap it (inside a rw bind source); nothing: fine
+  local key src p d; d="$(cd "$(dirname "$3")" 2>/dev/null && pwd -P || true)"
+  for key in PROJECT_DIR SPADES_AI_DIR AGENT_MEMORY_DIR RESEARCH_DIR; do
+    if [ "$key" = RESEARCH_DIR ]; then
+      research_on "$1" || [ -n "$(conf_get "$1/project.conf" RESEARCH_DIR)" ] || continue
+      src="$(research_dir "$1")"
+    else src="$(conf_get "$1/project.conf" "$key")"; fi
+    [ -n "$src" ] && src="$(cd "$src" 2>/dev/null && pwd -P)" || continue   # missing: check_mounts refuses it at up
+    if overlaps "$2" "$src"; then p="$2"                                      # the key itself
+    elif [ -n "$d" ] && overlaps "$d" "$src"; then p="$3"                     # the folder it was found in (a link there can be swapped)
+    else continue; fi
+    echo "$p is inside $key ($src), which the agent can write: keep the key under ~/.config/agent-containers (docs/runbooks/google-drive-access.md)"; return 0
+  done
+}
+gd_shape(){ # $1 readable file: shaped like a service-account JSON object? (no jq/python on the host: shape checks; content never printed)
+  [ "$(tr -d '[:space:]' < "$1" | head -c 1)" = '{' ] && [ "$(tr -d '[:space:]' < "$1" | tail -c 1)" = '}' ] \
+    && grep -Eq '"type"[[:space:]]*:[[:space:]]*"service_account"' "$1" \
+    && grep -Eq '"client_email"[[:space:]]*:[[:space:]]*"[^"@]+@[^"]+"' "$1" \
+    && grep -Eq '"private_key"[[:space:]]*:' "$1"
+}
+gd_problem(){ # $1 config dir, $2 key as found, $3 its canonical path -> what is wrong with it (never its content); nothing: fine
+  local t="$3" mode w
+  [ -n "$t" ] && [ -f "$t" ] || { echo "$2 is a dangling symlink or not a regular file (fix the link, or delete it)"; return 0; }
+  w="$(gd_writable "$1" "$t" "$2")"; [ -z "$w" ] || { echo "$w"; return 0; }
+  [ -r "$t" ] || { echo "$t is not readable by you (uid $(id -u))"; return 0; }
+  gd_shape "$t" \
+    || { echo "$t is not a Google service-account key (it needs \"type\": \"service_account\", a client_email and a private_key; an OAuth client JSON will not do). See docs/runbooks/google-drive-access.md"; return 0; }
+  mode="$(stat -c %a "$t")"
+  [ $(( 8#$mode & 077 )) -eq 0 ] || echo "$t has mode $mode: group and other must have no access. Run: chmod 600 $(printf %q "$t")"
+}
+gd_resolve(){ # $1 config dir: resolve the key ONCE (readlink -f) and validate THAT path, which is also the mount source (no re-resolving: TOCTOU).
+  # Sets GD_FOUND (as found), GD_KEY (canonical; empty unless valid), GD_PROBLEM (never the content). Call directly, not in $(...).
+  [ "${GD_FOR-}" != "$1" ] || return 0
+  GD_FOR="$1"; GD_KEY=""; GD_PROBLEM=""; GD_FOUND="$(gd_candidate "$1")"
+  [ -n "$GD_FOUND" ] || return 0
+  local t; t="$(readlink -f "$GD_FOUND" 2>/dev/null || true)"
+  GD_PROBLEM="$(gd_problem "$1" "$GD_FOUND" "$t")"
+  [ -n "$GD_PROBLEM" ] || GD_KEY="$t"
+}
+google_drive_email(){ # $1 resolved key -> its client_email (not a secret)
+  grep -o '"client_email"[[:space:]]*:[[:space:]]*"[^"]*"' "$1" | head -n 1 | sed 's/.*:[[:space:]]*"\(.*\)"$/\1/'
+}
+check_google_drive(){ # only up and config: refuse a key that is present but wrong
+  gd_resolve "$1"
+  [ -z "$GD_PROBLEM" ] || die "Google Drive key: $GD_PROBLEM"
+  [ -z "$GD_KEY" ] || [ "$(stat -c %u "$GD_KEY")" = 1000 ] \
+    || warn "$GD_KEY is not owned by uid 1000: the agent may not be able to read it"
 }
 under(){ # is resolved path $1 equal to or inside resolved path $2? QUOTED prefix: path characters never glob; "/" holds everything
   [ "$2" = / ] && return 0
@@ -714,6 +772,23 @@ write_ftp(){ # FTP_HOSTS set (ftp_on): the host list, mounted read-only for the 
     rm -f "$list"
   fi
 }
+write_google_drive(){ # a valid service-account key (gd_resolve): its canonical path mounted read-only, GOOGLEDRIVE_AUTH points at it. Otherwise (none, off, research, invalid: stop/down never refuse): nothing.
+  local out="$1/.generated/google-drive.yaml" key; gd_resolve "$1"; key="$GD_KEY"
+  mkdir -p "$1/.generated"; chmod 700 "$1/.generated"
+  {
+    echo "# GENERATED by agent-up from the Google Drive service-account key (docs/runbooks/google-drive-access.md). Do not edit."
+    echo "services:"
+    if [ -n "$key" ]; then
+      echo "  agent:"
+      echo "    environment:"
+      echo "      GOOGLEDRIVE_AUTH: $(yaml_str "$GD_TARGET")"
+      echo "    volumes:"
+      bind_yaml "$key" "$GD_TARGET" ro
+    else
+      echo "  agent: {}"
+    fi
+  } > "$out"
+}
 container_hostname(){ # $1 project -> a valid hostname: _ -> -, no trailing hyphen, at most 63 characters
   local h; h="$(printf '%s' "$1" | tr '_' '-' | cut -c1-63)"; h="${h%"${h##*[!-]}"}"; printf '%s' "${h:-agent}"
 }
@@ -737,10 +812,10 @@ write_restart(){ # always: come back when Docker starts (e.g. after a reboot), u
 }
 compose_cmd(){ # sets COMPOSE for config dir $1
   COMPOSE=(docker compose --env-file "$1/project.conf" -f "$1/compose.yaml" -f "$1/.generated/env-passthrough.yaml"
-           -f "$1/.generated/t3-connect.yaml" -f "$1/.generated/research.yaml" -f "$1/.generated/rstudio.yaml" -f "$1/.generated/ftp.yaml" -f "$1/.generated/hostname.yaml" -f "$1/.generated/restart.yaml"
+           -f "$1/.generated/t3-connect.yaml" -f "$1/.generated/research.yaml" -f "$1/.generated/rstudio.yaml" -f "$1/.generated/ftp.yaml" -f "$1/.generated/google-drive.yaml" -f "$1/.generated/hostname.yaml" -f "$1/.generated/restart.yaml"
            --project-directory "$1" -p "$(basename "$1")")
 }
-prepare(){ check_files "$1"; write_passthrough "$1"; write_t3_connect "$1"; write_research "$1"; write_rstudio "$1"; write_ftp "$1"; write_hostname "$1"; write_restart "$1"; compose_cmd "$1"; }
+prepare(){ check_files "$1"; write_passthrough "$1"; write_t3_connect "$1"; write_research "$1"; write_rstudio "$1"; write_ftp "$1"; write_google_drive "$1"; write_hostname "$1"; write_restart "$1"; compose_cmd "$1"; }
 
 cmd_up(){
   [ $# -eq 1 ] || usage
@@ -754,6 +829,7 @@ cmd_up(){
   check_research "$cfg"
   check_rstudio "$cfg"
   check_ftp "$cfg"
+  check_google_drive "$cfg"
   check_digest "$cfg/compose.yaml"
   if [ "$(profile "$cfg")" = research ]; then check_research_env "$cfg"; else check_project_env "$cfg/project.env"; fi
   check_mounts "$cfg"
@@ -797,6 +873,11 @@ cmd_up(){
     # A hint only: the Docker daemon's kernel may not be this one (it is, on WSL2 and native Linux).
     [ -d /sys/module/nf_conntrack_ftp ] || echo "agent-up: WARNING: nf_conntrack_ftp is not loaded in this kernel: the container's firewall will refuse to start. Run: sudo modprobe nf_conntrack_ftp (at every boot: README, FTP uploads)"
   fi
+  gd_resolve "$cfg"
+  if [ -n "$GD_KEY" ]; then
+    local gl=shared; [ "$GD_FOUND" != "$cfg/google-drive-sa.json" ] || gl=project
+    echo "agent-up: Google Drive: service account $(google_drive_email "$GD_KEY") ($gl key, read-only mount)"
+  fi
   if [ "$(rstudio "$cfg")" = 1 ]; then
     echo "agent-up: RStudio Server at http://$(rstudio_host "$name"):$(conf_get "$cfg/project.conf" RSTUDIO_PORT) (user and password: agent-up rstudio $name)"
   fi
@@ -812,6 +893,7 @@ cmd_config(){
   check_research "$cfg"
   check_rstudio "$cfg"
   check_ftp "$cfg"
+  check_google_drive "$cfg"
   prepare "$cfg"
   # Never print the owner's ambient value of a passthrough key: it is only meaningful under `op run`.
   local k
@@ -1064,6 +1146,7 @@ cmd_update(){
     elif [ -z "$cur" ]; then res="SKIP (no pinned image: line in compose.yaml)"; rc=1
     elif new="$(digest_for "$name_img" "$digests")"; [ -z "$new" ]; then res="SKIP (image $name_img not in digests.md)"; rc=1
     elif [ "$new" = "$old" ] && { cdig=$(container_digest "$c"); [ -z "$cdig" ] || [ "$cdig" = "$new" ]; }; then res="current"   # compose is current; a container left on an older image is not
+    elif gd_resolve "$cfg"; [ -n "$GD_PROBLEM" ]; then res="NOT UPDATED (Google Drive key: $GD_PROBLEM)"; rc=1   # `up` would refuse it: compose untouched
     elif ! is_running "$c"; then
       if [ "$new" = "$old" ]; then res="on the old image, not started (compose is current; start with: agent-up up $n, not docker start)"
       else rewrite_digest "$cfg/compose.yaml" "$new"; res="updated, not started (start with: agent-up up $n)"; fi
@@ -1170,7 +1253,7 @@ cmd_status(){
 # must not override it (a shell variable beats --env-file in compose).
 unset COMPOSE_FILE COMPOSE_PROFILES COMPOSE_PATH_SEPARATOR COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES \
       PROJECT PROJECT_DIR PROFILE IMAGE SPADES_AI_DIR AGENT_MEMORY_DIR T3_PORT T3_CONNECT RESEARCH RESEARCH_DIR \
-      RSTUDIO RSTUDIO_PORT TAILSCALE_HTTPS_PORT TAILSCALE_HOST FTP_HOSTS RESEARCH_CONTACT_EMAIL
+      RSTUDIO RSTUDIO_PORT TAILSCALE_HTTPS_PORT TAILSCALE_HOST FTP_HOSTS GOOGLE_DRIVE RESEARCH_CONTACT_EMAIL
 
 [ $# -ge 1 ] || usage
 cmd="$1"; shift
