@@ -690,7 +690,7 @@ and to DNS for allowlisted names only. It does not remove these risks:
   could be handed, is an exfiltration path: github.com with a foreign token, S3, Google Drive or
   googleapis, Zenodo, PyPI. A bucket-style entry such as `s3-us-west-2.amazonaws.com` covers every
   bucket under it. List the narrowest names you can.
-- **Google Drive service-account key** (`google-drive-sa.json`, where present). Anyone who holds it, the agent included, can read everything you shared with that account. Share as Viewer only, and only what the agent needs. Delete the key in the Cloud console to revoke. See [docs/runbooks/google-drive-access.md](../docs/runbooks/google-drive-access.md).
+- **Google Drive service-account key** (`google-drive-sa.json`, where present). Anyone who holds it, the agent included, can read everything you shared with that account. Share as Viewer only, and only what the agent needs. The agent can copy the key into the project folder (and push it with git), or into `/research/briefs` when `RESEARCH=1`, so treat the key as the agent's, and revoke it if a project is compromised. Delete the key in the Cloud console to revoke. See [docs/runbooks/google-drive-access.md](../docs/runbooks/google-drive-access.md).
 - **Shared CDN IPs.** An allowed IP stays allowed, and CDN edge IPs serve many other sites. A
   connection to an allowed IP with a different Host/SNI can reach another site on the same CDN.
 - **DNS tunnelling through allowlisted domains** whose zones are delegated to users (dynamic-DNS

@@ -38,6 +38,9 @@ if (nzchar(Sys.getenv("GDRIVE_PRIVATE_TEST_URL"))) {
                                    destinationPath = dl2, fun = NA)
   fs <- list.files(dl2, full.names = TRUE, recursive = TRUE)
   stopifnot(length(fs) >= 1, all(file.size(fs) > 0))
+  # The anonymous fallback leaves no token: a token proves the service account did the download.
+  stopifnot("prepInputs did not authenticate with the service account (anonymous fallback?)" =
+              googledrive::drive_has_token())
   cat("Google Drive (service account): OK\n")
 } else {
   cat("Google Drive (service account): SKIPPED (no GDRIVE_PRIVATE_TEST_URL)\n")

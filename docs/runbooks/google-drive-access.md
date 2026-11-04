@@ -53,12 +53,17 @@ chmod 600 ~/.config/agent-containers/.shared/google-drive-sa.json
 
 - Why: the launcher reads the key from this path. The `chmod 600` is required: `agent-up`
   refuses a key that group or other users can read, and prints the `chmod` command to run.
-- The file must be a **service-account key** (it has `"type": "service_account"` and a
-  `client_email`). An OAuth client JSON will not do; `agent-up` refuses it.
+- The file must be a **service-account key** (it has `"type": "service_account"`, a
+  `client_email` and a `private_key`). An OAuth client JSON will not do; `agent-up` refuses it.
 - Key locations, in order:
   1. `~/.config/agent-containers/<project>/google-drive-sa.json` (this project only; wins), else
   2. `~/.config/agent-containers/.shared/google-drive-sa.json` (every builder project).
 - The key is never put in a repo. Do not commit it, paste it in chat, or put it in `project.env`.
+- A symlink is fine, but the file it points to must not be in a folder the agent can write (the
+  project folder, spades.ai, agent memory, or the research folder). `agent-up` refuses such a key.
+- If a project's update fails because of the key, `agent-up update` shows
+  `NOT UPDATED (Google Drive key: ...)` and leaves that project unchanged. Fix the key, then run
+  the update again.
 
 ## Share data with it
 
@@ -77,17 +82,17 @@ your data.
 
 ## Apply
 
-Per project:
+Run this for each builder project:
 
 ```bash
 agent-up up <project>
 ```
 
-Or for all projects:
+To list your projects, run `ls ~/.config/agent-containers`. Every folder there except `research`
+(and `.shared`) is a builder project.
 
-```bash
-agent-up update --all
-```
+`agent-up update --all` does **not** apply or change the key. It skips projects that are already on
+the current image.
 
 `up` prints a line like this, so you can see it took effect:
 
@@ -131,15 +136,24 @@ file is shared with "anyone with the link", so no key was needed.
 1. In the Cloud console, open **IAM & Admin → Service accounts**, then the account, then **Keys**.
 2. **Delete** the old key. It stops working at once.
 3. To keep using Drive, make a new key (setup step 5), replace the file at the same path, keep
-   `chmod 600`, and run `agent-up up <project>` (or `agent-up update --all`).
-4. To stop for good, also delete the file from the host and remove the service account's access from
-   your Drive folders (or delete the service account).
+   `chmod 600`, and run `agent-up up <project>` for each builder project (see "Apply"). Do not use
+   `agent-up update --all` for this.
+4. To stop for good, also delete the file from the host, then run `agent-up up <project>` for
+   **every** builder project. If you skip this, the old container comes back at the next reboot
+   (`restart: unless-stopped`), and Docker refuses to start it because the key file it mounts is
+   gone. Then remove the service account's access from your Drive folders (or delete the service
+   account).
+
+If the key is a symlink, its target must exist whenever Docker starts (for example at boot), or the
+container will not start.
 
 ## What it does not protect
 
 - Anyone who holds the key can read everything you shared with that account. Share only what the
   agent needs.
 - The agent can read the key file inside its container, so treat the key as the agent's.
+- The agent can copy the key into the project folder (and push it with git), or into
+  `/research/briefs` when `RESEARCH=1`. If a project may be compromised, revoke the key.
 - The firewall allows Drive and googleapis hosts. Those accept uploads, so see "Upload-capable
   allowlisted domains" in `project-template/README.md` (Known residual risks). Viewer sharing and
   no roles keep the key read-only for your data.
