@@ -58,6 +58,10 @@ oauth2.googleapis.com
 accounts.google.com
 drive.google.com
 drive.usercontent.google.com
+# --- PROJ transformation grids (datum shift files, e.g. NAD27/NAD83 -> WGS84), fetched on demand by
+# PROJ (sf, terra, GDAL) when PROJ_NETWORK=ON or proj_sync. Read-only static CDN (owner request
+# 2026-11-04). Exact host only.
+cdn.proj.org
 # Require::internetExists() probes www.google.com; if blocked Require flips to offline mode and
 # every install fails.
 www.google.com

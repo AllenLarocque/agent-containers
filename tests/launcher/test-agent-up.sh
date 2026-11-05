@@ -1281,6 +1281,8 @@ OVR
       check "$host resolves (Google Drive via prepInputs/googledrive)" \
         bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 "$2" A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID" "$host"
     done
+    check "cdn.proj.org resolves (PROJ transformation grids)" \
+      bash -c '[ -n "$(docker exec -u agent "$1" dig @127.0.0.1 cdn.proj.org A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID"
     check "  ...but storage.googleapis.com does NOT (anyone's bucket: exact Google hosts only)" \
       bash -c '[ -z "$(docker exec -u agent "$1" dig @127.0.0.1 storage.googleapis.com A +short +time=3 +tries=2 | grep -E "^[0-9.]+$")" ]' _ "$CID"
     # T3 Connect (T3_CONNECT=1 above): the firewall read the owner's switch, and the agent cannot flip it.
