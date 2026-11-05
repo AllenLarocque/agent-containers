@@ -17,6 +17,7 @@ decides each one. Agents propose here (by PR); they never edit an allowlist.
 
 | Host | Needed for | Where | Status |
 |---|---|---|---|
+| `cdn.proj.org` | PROJ transformation grids for sf/terra/GDAL (`PROJ_NETWORK=ON`, `projsync`) | base | added (this PR; owner request 2026-11-04) |
 | `www.googleapis.com`, `oauth2.googleapis.com`, `accounts.google.com`, `drive.google.com`, `drive.usercontent.google.com` | Google Drive via `prepInputs()` (googledrive/gargle: Drive API, OAuth, share-link downloads) | base | added (this PR; owner request 2026-11-04). `www.googleapis.com` accepts uploads with a Drive token |
 | `results-receiver.actions.githubusercontent.com` | `gh run view --log` (GitHub Actions results service) | base | added (this PR) |
 | `productionresultssa10.blob.core.windows.net` | GitHub Actions log download (redirect target) | base | added (this PR) |
