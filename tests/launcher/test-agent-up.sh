@@ -987,6 +987,30 @@ if docker compose version >/dev/null 2>&1; then
   check "config: no CLAUDE_CODE_ARTIFACT line at all warns too" \
     bash -c 'grep -qF "has no CLAUDE_CODE_ARTIFACT" <<<"$1"' _ "$(cderr "$NAME")"
   cp "$T/compose-cd.bak" "$CFG/compose.yaml"
+  sed -i 's/^\([[:space:]]*\)CLAUDE_CODE_ARTIFACT: "1"/&\n\1"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "0"/' "$CFG/compose.yaml"
+  check "config: a QUOTED traffic-flag key next to CLAUDE_CODE_ARTIFACT still warns (any value removes the tools)" \
+    bash -c 'grep -qF "sets CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" <<<"$1"' _ "$(cderr "$NAME")"
+  cp "$T/compose-cd.bak" "$CFG/compose.yaml"
+  python3 - "$CFG/compose.yaml" <<'PYEOF'
+import re, sys
+p = sys.argv[1]; s = open(p).read()
+# map-form environment -> list form (- KEY=value), the other syntax compose accepts
+def conv(m):
+    ind = m.group(1); body = m.group(2)
+    out = []
+    for line in body.splitlines():
+        km = re.match(r'^(\s+)([A-Za-z_][A-Za-z0-9_]*):\s*"?([^"]*)"?\s*$', line)
+        out.append(f'{km.group(1)}- {km.group(2)}={km.group(3)}' if km else line)
+    return ind + 'environment:\n' + '\n'.join(out) + '\n'
+s2 = re.sub(r'^( +)environment:\n((?:\1  .*\n)+)', conv, s, count=1, flags=re.M)
+assert s2 != s; open(p, 'w').write(s2)
+PYEOF
+  check "config: list-form environment (- CLAUDE_CODE_ARTIFACT=1) gets no Claude Docs warning" \
+    bash -c '! grep -qE "Claude Docs|RENDER-FAILED" <<<"$1"' _ "$(cderr "$NAME")"
+  JL="$( cd "$T" && aureal config "$NAME" --format json 2>/dev/null )" || JL=""
+  check "  ...and the list form really renders CLAUDE_CODE_ARTIFACT=1 (the edit took)" \
+    test "$(jq -r .services.agent.environment.CLAUDE_CODE_ARTIFACT <<<"$JL" 2>/dev/null)" = 1
+  cp "$T/compose-cd.bak" "$CFG/compose.yaml"
   check "config: research keeps the traffic flag and gets no Claude Docs warning" \
     bash -c '! grep -qE "Claude Docs|RENDER-FAILED" <<<"$1"' _ "$(cderr research)"
   check "rendered: T3_CONNECT=0 sets no cloudflared env" \
