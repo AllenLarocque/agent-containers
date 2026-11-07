@@ -22,5 +22,5 @@ decides each one. Agents propose here (by PR); they never edit an allowlist.
 | `results-receiver.actions.githubusercontent.com` | `gh run view --log` (GitHub Actions results service) | base | added (this PR) |
 | `productionresultssa10.blob.core.windows.net` | GitHub Actions log download (redirect target) | base | added (this PR) |
 | `productionresultssa<N>.blob.core.windows.net`, other N | the same; GitHub shards logs across numbered accounts | base | **add each when hit**; the range is unknown, don't guess |
-| `mcp-proxy.anthropic.com` | Claude.ai MCP connectors in Claude Code (the "Claude Docs" connector failed with EAI_AGAIN, 2026-10-11) | base | **owner to decide**: it only matters if you want claude.ai connectors inside containers |
+| `mcp-proxy.anthropic.com` | Claude.ai MCP connectors in Claude Code (the "Claude Docs" connector failed with EAI_AGAIN, 2026-10-11) | base | added (this PR; owner decision 2026-11-05, trialled on spades_pe 2026-11-06). Every connector on the owner's claude.ai account becomes reachable |
 | `webin2.ebi.ac.uk` | ENA read upload (spades_bioinformatics) | FTP | after the FTP_HOSTS PR (#38) merges |
