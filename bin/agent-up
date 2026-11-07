@@ -569,9 +569,10 @@ google_drive_email(){ # $1 resolved key -> its client_email (not a secret)
 }
 check_claude_docs(){ # $1 config dir. Builders only; a warning, never a refusal (the owner may keep it off on purpose)
   [ "$(profile "$1")" = research ] && return 0
-  if grep -Eq '^[[:space:]]*CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC[[:space:]]*:' "$1/compose.yaml"; then
+  local k='^[[:space:]]*(-[[:space:]]*)?["'"'"']?'   # map form (KEY: v), list form (- KEY=v), quoted keys
+  if grep -Eq "${k}CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC[\"']?[[:space:]]*[:=]" "$1/compose.yaml"; then
     warn "$1/compose.yaml sets CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: Claude Docs (the Artifact tools) are off in this project. To turn them on, replace that line with CLAUDE_CODE_ARTIFACT: \"1\" (project-template/README.md, Settings worth knowing)"
-  elif ! grep -Eq '^[[:space:]]*CLAUDE_CODE_ARTIFACT[[:space:]]*:' "$1/compose.yaml"; then
+  elif ! grep -Eq "${k}CLAUDE_CODE_ARTIFACT[\"']?[[:space:]]*[:=]" "$1/compose.yaml"; then
     warn "$1/compose.yaml has no CLAUDE_CODE_ARTIFACT: Claude Docs (the Artifact tools) are off in this project (project-template/README.md, Settings worth knowing)"
   fi
 }

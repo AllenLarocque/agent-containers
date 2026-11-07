@@ -650,8 +650,9 @@ rocker), P3M binary R packages, or conda tools.
 
   ```bash
   F=~/.config/agent-containers/<project>/compose.yaml
+  sed -i '/Spec §12 decision B\. ANY value disables/d' "$F"      # the old comment above the line
   if grep -q CLAUDE_CODE_ARTIFACT "$F"; then sed -i '/CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC/d' "$F"
-  else sed -i 's/^\([[:space:]]*\)CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"/\1CLAUDE_CODE_ARTIFACT: "1"/' "$F"; fi
+  else sed -i 's/^\([[:space:]]*\)CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:.*/\1CLAUDE_CODE_ARTIFACT: "1"/' "$F"; fi
   grep -n -A3 'environment:' "$F"     # check, then: agent-up up <project>
   ```
 

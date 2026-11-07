@@ -973,9 +973,12 @@ if docker compose version >/dev/null 2>&1; then
     test "$(jq -r '.services.agent.environment.CLAUDE_CODE_ARTIFACT' <<<"$J")" = 1
   check "rendered: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC absent (any value removes the Artifact tools)" \
     jq -e '.services.agent.environment | has("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC") | not' <<<"$J"
-  cderr(){ ( cd "$T" && aureal config "$1" --format json 2>&1 >/dev/null ); }
+  # stderr of a SUCCESSFUL render (so a "no warning" check cannot pass because config died)
+  cderr(){ local o; o="$( cd "$T" && aureal config "$1" --format json 2>"$T/cd.err" )" && jq -e .services >/dev/null <<<"$o" && cat "$T/cd.err" || echo "RENDER-FAILED"; }
+  check "config: the Claude Docs probe renders (guards the checks below)" \
+    bash -c '! grep -q RENDER-FAILED <<<"$1"' _ "$(cderr "$NAME")"
   check "config: no Claude Docs warning for the template compose.yaml" \
-    bash -c '! grep -q "Claude Docs" <<<"$1"' _ "$(cderr "$NAME")"
+    bash -c '! grep -qE "Claude Docs|RENDER-FAILED" <<<"$1"' _ "$(cderr "$NAME")"
   cp "$CFG/compose.yaml" "$T/compose-cd.bak"
   sed -i 's/^\([[:space:]]*\)CLAUDE_CODE_ARTIFACT: "1"/\1CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"/' "$CFG/compose.yaml"
   check "config: a pre-2026-11-06 compose.yaml (traffic flag) warns that Claude Docs are off, and still renders" \
@@ -985,7 +988,7 @@ if docker compose version >/dev/null 2>&1; then
     bash -c 'grep -qF "has no CLAUDE_CODE_ARTIFACT" <<<"$1"' _ "$(cderr "$NAME")"
   cp "$T/compose-cd.bak" "$CFG/compose.yaml"
   check "config: research keeps the traffic flag and gets no Claude Docs warning" \
-    bash -c '! grep -q "Claude Docs" <<<"$1"' _ "$(cderr research)"
+    bash -c '! grep -qE "Claude Docs|RENDER-FAILED" <<<"$1"' _ "$(cderr research)"
   check "rendered: T3_CONNECT=0 sets no cloudflared env" \
     jq -e '(.services.agent.environment.TUNNEL_EDGE_IP_VERSION == null) and (.services.agent.environment.T3_CONNECT == null)' <<<"$J"
   sed -i 's/^T3_CONNECT=.*/T3_CONNECT=1/' "$CFG/project.conf"
