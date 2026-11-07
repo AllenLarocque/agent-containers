@@ -21,8 +21,10 @@ services:
     mem_limit: 100g                        # state it explicitly; memory gates must read the cgroup limit
     environment:
       CLAUDE_CONFIG_DIR: /home/agent/.claude
-      # Spec §12 decision B. ANY value disables (even "0"): delete the line to re-enable.
-      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+      # Claude Docs (the Artifact tools): off by default when Claude Code runs under the Agent SDK,
+      # as it does in T3 Code. Spec §12, decision B (revised 2026-11-06). Do NOT also set
+      # CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: any value of it, even "0", removes the tools.
+      CLAUDE_CODE_ARTIFACT: "1"
     volumes:
       - type: bind                         # the project: the agent's read-write workspace
         source: ${PROJECT_DIR:?set PROJECT_DIR in project.conf}

@@ -969,8 +969,23 @@ if docker compose version >/dev/null 2>&1; then
   check "rendered: no env_file (secrets only via op run)" test -z "$(jq -r '.services.agent.env_file // empty' <<<"$J")"
   check "rendered: NET_ADMIN + NET_RAW, explicit mem_limit" \
     jq -e '(.services.agent.cap_add | index("NET_ADMIN") and index("NET_RAW")) and (.services.agent.mem_limit != null)' <<<"$J"
-  check "rendered: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1" \
-    test "$(jq -r '.services.agent.environment.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC' <<<"$J")" = 1
+  check "rendered: CLAUDE_CODE_ARTIFACT=1 (Claude Docs under the Agent SDK)" \
+    test "$(jq -r '.services.agent.environment.CLAUDE_CODE_ARTIFACT' <<<"$J")" = 1
+  check "rendered: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC absent (any value removes the Artifact tools)" \
+    jq -e '.services.agent.environment | has("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC") | not' <<<"$J"
+  cderr(){ ( cd "$T" && aureal config "$1" --format json 2>&1 >/dev/null ); }
+  check "config: no Claude Docs warning for the template compose.yaml" \
+    bash -c '! grep -q "Claude Docs" <<<"$1"' _ "$(cderr "$NAME")"
+  cp "$CFG/compose.yaml" "$T/compose-cd.bak"
+  sed -i 's/^\([[:space:]]*\)CLAUDE_CODE_ARTIFACT: "1"/\1CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"/' "$CFG/compose.yaml"
+  check "config: a pre-2026-11-06 compose.yaml (traffic flag) warns that Claude Docs are off, and still renders" \
+    bash -c 'grep -qF "sets CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: Claude Docs (the Artifact tools) are off" <<<"$1"' _ "$(cderr "$NAME")"
+  sed -i '/CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC/d' "$CFG/compose.yaml"
+  check "config: no CLAUDE_CODE_ARTIFACT line at all warns too" \
+    bash -c 'grep -qF "has no CLAUDE_CODE_ARTIFACT" <<<"$1"' _ "$(cderr "$NAME")"
+  cp "$T/compose-cd.bak" "$CFG/compose.yaml"
+  check "config: research keeps the traffic flag and gets no Claude Docs warning" \
+    bash -c '! grep -q "Claude Docs" <<<"$1"' _ "$(cderr research)"
   check "rendered: T3_CONNECT=0 sets no cloudflared env" \
     jq -e '(.services.agent.environment.TUNNEL_EDGE_IP_VERSION == null) and (.services.agent.environment.T3_CONNECT == null)' <<<"$J"
   sed -i 's/^T3_CONNECT=.*/T3_CONNECT=1/' "$CFG/project.conf"
@@ -1214,10 +1229,12 @@ OVR
     done
     # dc runs with a dummy GH_TOKEN in its environment (what `op run` supplies in real use).
     check "a project.env secret reaches the container env" test "$(docker exec "$CID" printenv GH_TOKEN)" = dummy-in-container
-    check "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 in the container" \
-      test "$(docker exec "$CID" printenv CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)" = 1
+    check "CLAUDE_CODE_ARTIFACT=1 in the container" \
+      test "$(docker exec "$CID" printenv CLAUDE_CODE_ARTIFACT)" = 1
+    check "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC unset in the container" \
+      bash -c '! docker exec "$1" printenv CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC >/dev/null' _ "$CID"
     for host in sentry.io statsig.com; do
-      check "$host is refused by the firewall DNS (decision B)" \
+      check "$host is refused by the firewall DNS (decision B: not needed, so not allowed)" \
         bash -c 'docker exec -u agent "$1" dig @127.0.0.1 "$2" A +time=2 +tries=1 +noall +comments | grep -q "status: REFUSED"' _ "$CID" "$host"
     done
     check "release-assets.githubusercontent.com still resolves (decision C)" \

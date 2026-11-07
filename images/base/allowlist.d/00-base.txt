@@ -3,9 +3,15 @@
 # project's): every other name is REFUSED. Project additions live on the OWNER's host in
 # ~/.config/agent-containers/<project>/allowlist, mounted read-only as 50-project.txt. Domain rationale is carried over from
 # spades-dev-environment/.devcontainer/init-firewall.sh (2026-09).
-# --- Claude Code / npm. sentry.io and statsig.com (error reports, telemetry) are deliberately NOT
-# here: containers set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 (spec §12, decision B).
+# --- Claude Code / npm. Builders no longer set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC (spec §12,
+# decision B, revised 2026-11-06: telemetry to Anthropic is acceptable). sentry.io and statsig.com
+# stay out because nothing needs them: the Artifact tools register and publish without them
+# (spades_pe trial, 2026-11-06), so Claude Code's error reports simply fail to send.
 api.anthropic.com
+# claude.ai MCP connectors (Claude Docs, and any other connector on the owner's claude.ai account).
+# Every connector enabled there becomes reachable by the agent, with that account's rights. No new
+# way out: api.anthropic.com already accepts anything the agent sends.
+mcp-proxy.anthropic.com
 # Claude subscription login (OAuth token exchange). Without it `claude` cannot log in: EAI_AGAIN
 # (first real use, 2026-10-07).
 platform.claude.com

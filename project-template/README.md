@@ -639,9 +639,25 @@ rocker), P3M binary R packages, or conda tools.
 
 ## Settings worth knowing
 
-- **`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"`** in `compose.yaml` turns off Claude Code's
-  telemetry, error reports, auto-updates, `/feedback`, artifacts and Remote Control in the
-  container. **Any value disables it, even `"0"`.** To re-enable, delete the line.
+- **`CLAUDE_CODE_ARTIFACT: "1"`** in `compose.yaml` turns on Claude Docs (the `Artifact` tools).
+  Under the Agent SDK, which T3 Code uses, they are off unless this is set. Claude Docs also needs
+  a claude.ai subscription login (not an API key) and `mcp-proxy.anthropic.com` (in the base
+  allowlist). Delete the line to turn Claude Docs off for a project.
+- **`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`** is no longer set in builders (spec §12, decision
+  B, revised 2026-11-06). If it is set, **with any value, even `"0"`**, it removes the Artifact
+  tools as well as telemetry, `/feedback` and Remote Control. Projects created before 2026-11-06
+  still have it; `agent-up up` warns about it, and this switches one over:
+
+  ```bash
+  F=~/.config/agent-containers/<project>/compose.yaml
+  if grep -q CLAUDE_CODE_ARTIFACT "$F"; then sed -i '/CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC/d' "$F"
+  else sed -i 's/^\([[:space:]]*\)CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"/\1CLAUDE_CODE_ARTIFACT: "1"/' "$F"; fi
+  grep -n -A3 'environment:' "$F"     # check, then: agent-up up <project>
+  ```
+
+  The research profile keeps it: that container reads untrusted web pages and has no use for
+  publishing Claude Docs. Auto-updates stay off either way (`DISABLE_AUTOUPDATER=1` is set in the
+  image; the version is pinned).
 - **Codex `~/.codex/config.toml`**: at every start `agent-init` enforces `approval_policy = "never"`,
   `sandbox_mode = "danger-full-access"` (the container is the sandbox, as for Claude's
   `bypassPermissions`), `check_for_update_on_startup = false` and `[analytics] enabled = false`.
