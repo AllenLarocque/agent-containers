@@ -969,8 +969,50 @@ if docker compose version >/dev/null 2>&1; then
   check "rendered: no env_file (secrets only via op run)" test -z "$(jq -r '.services.agent.env_file // empty' <<<"$J")"
   check "rendered: NET_ADMIN + NET_RAW, explicit mem_limit" \
     jq -e '(.services.agent.cap_add | index("NET_ADMIN") and index("NET_RAW")) and (.services.agent.mem_limit != null)' <<<"$J"
-  check "rendered: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1" \
-    test "$(jq -r '.services.agent.environment.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC' <<<"$J")" = 1
+  check "rendered: CLAUDE_CODE_ARTIFACT=1 (Claude Docs under the Agent SDK)" \
+    test "$(jq -r '.services.agent.environment.CLAUDE_CODE_ARTIFACT' <<<"$J")" = 1
+  check "rendered: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC absent (any value removes the Artifact tools)" \
+    jq -e '.services.agent.environment | has("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC") | not' <<<"$J"
+  # stderr of a SUCCESSFUL render (so a "no warning" check cannot pass because config died)
+  cderr(){ local o; o="$( cd "$T" && aureal config "$1" --format json 2>"$T/cd.err" )" && jq -e .services >/dev/null <<<"$o" && cat "$T/cd.err" || echo "RENDER-FAILED"; }
+  check "config: the Claude Docs probe renders (guards the checks below)" \
+    bash -c '! grep -q RENDER-FAILED <<<"$1"' _ "$(cderr "$NAME")"
+  check "config: no Claude Docs warning for the template compose.yaml" \
+    bash -c '! grep -qE "Claude Docs|RENDER-FAILED" <<<"$1"' _ "$(cderr "$NAME")"
+  cp "$CFG/compose.yaml" "$T/compose-cd.bak"
+  sed -i 's/^\([[:space:]]*\)CLAUDE_CODE_ARTIFACT: "1"/\1CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"/' "$CFG/compose.yaml"
+  check "config: a pre-2026-11-06 compose.yaml (traffic flag) warns that Claude Docs are off, and still renders" \
+    bash -c 'grep -qF "sets CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: Claude Docs (the Artifact tools) are off" <<<"$1"' _ "$(cderr "$NAME")"
+  sed -i '/CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC/d' "$CFG/compose.yaml"
+  check "config: no CLAUDE_CODE_ARTIFACT line at all warns too" \
+    bash -c 'grep -qF "has no CLAUDE_CODE_ARTIFACT" <<<"$1"' _ "$(cderr "$NAME")"
+  cp "$T/compose-cd.bak" "$CFG/compose.yaml"
+  sed -i 's/^\([[:space:]]*\)CLAUDE_CODE_ARTIFACT: "1"/&\n\1"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "0"/' "$CFG/compose.yaml"
+  check "config: a QUOTED traffic-flag key next to CLAUDE_CODE_ARTIFACT still warns (any value removes the tools)" \
+    bash -c 'grep -qF "sets CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" <<<"$1"' _ "$(cderr "$NAME")"
+  cp "$T/compose-cd.bak" "$CFG/compose.yaml"
+  python3 - "$CFG/compose.yaml" <<'PYEOF'
+import re, sys
+p = sys.argv[1]; s = open(p).read()
+# map-form environment -> list form (- KEY=value), the other syntax compose accepts
+def conv(m):
+    ind = m.group(1); body = m.group(2)
+    out = []
+    for line in body.splitlines():
+        km = re.match(r'^(\s+)([A-Za-z_][A-Za-z0-9_]*):\s*"?([^"]*)"?\s*$', line)
+        out.append(f'{km.group(1)}- {km.group(2)}={km.group(3)}' if km else line)
+    return ind + 'environment:\n' + '\n'.join(out) + '\n'
+s2 = re.sub(r'^( +)environment:\n((?:\1  .*\n)+)', conv, s, count=1, flags=re.M)
+assert s2 != s; open(p, 'w').write(s2)
+PYEOF
+  check "config: list-form environment (- CLAUDE_CODE_ARTIFACT=1) gets no Claude Docs warning" \
+    bash -c '! grep -qE "Claude Docs|RENDER-FAILED" <<<"$1"' _ "$(cderr "$NAME")"
+  JL="$( cd "$T" && aureal config "$NAME" --format json 2>/dev/null )" || JL=""
+  check "  ...and the list form really renders CLAUDE_CODE_ARTIFACT=1 (the edit took)" \
+    test "$(jq -r .services.agent.environment.CLAUDE_CODE_ARTIFACT <<<"$JL" 2>/dev/null)" = 1
+  cp "$T/compose-cd.bak" "$CFG/compose.yaml"
+  check "config: research keeps the traffic flag and gets no Claude Docs warning" \
+    bash -c '! grep -qE "Claude Docs|RENDER-FAILED" <<<"$1"' _ "$(cderr research)"
   check "rendered: T3_CONNECT=0 sets no cloudflared env" \
     jq -e '(.services.agent.environment.TUNNEL_EDGE_IP_VERSION == null) and (.services.agent.environment.T3_CONNECT == null)' <<<"$J"
   sed -i 's/^T3_CONNECT=.*/T3_CONNECT=1/' "$CFG/project.conf"
@@ -1214,10 +1256,12 @@ OVR
     done
     # dc runs with a dummy GH_TOKEN in its environment (what `op run` supplies in real use).
     check "a project.env secret reaches the container env" test "$(docker exec "$CID" printenv GH_TOKEN)" = dummy-in-container
-    check "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 in the container" \
-      test "$(docker exec "$CID" printenv CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC)" = 1
+    check "CLAUDE_CODE_ARTIFACT=1 in the container" \
+      test "$(docker exec "$CID" printenv CLAUDE_CODE_ARTIFACT)" = 1
+    check "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC unset in the container" \
+      bash -c '! docker exec "$1" printenv CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC >/dev/null' _ "$CID"
     for host in sentry.io statsig.com; do
-      check "$host is refused by the firewall DNS (decision B)" \
+      check "$host is refused by the firewall DNS (decision B: not needed, so not allowed)" \
         bash -c 'docker exec -u agent "$1" dig @127.0.0.1 "$2" A +time=2 +tries=1 +noall +comments | grep -q "status: REFUSED"' _ "$CID" "$host"
     done
     check "release-assets.githubusercontent.com still resolves (decision C)" \

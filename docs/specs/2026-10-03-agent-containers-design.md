@@ -456,6 +456,13 @@ also when agent-side enforcement of the merge gate (e.g. blocking `gh pr merge`)
     reports.
   - Auto-updates are off too, which is wanted because the version is pinned.
   - Per project, the variable can be unset if one of these is needed.
+  - **Revised 2026-11-06 (user): "Telemetry to Anthropic is fine."** Builders drop the variable
+    and set `CLAUDE_CODE_ARTIFACT=1`, so Claude Docs work under T3 Code (the Agent SDK turns the
+    Artifact tools off by default, and any value of this variable removes them). Verified on
+    Claude Code 2.1.316: the tools register only with `CLAUDE_CODE_ARTIFACT=1` AND this variable
+    unset. `mcp-proxy.anthropic.com` joins the base allowlist; `sentry.io` and `statsig.com` stay
+    out (not needed). Auto-updates stay off via `DISABLE_AUTOUPDATER=1` in the image. The
+    research profile keeps the variable (untrusted web input, no need to publish).
 - **C — yes.** Keep `release-assets.githubusercontent.com` in base (GitHub release downloads).
 - **Interim shared memory — yes.** Mount a `~/agent-memory` git repo on the host, read-write for
   builders, at `/opt/memory`. Phase 3 designs its structure.
