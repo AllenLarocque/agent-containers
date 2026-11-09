@@ -462,7 +462,12 @@ also when agent-side enforcement of the merge gate (e.g. blocking `gh pr merge`)
     Claude Code 2.1.316: the tools register only with `CLAUDE_CODE_ARTIFACT=1` AND this variable
     unset. `mcp-proxy.anthropic.com` joins the base allowlist; `sentry.io` and `statsig.com` stay
     out (not needed). Auto-updates stay off via `DISABLE_AUTOUPDATER=1` in the image. The
-    research profile keeps the variable (untrusted web input, no need to publish).
+    research profile kept the variable at first (untrusted web input).
+  - **Research too, 2026-11-09 (user):** the research container also drops the variable and sets
+    `CLAUDE_CODE_ARTIFACT=1`, so its reports can be Claude Docs (clear tables, attached images,
+    shareable with non-technical readers). Accepted risk: a manipulative web page could steer what
+    it writes into a doc on the owner's claude.ai account; the owner reads a doc before sharing.
+    Research already has open egress, so this adds no new way out.
 - **C — yes.** Keep `release-assets.githubusercontent.com` in base (GitHub release downloads).
 - **Interim shared memory — yes.** Mount a `~/agent-memory` git repo on the host, read-write for
   builders, at `/opt/memory`. Phase 3 designs its structure.
