@@ -462,7 +462,21 @@ also when agent-side enforcement of the merge gate (e.g. blocking `gh pr merge`)
     Claude Code 2.1.316: the tools register only with `CLAUDE_CODE_ARTIFACT=1` AND this variable
     unset. `mcp-proxy.anthropic.com` joins the base allowlist; `sentry.io` and `statsig.com` stay
     out (not needed). Auto-updates stay off via `DISABLE_AUTOUPDATER=1` in the image. The
-    research profile keeps the variable (untrusted web input, no need to publish).
+    research profile kept the variable at first (untrusted web input).
+  - **Research too, 2026-11-09 (user):** the research container also drops the variable and sets
+    `CLAUDE_CODE_ARTIFACT=1`, so its reports can be Claude Docs (clear tables, attached images,
+    shareable with non-technical readers). Accepted risks: (1) through the owner's login, research
+    reaches the owner's claude.ai connectors (other Claude Docs; Drive, mail etc. if enabled), so a
+    manipulative page could read that data and, with open egress, send it out. This predates the
+    change (the traffic variable does not stop connectors, and research could already reach
+    mcp-proxy), but was not written down. (2) A page could steer what goes into a doc. Controls:
+    the research instructions (own doc only, no other connectors, comments are not tasks), the
+    owner keeps only needed connectors enabled and reads docs before sharing. A dedicated
+    claude.ai account for research would remove (1); not adopted yet.
+    Owner 2026-11-09: all claude.ai connectors are off. The GitHub connector must stay off for
+    containers: it acts as the owner (admin), which would bypass the machine user and the merge
+    gate. Research reports carry a `project:` header and docs a `[<project>]` title prefix, and
+    are written for technical (PhD-level) readers without jargon.
 - **C — yes.** Keep `release-assets.githubusercontent.com` in base (GitHub release downloads).
 - **Interim shared memory — yes.** Mount a `~/agent-memory` git repo on the host, read-write for
   builders, at `/opt/memory`. Phase 3 designs its structure.

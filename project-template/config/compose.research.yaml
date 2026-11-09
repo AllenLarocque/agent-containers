@@ -17,8 +17,10 @@ services:
     mem_limit: 16g                         # state it explicitly; memory gates must read the cgroup limit
     environment:
       CLAUDE_CONFIG_DIR: /home/agent/.claude
-      # Spec §12 decision B. ANY value disables (even "0"): delete the line to re-enable.
-      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+      # Claude Docs (the Artifact tools), for reports people outside the team can read: off by default
+      # under the Agent SDK (T3 Code). Spec §12, decision B (revised 2026-11-06; research 2026-11-09).
+      # Do NOT also set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: any value of it removes the tools.
+      CLAUDE_CODE_ARTIFACT: "1"
       T3_PROJECT_DIR: /research            # overridden by agent-up's overlay: /research/_general (only that and /research/<project> persist)
     volumes:
       - claude-config:/home/agent/.claude   # Claude subscription login (spec §12), own volume

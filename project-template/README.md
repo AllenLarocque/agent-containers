@@ -362,7 +362,12 @@ clean up by hand).
 
 **Risks you accept** (spec §2.1, §12): your Claude subscription login sits in an open-egress
 container (if you suspect anything, log the session out at claude.ai); it shares your Claude usage
-limits with every builder; treat `~/agent-research/` as untrusted on the host too (never run or
+limits with every builder; through your login it can reach your **claude.ai connectors** (Claude
+Docs, and Drive, mail etc. if you enabled them), so a page that manipulates it could read your other
+docs or connector data and send them out (open egress), or put its own text into a doc it writes for
+you. Its instructions forbid both; they are the only control. Keep the connectors on your claude.ai
+account to the ones you need (**not the GitHub connector**: it acts as you, the admin, so any
+container that reaches it could bypass the machine user and the merge gate), and read a research doc before you share it; treat `~/agent-research/` as untrusted on the host too (never run or
 `source` anything from it, and beware tools that execute content).
 
 **Upgrading a builder created before the research container:** nothing to do to keep it off
@@ -643,10 +648,11 @@ rocker), P3M binary R packages, or conda tools.
   Under the Agent SDK, which T3 Code uses, they are off unless this is set. Claude Docs also needs
   a claude.ai subscription login (not an API key) and `mcp-proxy.anthropic.com` (in the base
   allowlist). Delete the line to turn Claude Docs off for a project.
-- **`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`** is no longer set in builders (spec §12, decision
-  B, revised 2026-11-06). If it is set, **with any value, even `"0"`**, it removes the Artifact
+- **`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`** is no longer set in builders or the research
+  container (spec §12, decision B, revised 2026-11-06; research 2026-11-09). If it is set, **with any value, even `"0"`**, it removes the Artifact
   tools as well as telemetry, `/feedback` and Remote Control. Projects created before 2026-11-06
-  still have it; `agent-up up` warns about it, and this switches one over:
+  (the research container: before 2026-11-09) still have it; `agent-up up` warns about it, and
+  this switches one over (for research, `<project>` is `research`):
 
   ```bash
   F=~/.config/agent-containers/<project>/compose.yaml
@@ -656,8 +662,7 @@ rocker), P3M binary R packages, or conda tools.
   grep -n -A3 'environment:' "$F"     # check, then: agent-up up <project>
   ```
 
-  The research profile keeps it: that container reads untrusted web pages and has no use for
-  publishing Claude Docs. Auto-updates stay off either way (`DISABLE_AUTOUPDATER=1` is set in the
+  Auto-updates stay off either way (`DISABLE_AUTOUPDATER=1` is set in the
   image; the version is pinned).
 - **Codex `~/.codex/config.toml`**: at every start `agent-init` enforces `approval_policy = "never"`,
   `sandbox_mode = "danger-full-access"` (the container is the sandbox, as for Claude's
