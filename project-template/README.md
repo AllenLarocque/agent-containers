@@ -362,9 +362,11 @@ clean up by hand).
 
 **Risks you accept** (spec §2.1, §12): your Claude subscription login sits in an open-egress
 container (if you suspect anything, log the session out at claude.ai); it shares your Claude usage
-limits with every builder; it can publish Claude Docs to your claude.ai account (`CLAUDE_CODE_ARTIFACT`),
-so a page that manipulates it could put its own text into a doc it writes for you: read a research
-doc before you share it; treat `~/agent-research/` as untrusted on the host too (never run or
+limits with every builder; through your login it can reach your **claude.ai connectors** (Claude
+Docs, and Drive, mail etc. if you enabled them), so a page that manipulates it could read your other
+docs or connector data and send them out (open egress), or put its own text into a doc it writes for
+you. Its instructions forbid both; they are the only control. Keep the connectors on your claude.ai
+account to the ones you need, and read a research doc before you share it; treat `~/agent-research/` as untrusted on the host too (never run or
 `source` anything from it, and beware tools that execute content).
 
 **Upgrading a builder created before the research container:** nothing to do to keep it off
