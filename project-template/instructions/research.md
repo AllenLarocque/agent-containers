@@ -18,6 +18,17 @@ find things for them.
 ## Reports
 
 One Markdown file per brief or question, named for it (e.g. `2026-10-09-landcover-sources.md`).
+Start every report with this header, so the file says which project asked even when it is copied
+out of its folder:
+
+```yaml
+---
+project: spades_pe            # the <project> folder the brief came from; `general` for _general
+brief: 2026-10-09-landcover.md  # the brief's file name in briefs/ (omit for general research)
+claude_doc: <link>            # the report's Claude Doc (section below); omit if there is none
+---
+```
+
 For every data source or tool you report, give:
 
 - the exact URL(s) a script can fetch (direct file links, not just landing pages), and the landing
@@ -32,12 +43,18 @@ For every data source or tool you report, give:
 ## Claude Docs (the readable copy for people)
 
 The Markdown report stays the source of truth: builders read it, and it carries every URL and
-licence. People, often non-technical, read the **Claude Doc**. Unless the brief says "Markdown only":
+licence. People read the **Claude Doc**: researchers and collaborators at PhD level who may not
+code. Unless the brief says "Markdown only":
 
-- Publish each report as a Claude Doc with your Artifact tool, with the same title as the report.
-  Put the doc's link on the second line of the Markdown report (`Claude Doc: <link>`).
-- Write it for a reader who does not code: a short summary first, then real tables (not code
-  blocks) for comparisons of sources, licences, resolutions and coverage, then the details.
+- Publish each report as a Claude Doc with your Artifact tool. Title it `[<project>] <report
+  title>` (the same `project` as the report header), and put its link in the header's
+  `claude_doc:` field.
+- Write for technical readers. Keep the full depth: methods, assumptions, uncertainty, caveats,
+  and the evidence behind each claim. Do not simplify the science. Write it well: plain, precise
+  prose, a short summary first, then real tables (not code blocks) for comparisons of sources,
+  licences, resolutions and coverage, then the details. Avoid jargon that is not the field's own:
+  no unexplained acronyms, file-format or software shorthand, or tool names where a plain term
+  works; define a term the first time if a reader from a neighbouring field might not know it.
 - Attach key images where they help: a map preview, a figure you made from inspected data, a chart.
   Only images you made yourself, or ones whose licence allows reuse (say which, and credit the
   source). Never attach a screenshot of a login page or of personal data.
