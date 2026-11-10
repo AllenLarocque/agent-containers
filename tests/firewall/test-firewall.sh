@@ -56,6 +56,8 @@ expect_v4=$(sed -e "s|@UP@|$EXPECT_UPSTREAM|g" -e "s|@DUID@|$DUID|g" -e "s|@GW@|
 -A INPUT -s @GW@/32 -p tcp -m tcp --dport 3773 -j ACCEPT
 @RS@-A OUTPUT -d 127.0.0.11/32 -m owner ! --uid-owner @DUID@ -j REJECT --reject-with icmp-port-unreachable
 -A OUTPUT -o lo -j ACCEPT
+-A OUTPUT -d @UP@/32 -p udp -m udp --dport 53 -m owner ! --uid-owner @DUID@ -j REJECT --reject-with icmp-port-unreachable
+-A OUTPUT -d @UP@/32 -p tcp -m tcp --dport 53 -m owner ! --uid-owner @DUID@ -j REJECT --reject-with icmp-port-unreachable
 -A OUTPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
 -A OUTPUT -d @UP@/32 -p udp -m udp --dport 53 -m owner --uid-owner @DUID@ -j ACCEPT
 -A OUTPUT -d @UP@/32 -p tcp -m tcp --dport 53 -m owner --uid-owner @DUID@ -j ACCEPT
@@ -142,6 +144,16 @@ grep -qx "server=/github.com/$EXPECT_UPSTREAM" "$conf" && ok "dnsmasq forwards g
 if setpriv --reuid="$DUID" --regid="$(id -g dnsmasq 2>/dev/null)" --clear-groups dig +short +time=3 +tries=2 @"$EXPECT_UPSTREAM" api.github.com A 2>/dev/null | grep -Eq '^[0-9]+(\.[0-9]+){3}$'; then
   ok "upstream $EXPECT_UPSTREAM answers the dnsmasq uid"
 else bad "upstream $EXPECT_UPSTREAM does not answer the dnsmasq uid"; fi
+# The owner match must also hold for a SOURCE PORT the dnsmasq uid has just used. conntrack remembers
+# a UDP flow by its addresses and ports for 30 s after the reply, so with the ESTABLISHED accept ahead
+# of the owner rules, any uid sending from that port reached the upstream (found 2026-11-10, when the
+# agent's random port met one of dnsmasq's in CI). Here the port is fixed, so the check is exact.
+REUSE_PORT=40555
+if setpriv --reuid="$DUID" --regid="$(id -g dnsmasq 2>/dev/null)" --clear-groups dig +short +time=3 +tries=2 -b "0.0.0.0#$REUSE_PORT" @"$EXPECT_UPSTREAM" api.github.com A 2>/dev/null | grep -Eq '^[0-9]+(\.[0-9]+){3}$'; then
+  if setpriv --reuid=1000 --regid=1000 --clear-groups dig +short +time=2 +tries=1 -b "0.0.0.0#$REUSE_PORT" @"$EXPECT_UPSTREAM" example.com A 2>/dev/null | grep -Eq '^[0-9]+(\.[0-9]+){3}$'; then
+    bad "uid 1000 queried the upstream $EXPECT_UPSTREAM from source port $REUSE_PORT, just used by the dnsmasq uid (conntrack reuse)"
+  else ok "uid 1000 cannot reuse the dnsmasq uid's source port $REUSE_PORT to query the upstream"; fi
+else bad "upstream $EXPECT_UPSTREAM does not answer the dnsmasq uid from source port $REUSE_PORT (the reuse check proves nothing)"; fi
 
 # --- T3 Connect: a separate ipset, filled only from argotunnel.com lookups (the SRV targets) ---
 conf_has(){ grep -qx -- "$1" "$conf"; }

@@ -43,6 +43,8 @@ expect_v4=$(sed -e "s|@UP@|$EXPECT_UPSTREAM|g" -e "s|@DUID@|$DUID|g" -e "s|@GW@|
 -A INPUT -s @GW@/32 -p tcp -m tcp --dport 3773 -j ACCEPT
 -A OUTPUT -d 127.0.0.11/32 -m owner ! --uid-owner @DUID@ -j REJECT --reject-with icmp-port-unreachable
 -A OUTPUT -o lo -j ACCEPT
+-A OUTPUT -d @UP@/32 -p udp -m udp --dport 53 -m owner ! --uid-owner @DUID@ -j REJECT --reject-with icmp-port-unreachable
+-A OUTPUT -d @UP@/32 -p tcp -m tcp --dport 53 -m owner ! --uid-owner @DUID@ -j REJECT --reject-with icmp-port-unreachable
 -A OUTPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
 -A OUTPUT -d @UP@/32 -p udp -m udp --dport 53 -m owner --uid-owner @DUID@ -j ACCEPT
 -A OUTPUT -d @UP@/32 -p tcp -m tcp --dport 53 -m owner --uid-owner @DUID@ -j ACCEPT
