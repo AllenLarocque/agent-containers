@@ -331,7 +331,8 @@ RESEARCH_CONTACT_EMAIL=<your-alias>
 
 `agent-up` checks that it is a plain address and passes it to the research container as the
 environment variable `RESEARCH_CONTACT_EMAIL`. It is not a secret. The research agent sends it only to
-the discovery services that ask for it, never in forms or reports. If it is unset, the agent skips
+the discovery services that ask for it, never in reports, and in a form only when you tell it to in
+chat (it asks you which address to use before it enters one on a form). If it is unset, the agent skips
 Unpaywall and says so in its report. Builders refuse the setting.
 
 **What persists in the research container.** `agent-up up research` recreates the container
