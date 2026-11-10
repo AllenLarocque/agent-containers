@@ -134,6 +134,7 @@ COPY agent-init.sh /usr/local/bin/agent-init.sh
 COPY configure-claude-settings.js /usr/local/lib/agent/configure-claude-settings.js
 COPY configure-codex-config.js /usr/local/lib/agent/configure-codex-config.js
 COPY configure-t3-settings.js /usr/local/lib/agent/configure-t3-settings.js
+COPY t3-projects.js /usr/local/lib/agent/t3-projects.js
 COPY agent-entrypoint.sh /usr/local/bin/agent-entrypoint
 COPY agent-t3.sh /usr/local/bin/agent-t3
 COPY agent-rstudio.sh /usr/local/bin/agent-rstudio

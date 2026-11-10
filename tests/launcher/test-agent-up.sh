@@ -59,6 +59,8 @@ case "$*" in
   "exec "*" ps -eo pid=,ppid=,etimes=,cputimes=,comm=,args=")   # first call: $sd/ps.<c>.1, second: .2 (per container: busy --all scans in parallel)
     sd="$(dirname "$DLOG")"; n=$(( $(cat "$sd/ps.$2.count" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$sd/ps.$2.count"
     cat "$sd/ps.$2.$n" 2>/dev/null || true ;;
+  *"agent-t3 projects")
+    sd="$(dirname "$DLOG")"; cat "$sd/t3projects" 2>/dev/null || exit 2 ;;   # no file: an image that predates it
   *"agent-t3 pair"*)
     sd="$(dirname "$DLOG")"; n=$(( $(cat "$sd/pair.count" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$sd/pair.count"
     if [ -f "$sd/PAIR_FAILS" ] && [ "$n" -le "$(cat "$sd/PAIR_FAILS")" ]; then exit 1; fi
@@ -308,6 +310,12 @@ check "status" test "$rc" -eq 0
 check "  ...compose ps" grep -qxF "ARGS: $C ps" "$DLOG"
 check "  ...reports the Claude Code version (from the container)" grep -qxF "Claude Code: 9.9.9 (Claude Code)" <<<"$statusout"
 check "  ...reports the Codex version (from the container)" grep -qxF "Codex: codex-cli 8.8.8" <<<"$statusout"
+check "  ...an image without 'agent-t3 projects' adds nothing and does not fail" bash -c '! grep -q "T3 project" <<<"$1"' _ "$statusout"
+printf 'T3 project: /workspace (demo)\nT3 project OUTSIDE /workspace: /home/agent/x (x). Files there are lost\n' > "$(dirname "$DLOG")/t3projects"
+statusout2="$(au status "$NAME" 2>&1)" || true
+check "  ...lists T3's projects and flags one outside /workspace (from agent-t3 projects, as agent)" \
+  bash -c 'grep -qxF "T3 project: /workspace (demo)" <<<"$1" && grep -qF "T3 project OUTSIDE /workspace: /home/agent/x" <<<"$1" && grep -qxF "ARGS: exec -u agent $3-agent-1 agent-t3 projects" "$2"' _ "$statusout2" "$DLOG" "$NAME"
+rm -f "$(dirname "$DLOG")/t3projects"
 check "  ...asked each CLI as agent in the project's container" \
   bash -c 'grep -qxF "ARGS: exec -u agent $2-agent-1 claude --version" "$1" && grep -qxF "ARGS: exec -u agent $2-agent-1 codex --version" "$1"' _ "$DLOG" "$NAME"
 check "stop" au stop "$NAME"
@@ -1312,6 +1320,9 @@ OVR
       curl -fsS -o /dev/null --max-time 5 -H "Host: $NAME.localhost:$T3P" "http://127.0.0.1:$T3P/"
     check "the container's hostname is the project name" test "$(docker exec "$CID" hostname)" = "$NAME"
     check "  ...agent-t3 start is idempotent" bash -c 'docker exec -u agent "$1" agent-t3 start | grep -q "already running"' _ "$CID"
+    # The container adds its own T3 project (the app's folder picker is not needed); a second start adds none.
+    check "  ...the project folder is a T3 project, added once" \
+      bash -c 'docker logs "$1" 2>&1 | grep -q "\[agent-t3\] added T3 project /workspace" && ! docker exec -u agent "$1" agent-t3 start | grep -q "added T3 project" && docker exec -u agent "$1" agent-t3 projects | grep -q "^T3 project: /workspace "' _ "$CID"
     check "  ...NOT reachable from a sibling container on the same network (firewall: gateway only)" \
       bash -c 'net=$(docker inspect -f "{{range \$k,\$v := .NetworkSettings.Networks}}{{\$k}}{{end}}" "$1"); ip=$(docker inspect -f "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}" "$1"); [ -n "$net" ] && [ -n "$ip" ] || exit 1; rc=0; docker run --rm --network "$net" "$2" curl -sS -o /dev/null --max-time 5 "http://$ip:3773/" || rc=$?; echo "curl rc=$rc (28 = timed out: dropped by the firewall)"; [ "$rc" -eq 28 ]' _ "$CID" "$TEMPLATE_IMAGE"
     check "  ...a pairing token can be minted (exact field, untruncated)" bash -c 'docker exec -u agent "$1" agent-t3 pair ci | grep -Eqx "token=[A-Za-z0-9._~%-]+"' _ "$CID"
@@ -1441,7 +1452,9 @@ OVR
     check "research: the gateway (host) is rejected" \
       bash -c 'gw=$(docker exec "$1" ip -4 route show default | awk "{print \$3; exit}"); e=$(docker exec -u agent "$1" bash -c "timeout 8 bash -c \"</dev/tcp/$gw/3773\"" 2>&1); [ $? -ne 0 ] && grep -Eq "No route to host|Operation not permitted" <<<"$e"' _ "$RID"
     check "research: T3 started with /research as its project" \
-      bash -c 'docker logs "$1" 2>&1 | grep -q "\[agent-t3\] server up" && docker exec "$1" pgrep -af "t3 serve" | grep -q -- "--auto-bootstrap-project-from-cwd /research"' _ "$RID"
+      bash -c 'docker logs "$1" 2>&1 | grep -q "\[agent-t3\] server up" && docker exec "$1" pgrep -af "t3 serve" | grep -q -- " /research/_general\$"' _ "$RID"
+    check "  ...and registered it as the T3 project (agent-t3 projects)" \
+      bash -c 'docker exec -u agent "$1" agent-t3 projects | grep -q "^T3 project: /research/_general "' _ "$RID"
     check "  ...reachable from the host at 127.0.0.1:<its T3_PORT>" curl -fsS -o /dev/null --max-time 5 "http://127.0.0.1:$RP/"
     check "research: Claude Code and Codex installed (own npm cache)" \
       bash -c 'docker logs "$1" 2>&1 | grep -q "\[install-claude-code\] installed: claude" && docker logs "$1" 2>&1 | grep -q "\[install-codex\] installed: codex"' _ "$RID"

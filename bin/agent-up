@@ -1249,6 +1249,8 @@ cmd_status(){
   cmd_compose ps "$@"
   # One line per agent CLI this clone knows (images/base/agent-clis/<tool>/install.conf).
   cli_lines "$(basename "$(cfg_dir "$1")")-agent-1"
+  # T3's projects, and any outside the mounted project folders (images before `agent-t3 projects`: nothing).
+  docker exec -u agent "$(basename "$(cfg_dir "$1")")-agent-1" agent-t3 projects 2>/dev/null </dev/null || true
   local cfg rd d; cfg="$(cfg_dir "$1")"
   if [ "$(profile "$cfg")" = research ]; then
     rd="$(research_dir "$cfg")"
