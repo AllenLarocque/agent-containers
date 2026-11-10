@@ -25,7 +25,8 @@
 #   - No port-based bypasses: TCP 22 is allowed only to allowlisted hosts (ipset rule, ports
 #     22/80/443). SSH to your own servers needs an allowlist entry. The ONE exception is FTP below
 #     (tcp 21, only to the owner's separate FTP host list, decision 2026-10-11).
-#   - DNS: only the dnsmasq uid may reach the upstream resolver (UDP/TCP 53, owner match). Docker's
+#   - DNS: only the dnsmasq uid may reach the upstream resolver (UDP/TCP 53, owner match; every other
+#     uid is rejected AHEAD of the ESTABLISHED accept, so reusing dnsmasq's source port is no way in). Docker's
 #     embedded resolver 127.0.0.11 is rejected for every other uid. dnsmasq forwards ONLY allowlisted
 #     names (one server=/<domain>/ line each, no default server), so other names get REFUSED: no DNS
 #     tunnelling through arbitrary domains. Root does not get upstream DNS either: the one setup
@@ -419,6 +420,11 @@ iptables -A OUTPUT -d 127.0.0.11 -m owner ! --uid-owner "$DNSMASQ_UID" -j REJECT
 iptables -A INPUT -i lo -j ACCEPT
 iptables -A OUTPUT -o lo -j ACCEPT
 iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+# Upstream DNS is dnsmasq's alone, and that must be decided BEFORE the ESTABLISHED accept: conntrack
+# keeps a UDP flow (addresses + ports) for 30 s after the reply, so a packet from any uid that reuses
+# a source port dnsmasq has just used is ESTABLISHED and would never reach the owner rules below.
+iptables -A OUTPUT -d "$UPSTREAM_DNS" -p udp --dport 53 -m owner ! --uid-owner "$DNSMASQ_UID" -j REJECT
+iptables -A OUTPUT -d "$UPSTREAM_DNS" -p tcp --dport 53 -m owner ! --uid-owner "$DNSMASQ_UID" -j REJECT
 iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 # Upstream DNS: dnsmasq's uid only, only to the original resolver. Replies: ESTABLISHED above.
 # (When the upstream is 127.0.0.11 these never match: the DNAT'd query leaves via lo, which the
