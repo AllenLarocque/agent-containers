@@ -92,6 +92,27 @@ grep '^T3_PORT=' "$CFG/project.conf"                 # must print one line (else
 
 Then do the [update day](#update-day) steps (the digest must include Codex).
 
+### T3 projects
+
+A T3 project is only a title and a folder inside the container: it decides where a new thread's
+agent starts, nothing else. Every thread in a container shares its firewall, secrets and files.
+**You don't add projects in the app.** At every start the container adds the missing ones:
+
+| Your project folder (`PROJECT_DIR`, mounted at `/workspace`) | T3 projects |
+|---|---|
+| a git repo | `/workspace` |
+| a folder of git repos | one per repo: `/workspace/<repo>` |
+| neither | `/workspace` |
+
+- A new repo in a folder of repos: `agent-up up <project>`, or without a restart
+  `docker exec -u agent <project>-agent-1 agent-t3 start`.
+- `agent-up status <project>` lists the T3 projects and flags any `OUTSIDE /workspace` (files there
+  are lost at the next `agent-up up`) or `MISSING`.
+- Nothing is removed for you, because removing a project deletes its threads:
+  `agent-up shell <project>`, then `t3 project remove --force <folder>`.
+
+Design: `docs/specs/2026-11-09-t3-projects-design.md`.
+
 ## T3 Connect (opt-in)
 
 T3 Connect lets the T3 phone app, the desktop app and app.t3.codes reach this project's T3 server
@@ -324,9 +345,10 @@ Unpaywall and says so in its report. Builders refuse the setting.
 | `~/.t3/...` incl. T3 scratch threads | survives (`t3-research` volume) | no (only inside Docker) |
 | anything else (`/home/agent/...`, `/tmp`, other `/research/...` paths) | wiped on every `agent-up up` | no |
 
-Create T3 projects in the research container only under `/research/_general` or
-`/research/<project>`. A T3 project at any other path breaks after the next `agent-up up`; remove
-it in T3 (right-click, Remove).
+The container adds the `/research/_general` T3 project itself at every start. If you add more by
+hand, create them only under `/research/_general` or `/research/<project>`: a T3 project at any
+other path breaks after the next `agent-up up`. `agent-up status research` flags those as
+`T3 project OUTSIDE /research`; remove them in T3 (right-click, Remove).
 
 `docker logs research-agent-1` shows `Profile: research`. A builder opted in **after** the research
 container started reaches it at its next `agent-up up research`.

@@ -83,6 +83,11 @@ check "agent-init present"             test -x /usr/local/bin/agent-init.sh
 check "t3 matches its pinned install dir" bash -c 'want=$(readlink /usr/local/bin/t3 | sed -nE "s#^/opt/t3/t3-([0-9][0-9.]*)-linux-x64/t3\$#\1#p"); [ -n "$want" ] && t3 --version 2>/dev/null | grep -qE "(^|[^0-9.])${want//./\\.}([^0-9.]|$)"'
 check "T3CODE_TELEMETRY_ENABLED=false set (t3 docs/user/telemetry.md; its PostHog host is not allowlisted either)" test "${T3CODE_TELEMETRY_ENABLED:-}" = false
 check "entrypoint + agent-t3 present"  test -x /usr/local/bin/agent-entrypoint -a -x /usr/local/bin/agent-t3
+# agent-t3 projects: reads T3's project list (none before T3 first starts) and names the folder that should be one.
+check "agent-t3 projects: no T3 state yet -> the project folder is reported missing" bash -c '
+  set -e; d=$(mktemp -d); mkdir -p "$d/ws/A" "$d/ws/B" "$d/ws/plain"; git -C "$d/ws/A" init -q; git -C "$d/ws/B" init -q
+  out=$(T3_BASE_DIR="$d/t3" T3_WORKSPACE="$d/ws" agent-t3 projects)
+  [ "$(grep -c "^T3 project MISSING: " <<<"$out")" = 2 ]; grep -q "MISSING: $d/ws/A " <<<"$out"; grep -q "MISSING: $d/ws/B " <<<"$out"'
 # RStudio Server (spec §13.3): installed, pinned, configured; started only where the owner enabled it.
 check "RStudio Server 2026.09.0+174 (pinned)" bash -c '/usr/lib/rstudio-server/bin/rstudio-server version | grep -q "^2026\.09\.0+174 "'
 check "agent-rstudio present"           test -x /usr/local/bin/agent-rstudio
