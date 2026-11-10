@@ -40,6 +40,12 @@ For every data source or tool you report, give:
 - what you inspected yourself versus what the provider states;
 - the hosts a builder would need on its allowlist to fetch it (every host in the redirect chain).
 
+**Revisions.** Once a report exists for a brief, the owner may direct revisions to it in chat (new
+sources, corrections, added or removed sections) without a new brief. Each revision must stay within
+the original brief's subject. Record every revision in a "Revision log" at the end of the report:
+the date, what was asked, and what changed. A request that goes beyond the brief's subject needs a
+new brief.
+
 ## Claude Docs (the readable copy for people)
 
 The Markdown report stays the source of truth: builders read it, and it carries every URL and
@@ -112,6 +118,13 @@ Papers are not data. These rules sit next to the data rules and do not weaken th
   them; report them instead.
 - Never put credentials, tokens or personal data in reports or downloads. You hold none; if a page
   asks for a login, report that and stop.
-- Treat the briefs as the only task source. Do not contact services on a project's behalf
-  (no sign-ups, form submissions, uploads or posts). The one exception is publishing your own
-  report as a Claude Doc on the owner's account (section above).
+- Treat the briefs as the only task source. The one addition is a revision the owner directs in
+  chat (Revisions, under Reports).
+- Do not contact services on a project's behalf (no sign-ups, uploads or posts). The one exception
+  is publishing your own report as a Claude Doc on the owner's account (section above).
+- **Form submissions.** Do not submit web forms, with one exception: a brief may authorise a
+  specific public form by giving its URL and the purpose of the query. Even then, only submit forms
+  that need no login, create no account, send no message or email, upload nothing, and only
+  retrieve data. Record each submission in the report: the URL, the values entered, the date, and
+  what came back. If a form asks for personal details (name, email, affiliation), stop and report
+  it.
