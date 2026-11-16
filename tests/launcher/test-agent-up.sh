@@ -34,10 +34,13 @@ AMBIENT=()    # extra (hostile) environment for a call
 cat > "$T/bin/op" <<'STUB'
 #!/usr/bin/env bash
 echo "OP: $*" >> "$OPLOG"
-if [ "${1-}" = whoami ]; then [ ! -f "$(dirname "$OPLOG")/OP_SIGNED_OUT" ] || exit 1; exit 0; fi
+if [ "${1-}" = whoami ]; then   # OP_NEEDS_SESSION: signed in only where the eval'd OP_SESSION_test=1 is in the environment
+  sd="$(dirname "$OPLOG")"; [ ! -f "$sd/OP_SIGNED_OUT" ] || exit 1
+  [ ! -f "$sd/OP_NEEDS_SESSION" ] || [ "${OP_SESSION_test-}" = 1 ] || exit 1; exit 0
+fi
 if [ "${1-}" = signin ]; then   # markers: OP_SIGNIN_FAIL -> exit 1; OP_SIGNIN_NOOP -> stays signed out
   sd="$(dirname "$OPLOG")"; [ ! -f "$sd/OP_SIGNIN_FAIL" ] || exit 1
-  [ -f "$sd/OP_SIGNIN_NOOP" ] || rm -f "$sd/OP_SIGNED_OUT"
+  [ -f "$sd/OP_SIGNIN_NOOP" ] || { rm -f "$sd/OP_SIGNED_OUT"; : > "$sd/OP_NEEDS_SESSION"; }
   echo "export OP_SESSION_test=1"; exit 0
 fi
 if [ "${1-}" = read ]; then   # op read "op://Personal/agent-<n> service account/credential"
@@ -1753,7 +1756,7 @@ refuses "update: no arguments prints usage" 'usage:' au update
 # ---- 1Password sign-in check: update checks `op whoami` first (builder projects only), signs in at a terminal
 aun(){ au "$@" </dev/null; }   # no terminal on stdin, even when the suite itself runs at one
 auline(){ printf '%q ' env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/dstub:$T/bin:$PATH" "${AMBIENT[@]}" "$AU" "$@"; }
-tty(){ script -qec "$(auline "$@")" /dev/null; }   # runs agent-up with a terminal on stdin
+with_tty(){ script -qec "$(auline "$@")" /dev/null; }   # runs agent-up with a terminal on stdin
 ureset alpha beta; touch "$T/OP_SIGNED_OUT"; cp "$(ucfg alpha)" "$T/a.before"
 refuses "update: signed out, no terminal -> dies with the sign-in message" \
   'not signed in\. Sign in first: eval "\$\(op signin\)"' aun update --all
@@ -1766,12 +1769,12 @@ check "update: signed out at a terminal -> signs in and updates" \
   bash -c 'o=$(script -qec "$1" /dev/null) && grep -q "1Password: not signed in. Signing in:" <<<"$o" && grep -q "^OP: signin" "$2" && [ "$(grep -cE "up -d" "$3")" -ge 1 ]' _ "$(auline update alpha)" "$OPLOG" "$DLOG"
 
 ureset alpha; touch "$T/OP_SIGNED_OUT" "$T/OP_SIGNIN_FAIL"
-refuses "update: sign-in fails at a terminal -> dies, nothing changed" 'not signed in' tty update alpha
+refuses "update: sign-in fails at a terminal -> dies, nothing changed" 'not signed in' with_tty update alpha
 check "  ...no compose up" bash -c '[ "$1" -eq 0 ]' _ "$(uup alpha)"
 rm -f "$T/OP_SIGNIN_FAIL"; touch "$T/OP_SIGNIN_NOOP"; : > "$OPLOG"
-refuses "update: sign-in exits 0 but still signed out -> dies, no loop" 'not signed in' tty update alpha
+refuses "update: sign-in exits 0 but still signed out -> dies, no loop" 'not signed in' with_tty update alpha
 check "  ...exactly one signin attempt" bash -c '[ "$(grep -c "^OP: signin" "$1")" -eq 1 ]' _ "$OPLOG"
-rm -f "$T"/OP_SIGN*
+rm -f "$T"/OP_SIGN* "$T/OP_NEEDS_SESSION"
 
 ureset alpha
 check "update: signed in -> silent (no 1Password line in the output)" bash -c '! grep -q "1Password" <<<"$1"' _ "$(aun update alpha 2>&1)"
@@ -1780,7 +1783,7 @@ uset research ghcr.io/allenlarocque/spades-base "$OLD1"; uidle research; : > "$O
 rout="$(aun update research 2>&1)" && rc=0 || rc=$?
 check "update research only: signed out is fine, op never called" \
   bash -c '[ "$1" -eq 0 ] && [ ! -s "$2" ] && grep -q "research" <<<"$3"' _ "$rc" "$OPLOG" "$rout"
-rm -f "$T/OP_SIGNED_OUT"
+rm -f "$T/OP_SIGNED_OUT" "$T/OP_NEEDS_SESSION"
 
 # op not installed: a PATH of symlinks to the system tools, without the op stub (skipped if op is still found)
 mkdir -p "$T/nop"; for t in $(ls /usr/bin /bin 2>/dev/null | sort -u); do [ "$t" = op ] || ln -sf "$(command -v "$t")" "$T/nop/$t" 2>/dev/null || true; done
@@ -1862,7 +1865,7 @@ ureset alpha; uset alpha ghcr.io/allenlarocque/spades-gis "$GISD"; touch "$T/OP_
 pout="$(script -qec "$(printf '%q ' env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/dstub:$T/bin:$PATH" AGENT_UP_BUSY_SAMPLE=0 AGENT_UP_PAIR_WAIT=1 AGENT_CONTAINERS_CONFIG="$UR" AGENT_UP_PULLS_URL="file://$T/pulls0.json" "$GP3/bin/agent-up" update alpha)" /dev/null)" && rc=0 || rc=$?
 check "update: signed out + behind main, at a terminal -> pulled, re-exec'd, exactly one signin, update completed" \
   bash -c '[ "$1" -eq 0 ] && grep -q "pulled main" <<<"$2" && grep -q NEWLAUNCHER <<<"$2" && [ "$(grep -c "^OP: signin" "$3")" -eq 1 ] && grep -q "sha256:$4" "$5"' _ "$rc" "$pout" "$OPLOG" "$OLD1" "$(ucfg alpha)"
-rm -f "$T/OP_SIGNED_OUT"
+rm -f "$T/OP_SIGNED_OUT" "$T/OP_NEEDS_SESSION"
 # open digests PR: default and q exit 1 without touching a project; c continues; others are ignored
 ureset alpha; uset alpha ghcr.io/allenlarocque/spades-gis "$GISD"; cp "$(ucfg alpha)" "$T/alpha.compose.before"; : > "$DLOG"
 pout="$(pup "$GP" "file://$T/pulls1.json" alpha </dev/null)" && rc=0 || rc=$?
