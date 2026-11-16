@@ -65,11 +65,17 @@ Each container runs a T3 Code server (`t3 serve`, pinned in the image, telemetry
 - T3 drives the container's own Claude Code (your login, behind the firewall). Don't enable the
   desktop app's local environment or WSL integration: those run agents on the host, outside any sandbox.
 
-**Upgrading a project created before T3** (its `compose.yaml` predates it):
+**Upgrading a project created before T3** (its `compose.yaml` predates it). The template's
+`image:` line names `spades-gis`, and `agent-up update` pins whatever image that line names, so
+set it to your project's own image (`spades-base`, `spades-gis` or `spades-bio`; the `IMAGE=` line
+in `project.conf` says which) before running `agent-up update`:
 
 ```bash
 CFG=~/.config/agent-containers/<project>
+grep '^IMAGE=' "$CFG/project.conf"   # base, gis or bio: your project's image
 cp ~/GitHub/agent-containers/project-template/config/compose.yaml "$CFG/compose.yaml"
+sed -i 's|/spades-gis@|/spades-<image>@|' "$CFG/compose.yaml"   # <image> = base, gis or bio (as printed above)
+grep '^    image: ' "$CFG/compose.yaml"   # expect spades-<image>@sha256:REPLACE_WITH_DIGEST
 agent-up update <project>   # replaces the template placeholder with the verified digest
 grep -h '^T3_PORT=' ~/.config/agent-containers/*/project.conf   # ports already taken
 grep -q '^T3_PORT=' "$CFG/project.conf" || echo 'T3_PORT=3773' >> "$CFG/project.conf"   # a FREE one; `up` refuses a duplicate

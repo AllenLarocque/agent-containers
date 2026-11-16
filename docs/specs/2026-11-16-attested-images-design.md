@@ -146,34 +146,49 @@ For an image name `spades-<x>`:
    Every digest ever attested from `main` stays valid forever, and step 4 only compares source
    commits, so without this a branch run could point `latest` back at an earlier Monday rebuild of
    the same source and silently undo OS patches.
-6. Only then return the digest for pinning.
+6. Check it is not older than what this host already accepted. The caller keeps a small state file,
+   `images.seen` in the config root (next to `agent-up.conf`; no container can write it), with one
+   line per image: `<image> <run-id> <attempt>`, the newest publish run it has accepted. The
+   attestation's run and attempt must not be lower (run id first, then attempt); when it passes, the
+   mark is raised before the digest is returned (written atomically, mode 600; if it cannot be
+   written, there is no digest). Someone with Write access can re-run newer successful runs and
+   cancel them, or delete them, so that an older attested build of the same source is the newest
+   successful run in GitHub's list and passes step 5; this check refuses it once the host has seen a
+   newer run. A malformed `images.seen` is an error, never "no mark".
+7. Only then return the digest for pinning.
 
 Both commit checks need a current `origin/main`, so the routine fetches it first, for `update` and
 `agent-new` alike. If the fetch fails, or the source commit is not in the clone at all, there is no
 digest and the message says the clone could not be brought up to date (not "not built from main").
 
-Any failure in 1 to 5 means no digest: the project is skipped with a reason, the other projects
+Any failure in 1 to 6 means no digest: the project is skipped with a reason, the other projects
 still update, and the command exits non-zero. Messages say which step failed and what to do:
 
 | Failure | Message tells the owner |
 |---|---|
-| `gh` missing or not logged in | run `gh auth login` on the host |
-| registry or GitHub unreachable | try again; nothing was changed |
-| no attestation, wrong workflow, wrong branch | the image `latest` points to was **not** built by `publish` on `main`; do not use it; link to the publish runs |
+| `gh` missing or not logged in (to github.com) | run `gh auth login` on the host |
+| registry, GitHub or Sigstore unreachable | try again; nothing was changed |
+| no attestation (including before the first attested `publish` of an image), wrong workflow, wrong branch | the image `latest` points to was **not** built by `publish` on `main`; do not use it; link to the publish runs. When there is no attestation at all, it adds: if this repo has not yet published this image with attestations (first publish after the change, or a new image), wait for the publish run to finish |
 | attestation is for another image (step 3) | `latest` for this image points at a different image; do not use it |
 | stale (step 4) | images for the newest `main` are not published yet; link to the publish runs (say so if one is running) |
 | not the newest build (step 5) | `latest` points at an older build; run `publish` on `main` to restore it |
+| older than this host accepted (step 6) | `latest` points at an older build than one this host has already accepted; run `publish` on `main` to restore it (or delete that image's line from `images.seen` to accept the older build on purpose) |
+| `images.seen` malformed, or cannot be written | names the file; fix it, then run again |
 | clone not current (fetch failed, commit unknown) | fix the clone or the network, then run again |
 
 `agent-up update` keeps `update_guard` (clone on `main`, fast-forward, re-exec), because the
 launcher and template have to match the images. `update_pending_pr` and its prompt are removed; the
 stale case replaces it. `AGENT_UP_SKIP_GIT_CHECK=1` keeps skipping the on-`main` check and the
-fast-forward only; it never skips steps 2 to 5 or the fetch they need. `agent-new` pins by running
+fast-forward only; it never skips steps 2 to 6 or the fetch they need. `agent-new` pins by running
 `agent-up update <project>`, so the same guard applies to it: the launcher clone must be on `main`.
 
 Known limit of step 5: if someone re-runs an older `publish` run on `main`, that run builds fresh
 and promotes `latest`, but it is not the newest run in GitHub's list, so `update` refuses until
 `publish` is run again. That is a nuisance, not a wrong image.
+
+Known limit of step 6: a host with no mark yet for an image (its first `update`, or a new machine)
+cannot detect this particular rollback for its first pin; from then on it can. The owner can delete
+an image's line from `images.seen` to accept an older build on purpose.
 
 `update` still accepts only image lines from `ghcr.io/allenlarocque/spades-*`, looks each image up
 once per run, and rewrites the digest in `compose.yaml` as today.
@@ -211,8 +226,12 @@ the owner as before. Builder's choice with the owner.
 ### Transition
 
 Merging the `publish.yml` change triggers `publish` (the file is in its own `paths`), which
-produces the first attested images. Until that run finishes, `update` reports "stale" and changes
-nothing. Running projects are untouched throughout.
+produces the first attested images. Until that run finishes, `latest` has no attestation, so
+`update` refuses every project with code 12: "the image 'latest' points to was NOT built by publish
+on main; do not use it", followed by "If this repo has not yet published this image with
+attestations (first publish after the change, or a new image), wait for the publish run to finish."
+It changes nothing. Once the run finishes, `update` works normally. The same applies to an image
+added later, until its first publish. Running projects are untouched throughout.
 
 ## Constraints
 
@@ -235,13 +254,18 @@ nothing. Running projects are untouched throughout.
       with "stale".
 - [ ] `latest` re-pointed by hand at an earlier attested build of the same source: `update` refuses
       with "not the newest build".
+- [ ] After one `update` has accepted a run, the newer successful runs are re-run-and-cancelled or
+      deleted so that an older attested build of the same source is the newest in GitHub's list, and
+      `latest` is pointed at it: `update` refuses with "older build than one this host has already
+      accepted" and `images.seen` is unchanged.
 - [ ] `spades-bio:latest` re-pointed at the attested `spades-base` digest: `update` refuses bio
       with "another image".
 - [ ] `build-publish.sh` contains no digest read from a tag before `latest` is promoted.
 - [ ] `agent-up update --all` on a clean state pins the new digests with no prompt.
 - [ ] `agent-new` pins a fresh project through the same check.
 - [ ] Launcher tests cover: pass, no login, unreachable, wrong branch, wrong image name, stale, not
-      the newest build, fetch failed, one image failing while others update.
+      the newest build, older than the host's mark, fetch failed, one image failing while others
+      update.
 
 ## Left to the builder
 
@@ -268,3 +292,9 @@ nothing. Running projects are untouched throughout.
    and that the source ref is `refs/heads/main`.
 4. An image line that is neither a pinned digest nor `@sha256:<placeholder>` is skipped and left
    unchanged. The earlier fallback that rewrote any `@...` suffix is gone.
+5. A host-side high-water mark (launcher step 6, `images.seen` in the config root):
+   `scripts/verify-image.sh` takes the seen-file as a required third argument and refuses a build
+   older than one this host already accepted. *Why: step 5 trusts GitHub's list of successful runs,
+   which anyone with Write access can change by re-running and cancelling, or deleting, newer runs;
+   that would let an older attested build of the same source back in and undo OS patches.* (Found by
+   the final security review, 2026-11-16.)

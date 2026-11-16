@@ -143,7 +143,7 @@ rules).
   `images/base/Dockerfile`).** Since the last
   successful publish on `main` (its date:
   `gh api 'repos/AllenLarocque/agent-containers/actions/workflows/publish.yml/runs?branch=main&status=success&per_page=1' --jq '.workflow_runs[0].created_at[:10]'`;
-  if that gives nothing, use the date 7 days ago), look for Ubuntu security notices (USNs) for
+  if it fails, prints nothing or prints `null`, use the date 7 days ago), look for Ubuntu security notices (USNs) for
   packages the images install (the `apt-get install` lines in `images/*/Dockerfile`, plus core
   packages such as libc6, openssl, sudo, openssh, curl, git). The only source to try is
   GitHub-hosted:
