@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Print the manifest digest (sha256:<64 hex>) that ghcr.io/allenlarocque/<image>:<tag> points to; non-zero + a message on stderr on any failure.
-# Anonymous (the images are public); curl only. `latest` is promoted only by scripts/build-publish.sh after smoke tests, so it is what agent-up/agent-new pin.
+# Anonymous (the images are public); curl only. `latest` is promoted only by scripts/build-publish.sh, after smoke tests and after publish.yml has attested every image.
 # Usage: registry-digest.sh <image-name, e.g. spades-bio> [tag, default latest]
 set -euo pipefail
 img=${1:-}; tag=${2:-latest}; owner=allenlarocque

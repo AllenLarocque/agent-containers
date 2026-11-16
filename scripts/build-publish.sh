@@ -36,6 +36,7 @@ build() {  # $1 image name; rest: extra buildx args. Sets $digest to the digest 
 
 build_phase() {
   registry=${1:?registry prefix}; tag=${2:?tag}; out=${3:?digests file}
+  rm -f "$out"   # a file at this path can only have come from this run
   tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
   # --pull is nearly moot: the rocker base is digest-pinned in the Dockerfile. The weekly rebuild patches

@@ -18,8 +18,10 @@ check "no digest is read from a tag in the build phase" \
   bash -c '! grep -nE "imagetools inspect|digest_of" <<<"$1"' _ "$(outside_promote)"
 check "every build takes its digest from --metadata-file" \
   bash -c 'grep -q -- "--metadata-file" "$1" && grep -q "containerimage.digest" "$1"' _ "$BP"
-check "digests.md and render-digests are gone" \
-  bash -c '! grep -qE "render-digests|digests\.md" "$1" && [ ! -e "$2/scripts/render-digests.sh" ] && [ ! -e "$2/tests/ci/test-render-digests.sh" ]' _ "$BP" "$ROOT"
+# (the old table-rendering flow is gone; names are assembled so this file does not itself match)
+old1="render-""digests"; old2="digests""\\.md"
+check "the old digests table flow is gone" \
+  bash -c '! grep -qE "$3|$4" "$1" && [ ! -e "$2/scripts/$3.sh" ] && [ ! -e "$2/tests/ci/test-$3.sh" ]' _ "$BP" "$ROOT" "$old1" "$old2"
 check "latest is touched only inside promote()" \
   bash -c '! grep -n ":latest" <<<"$1"' _ "$(outside_promote)"
 refuses "unknown phase prints usage" 'usage' "$BP" nope

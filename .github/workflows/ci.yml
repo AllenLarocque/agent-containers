@@ -12,14 +12,12 @@ concurrency:
   cancel-in-progress: true
 jobs:
   # ONE build per run: the publish script itself (build, push to a local registry:2, smoke-test every
-  # image BY DIGEST, promote latest, render digests.md) with layers cached in the GitHub Actions cache.
+  # image BY DIGEST, then promote latest) with layers cached in the GitHub Actions cache.
   # The remaining tests then use those exact images, pulled back as spades-*:ci.
   #
   # Fast paths (scripts/ci-classify.sh; full whenever in doubt). build-test is a REQUIRED check, so it
   # always runs and always concludes; only its steps are gated:
-  #   digests  publish's digests PR (chore/digests-*, digests.md only): verify each digest on ghcr.io
-  #            instead of rebuilding; publish already built and smoke-tested exactly those digests.
-  #   docs     only *.md / docs/** changed (never digests.md, images/**, tests/**): nothing to build.
+  #   docs     only *.md / docs/** changed (never images/**, tests/**): nothing to build.
   #   draft    a draft PR: render-only launcher tests; the full build runs on ready_for_review.
   # The classifier is a step, not a separate job: a job this one `needs:` would make build-test
   # SKIPPED if it failed (a skipped required check counts as passing), and would delay the creation
@@ -34,7 +32,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0          # build-publish.sh dates layers by the last commit touching each image dir
-      - name: changes (full | digests | docs | draft)
+      - name: changes (full | docs | draft)
         id: mode
         env:
           EVENT: ${{ github.event_name }}
@@ -45,23 +43,9 @@ jobs:
         run: |
           set -o pipefail
           mode=$(scripts/ci-classify.sh "$EVENT" "$BASE" "$HEAD" "$BRANCH" "$DRAFT")
-          case $mode in full|digests|docs|draft) ;; *) echo "::error::unknown mode '$mode'"; exit 1 ;; esac
+          case $mode in full|docs|draft) ;; *) echo "::error::unknown mode '$mode'"; exit 1 ;; esac
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
-          echo "base=$BASE" >> "$GITHUB_OUTPUT"
           echo "::notice title=ci mode::$mode"
-      - name: digests — verify every digest in digests.md on ghcr.io (no rebuild)
-        if: steps.mode.outputs.mode == 'digests'
-        env:
-          BASE: ${{ steps.mode.outputs.base }}
-        run: |
-          set -o pipefail
-          scripts/ci-verify-digests.sh digests.md <(git show "$BASE:digests.md") 2>&1 | tee /tmp/verify.log || {
-            rc=$?
-            msg=$(sed 's/%/%25/g; s/\r//g' /tmp/verify.log | awk '{printf "%s%%0A", $0}')
-            echo "::error title=digests.md verification failed::$msg"
-            exit "$rc"
-          }
-          echo "::notice title=build-test::digests.md verified on ghcr.io (no rebuild)%0A$(grep '^OK' /tmp/verify.log | awk '{printf "%s%%0A", $0}')"
       - name: docs — nothing to build
         if: steps.mode.outputs.mode == 'docs'
         run: echo "::notice title=build-test::docs-only change; no image build"
@@ -91,7 +75,7 @@ jobs:
       # Exposes the Actions cache credentials to `docker buildx` run from a script (type=gha cache).
       - uses: crazy-max/ghaction-github-runtime@v3
         if: steps.mode.outputs.mode == 'full'
-      - name: Build (cached) + push to local registry, smoke by digest, render digests.md
+      - name: Build (cached) + push to local registry, smoke by digest, promote latest
         if: steps.mode.outputs.mode == 'full'
         env:
           BUILD_CACHE: gha
@@ -100,24 +84,24 @@ jobs:
           # that agent containers cannot reach, while the annotations API is readable.
           set -o pipefail
           start=$(date +%s)
-          scripts/build-publish.sh localhost:5000/allenlarocque "2000.01.01-dryrun" /tmp/digests.md 2>&1 | tee /tmp/publish.log || {
+          { scripts/build-publish.sh build localhost:5000/allenlarocque "2000.01.01-dryrun" /tmp/digests.txt \
+            && scripts/build-publish.sh promote localhost:5000/allenlarocque /tmp/digests.txt; } 2>&1 | tee /tmp/publish.log || {
             rc=$?
             msg=$( { tail -n 60 /tmp/publish.log; echo '--- df -h'; df -h /; } | sed 's/%/%25/g; s/\r//g' | awk '{printf "%s%%0A", $0}')
             echo "::error title=build-publish failed (rc=$rc)::$msg"
             exit "$rc"
           }
           echo "::notice title=build-publish seconds::$(( $(date +%s) - start ))"
-      - name: Verify digests.md
+      - name: Verify digests.txt (four lines, in order, each a sha256 digest)
         if: steps.mode.outputs.mode == 'full'
         run: |
-          cat /tmp/digests.md
-          grep -Pq '^\| spades-base \| 2000\.01\.01-dryrun \| \x60sha256:[0-9a-f]{64}\x60 \|$' /tmp/digests.md
-          grep -Pq '^\| spades-bio \| 2000\.01\.01-dryrun \| \x60sha256:[0-9a-f]{64}\x60 \|$' /tmp/digests.md
-          grep -Pq '^\| spades-gis \| 2000\.01\.01-dryrun \| \x60sha256:[0-9a-f]{64}\x60 \|$' /tmp/digests.md
-          grep -Pq '^\| spades-research \| 2000\.01\.01-dryrun \| \x60sha256:[0-9a-f]{64}\x60 \|$' /tmp/digests.md
-          [ "$(grep -c '^| spades-' /tmp/digests.md)" = 4 ]
-          # header must match the committed skeleton
-          diff <(head -7 digests.md) <(head -7 /tmp/digests.md)
+          cat /tmp/digests.txt
+          [ "$(wc -l < /tmp/digests.txt)" = 4 ]
+          i=0
+          for x in base gis bio research; do
+            i=$((i + 1))
+            sed -n "${i}p" /tmp/digests.txt | grep -Pq "^spades-$x sha256:[0-9a-f]{64}\$"
+          done
       - name: Use the pushed images as spades-*:ci for the remaining tests
         if: steps.mode.outputs.mode == 'full'
         run: |
@@ -549,9 +533,18 @@ jobs:
       - name: CI classifier unit test (which change sets may skip the image build)
         if: always()
         run: bash tests/ci/test-classify.sh
-      - name: render-digests unit test (four image rows, skeleton unchanged)
+      - name: registry-digest unit test (stubbed curl; ghcr.io manifest digest parsing)
         if: always()
-        run: bash tests/ci/test-render-digests.sh
+        run: bash tests/ci/test-registry-digest.sh
+      - name: verify-image unit test (temp git repos; no network)
+        if: always()
+        run: bash tests/ci/test-verify-image.sh
+      - name: build-publish static test (digests from the build, latest only in promote)
+        if: always()
+        run: bash tests/ci/test-build-publish-static.sh
+      - name: publish.yml paths == verify-image.sh PUBLISH_PATHS
+        if: always()
+        run: bash tests/ci/test-publish-paths.sh
       - name: update-candidates unit test (pinned vs eligible upstream versions)
         if: always()
         run: bash tests/ci/test-update-candidates.sh
