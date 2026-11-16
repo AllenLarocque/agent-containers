@@ -157,7 +157,7 @@ CONFEOF
   cat <<FINALEOF
 agent-up: created $cfg
 Next (docs/runbooks/new-project.md):
-  1. set the image digest in $cfg/compose.yaml. Set it with: agent-up update $name
+  1. pin the image: agent-up update $name
   2. vault agent-$name + service account + scoped GitHub token (docs/runbooks/1password-project-vault.md)
   3. add the project's domains to $cfg/allowlist
   4. replace @OWNER in $dir/.github/CODEOWNERS
@@ -203,7 +203,7 @@ CONFEOF
   cat <<FINALEOF
 agent-up: created $cfg (the shared research container: no secrets, no 1Password vault)
 Next (project-template/README.md "Research container"):
-  1. set the image digest in $cfg/compose.yaml. Set it with: agent-up update research
+  1. pin the image: agent-up update research
   2. set RESEARCH=1 in each builder project's project.conf that should use it
   3. agent-up up research; then log in once: agent-up shell research -> claude, codex login --device-auth
   4. agent-up pair research (T3 Code; its project is /research/_general, which persists; create T3 projects only under /research/_general or /research/<project>)
@@ -506,9 +506,9 @@ ts_url(){ # $1 config dir -> the phone address (placeholder host when TAILSCALE_
   local h port; h="$(tailscale_host)"; port="$(ts_port "$1")"
   if [ "$port" = 443 ]; then printf 'https://%s' "${h:-<tailnet-host>}"; else printf 'https://%s:%s' "${h:-<tailnet-host>}" "$port"; fi
 }
-check_digest(){
+check_digest(){ # $1 compose.yaml, $2 project
   grep -Eq '^[[:space:]]*image:[[:space:]]*[^[:space:]]+@sha256:[0-9a-f]{64}[[:space:]]*$' "$1" \
-    || die "$1: the image is not pinned to a real digest (@sha256:<64 hex>). Set it with: agent-up update <project>"
+    || die "$1: the image is not pinned to a real digest (@sha256:<64 hex>); pin it with: agent-up update $2"
 }
 check_project_env(){ # op:// references only; never echo a line (it could hold a pasted secret)
   local bad reserved
@@ -852,7 +852,7 @@ cmd_up(){
   check_ftp "$cfg"
   check_google_drive "$cfg"
   check_claude_docs "$cfg"
-  check_digest "$cfg/compose.yaml"
+  check_digest "$cfg/compose.yaml" "$name"
   if [ "$(profile "$cfg")" = research ]; then check_research_env "$cfg"; else check_project_env "$cfg/project.env"; fi
   check_mounts "$cfg"
   if [ "$(profile "$cfg")" = research ] || research_on "$cfg"; then mkdir -p "$(research_dir "$cfg")"; fi
@@ -1152,18 +1152,23 @@ cmd_update(){
   for n in "${names[@]}"; do
     if [ "$quit" = 1 ]; then rows+=("$n|not reached (you quit)|-|-"); continue; fi
     cfg="$CFG_ROOT/$n"; c="$n-agent-1"; res=""; ver="-"; rep="-"
-    # The image line: <registry>/<name>@sha256:<64 hex>
-    cur="$(sed -nE 's/^[[:space:]]*image:[[:space:]]*([^[:space:]]+)@(sha256:[0-9a-f]{64})[[:space:]]*$/\1 \2/p' "$cfg/compose.yaml" | head -n 1)"
+    # The image line: <registry>/<name>@sha256:<64 hex>, or the template placeholder (no digest yet: old is empty, a first pin)
+    cur="$(sed -nE "s/$IMG_LINE_RE/\2 \3/p" "$cfg/compose.yaml" | head -n 1)"
     img="${cur% *}"; old="${cur#* }"; name_img="${img##*/}"
+    if [[ $old =~ ^[0-9a-f]{64}$ ]]; then old="sha256:$old"; else old=""; fi
     if ! valid_name "$n"; then res="SKIP (invalid project name '$n': rename it to '$(normalise "$n")'; README: Renaming a project)"; rc=1
     elif [ -z "$cur" ]; then res="SKIP (no pinned image: line in compose.yaml)"; rc=1
     elif ! [[ $img =~ ^ghcr\.io/allenlarocque/spades-[a-z]+$ ]]; then res="SKIP (image $img is not published by this repo)"; rc=1
     elif image_digest "$name_img"; new="$IMG_DIGEST"; [ -z "$new" ]; then res="NOT UPDATED ($IMG_WHY)"; rc=1   # no verified digest: compose untouched, no up
+    elif [ -z "$old" ]; then   # a first pin: never current, never started (up refuses a placeholder, so no container runs this config)
+      if rewrite_digest "$cfg/compose.yaml" "$new"; then res="updated, not started (start with: agent-up up $n)"
+      else res="NOT UPDATED (could not write the digest into $cfg/compose.yaml)"; rc=1; fi
     elif [ "$new" = "$old" ] && { cdig=$(container_digest "$c"); [ -z "$cdig" ] || [ "$cdig" = "$new" ]; }; then res="current"   # compose is current; a container left on an older image is not
     elif gd_resolve "$cfg"; [ -n "$GD_PROBLEM" ]; then res="NOT UPDATED (Google Drive key: $GD_PROBLEM)"; rc=1   # `up` would refuse it: compose untouched
     elif ! is_running "$c"; then
       if [ "$new" = "$old" ]; then res="on the old image, not started (compose is current; start with: agent-up up $n, not docker start)"
-      else rewrite_digest "$cfg/compose.yaml" "$new"; res="updated, not started (start with: agent-up up $n)"; fi
+      elif rewrite_digest "$cfg/compose.yaml" "$new"; then res="updated, not started (start with: agent-up up $n)"
+      else res="NOT UPDATED (could not write the digest into $cfg/compose.yaml)"; rc=1; fi
     else
       if ! bs="$(busy_scan "$c" </dev/null)"; then
         echo "== $n is busy:"; printf '%s\n' "$bs"
@@ -1185,15 +1190,15 @@ cmd_update(){
         fi
         if [ -z "$res" ]; then
           oldp="$(t3_protocol_of "$c")"
-          rewrite_digest "$cfg/compose.yaml" "$new"
-          if [ "$(profile "$cfg")" = research ]; then
+          if ! rewrite_digest "$cfg/compose.yaml" "$new"; then res="NOT UPDATED (could not write the digest into $cfg/compose.yaml)"; rc=1   # no up
+          elif [ "$(profile "$cfg")" = research ]; then
             env -u OP_SERVICE_ACCOUNT_TOKEN "$0" up "$n" </dev/null || res="FAILED"
           else
             OP_SERVICE_ACCOUNT_TOKEN="$tok" "$0" up "$n" </dev/null || res="FAILED"
           fi
           tok=""
           if [ "$res" = FAILED ]; then res="FAILED (compose already on the new digest; fix, then: agent-up up $n; logs: docker logs $c)"; rc=1
-          else
+          elif [ -z "$res" ]; then
             res="updated"; newp="$(t3_protocol_of "$c")"
             ver="$(update_versions "$n" </dev/null)"
             if [ -z "$oldp" ]; then rep=unknown; unknowns+=("$n")
@@ -1236,10 +1241,17 @@ cmd_update(){
   fi
   return "$rc"
 }
-rewrite_digest(){ # $1 compose.yaml, $2 sha256:<64 hex>: only the first pinned image: line (the one cmd_update read) changes (temp file + mv, same mode)
-  local tmp; tmp="$(mktemp "$1.XXXXXX")"
-  sed -E "0,/^([[:space:]]*image:[[:space:]]*[^[:space:]]+@)sha256:[0-9a-f]{64}([[:space:]]*)$/s//\1$2\2/" "$1" > "$tmp"
-  chmod --reference="$1" "$tmp"; mv "$tmp" "$1"
+# An image: line cmd_update pins: <image>@sha256:<64 hex>, or the template placeholder after @sha256: (either spelling; the old one predates
+# verified images). \1 indent + "image:", \2 image, \3 digest hex or placeholder, \4 trailing space. Anything else is not an image line to pin.
+IMG_LINE_RE='^([[:space:]]*image:[[:space:]]*)([^[:space:]]+)@sha256:([0-9a-f]{64}|REPLACE_WITH_DIGEST|REPLACE_WITH_DIGEST_FROM_digests\.md)([[:space:]]*)$'
+rewrite_digest(){ # $1 compose.yaml, $2 sha256:<64 hex>: only the first IMG_LINE_RE line (the one cmd_update read) changes (temp file + mv, same mode).
+  # Fails, leaving the file untouched, unless that line then names the same image with exactly $2.
+  [[ $2 =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+  local tmp want; want="$(sed -nE "s/$IMG_LINE_RE/\2/p" "$1" | head -n 1) ${2#sha256:}"
+  tmp="$(mktemp "$1.XXXXXX" 2>/dev/null)" || return 1
+  if sed -E "0,/$IMG_LINE_RE/s//\1\2@$2\4/" "$1" > "$tmp" && [ "$(sed -nE "s/$IMG_LINE_RE/\2 \3/p" "$tmp" | head -n 1)" = "$want" ] \
+     && chmod --reference="$1" "$tmp" && mv "$tmp" "$1"; then return 0; fi
+  rm -f "$tmp"; return 1
 }
 cmd_compose(){ # $1 compose subcommand, $2 project
   local sub="$1"; shift

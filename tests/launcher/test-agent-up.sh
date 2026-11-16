@@ -132,7 +132,7 @@ check "project.conf: RSTUDIO=0 (RStudio Server is opt-in)" grep -qx "RSTUDIO=0" 
 check "project.conf: first project gets RSTUDIO_PORT=8787" grep -qx "RSTUDIO_PORT=8787" "$CFG/project.conf"
 check "project.env names this project's vault" grep -q "op://agent-$NAME/github-agent/token" "$CFG/project.env"
 check "compose uses spades-gis by default, digest placeholder kept" \
-  grep -q "spades-gis@sha256:REPLACE_WITH_DIGEST_FROM_digests.md" "$CFG/compose.yaml"
+  grep -qx "    image: ghcr.io/allenlarocque/spades-gis@sha256:REPLACE_WITH_DIGEST" "$CFG/compose.yaml"
 check "repo seed CODEOWNERS copied into the project" grep -q "^\* @OWNER" "$P/.github/CODEOWNERS"
 check "repo seed .gitignore copied into the project (incl. .Rproj.user/)" grep -qx ".Rproj.user/" "$P/.gitignore"
 check "repo seed gitleaks workflow copied into the project" grep -q "ghcr.io/gitleaks/gitleaks:v8.30.1" "$P/.github/workflows/gitleaks.yml"
@@ -180,11 +180,17 @@ check "  ...config is odd-name-" test -d "$CFGROOT/odd-name-"
 XD="$T/xdir"; mkdir -p "$XD"
 check "init --name .x" au init "$XD" --name .x
 check "  ...config is x" test -d "$CFGROOT/x"
+XD2="$T/xdir2"; mkdir -p "$XD2"; xinit="$(au init "$XD2" --name xtwo 2>&1)" || true
+check "init's Next text: step 1 is 'pin the image: agent-up update xtwo', said once" \
+  bash -c 'grep -qxF "  1. pin the image: agent-up update xtwo" <<<"$1" && [ "$(grep -c "agent-up update" <<<"$1")" -eq 1 ]' _ "$xinit"
+rm -rf "$CFGROOT/xtwo" "$XD2"
 
 # ---- up: pre-flight refusals (the stub docker must never be reached)
 TOK=tok
 refuses "up refuses an unknown project" 'no config' au up nosuch
-refuses "up refuses the placeholder digest" 'not pinned to a real digest.*Set it with: agent-up update <project>' au up "$NAME"
+refuses "up refuses the placeholder digest" 'not pinned to a real digest \(@sha256:<64 hex>\); pin it with: agent-up update demo-proj$' au up "$NAME"
+sed -i "s/REPLACE_WITH_DIGEST/REPLACE_WITH_DIGEST_FROM_digests.md/" "$CFG/compose.yaml"
+refuses "up refuses the old placeholder spelling too" 'not pinned to a real digest' au up "$NAME"
 sed -i "s/REPLACE_WITH_DIGEST_FROM_digests.md/$H64/" "$CFG/compose.yaml"
 cp "$CFG/compose.yaml" "$T/compose-img.bak"
 sed -i -E "s|^( *image: *).*|\\1ghcr.io/allenlarocque/spades-research@sha256:$H64|" "$CFG/compose.yaml"
@@ -658,7 +664,8 @@ RCFG="$CFGROOT/research"; RD="$H/agent-research"
 refuses "init --profile research refuses another name" "always named 'research'" au init --profile research --name foo
 rinit="$(au init --profile research 2>&1)" && rrc=0 || rrc=$?
 check "init --profile research (no project dir)" test "$rrc" -eq 0
-check "  ...the Next text says to set the digest with agent-up update research" grep -qF "Set it with: agent-up update research" <<<"$rinit"
+check "  ...the Next text: step 1 is 'pin the image: agent-up update research', said once" \
+  bash -c 'grep -qxF "  1. pin the image: agent-up update research" <<<"$1" && [ "$(grep -c "agent-up update" <<<"$1")" -eq 1 ]' _ "$rinit"
 check "  ...config dir 'research', mode 700" test "$(stat -c %a "$RCFG")" = 700
 check "  ...holds compose.yaml + project.conf ONLY (no project.env: no secrets; no allowlist)" \
   test "$(ls -A "$RCFG" | sort | paste -sd' ' -)" = "compose.yaml project.conf"
@@ -667,11 +674,11 @@ check "  ...project.conf: PROFILE=research, IMAGE=research, RESEARCH_DIR, T3_POR
 check "  ...and NO project folder, spades.ai or memory settings" bash -c '! grep -Eq "^(PROJECT_DIR|SPADES_AI_DIR|AGENT_MEMORY_DIR)=" "$1"' _ "$RCFG/project.conf"
 check "  ...its T3_PORT is unique" bash -c '[ "$(grep -h "^T3_PORT=" "$1"/*/project.conf | sort | uniq -d)" = "" ]' _ "$CFGROOT"
 check "  ...compose: the research seed (spades-research, 16g, cwd /research, own volumes)" \
-  bash -c 'grep -q "spades-research@sha256:REPLACE_WITH_DIGEST_FROM_digests.md" "$1" && grep -qE "^    mem_limit: 16g" "$1" && grep -qE "^    working_dir: /research" "$1" && ! sed "s/#.*//" "$1" | grep -Eq "[^_]PROJECT_DIR|SPADES_AI_DIR|AGENT_MEMORY_DIR|require-cache|npm-cache-shared|allowlist|/workspace"' _ "$RCFG/compose.yaml"
+  bash -c 'grep -qx "    image: ghcr.io/allenlarocque/spades-research@sha256:REPLACE_WITH_DIGEST" "$1" && grep -qE "^    mem_limit: 16g" "$1" && grep -qE "^    working_dir: /research" "$1" && ! sed "s/#.*//" "$1" | grep -Eq "[^_]PROJECT_DIR|SPADES_AI_DIR|AGENT_MEMORY_DIR|require-cache|npm-cache-shared|allowlist|/workspace"' _ "$RCFG/compose.yaml"
 check "  ...created the research exchange root" test -d "$RD"
 refuses "init --profile research never overwrites" 'already exists' au init --profile research
 refuses "up research refuses the placeholder digest" 'not pinned to a real digest' au up research
-sed -i "s/REPLACE_WITH_DIGEST_FROM_digests.md/$H64/" "$RCFG/compose.yaml"
+sed -i "s/REPLACE_WITH_DIGEST/$H64/" "$RCFG/compose.yaml"
 RC="compose --env-file $RCFG/project.conf -f $RCFG/compose.yaml -f $RCFG/.generated/env-passthrough.yaml -f $RCFG/.generated/t3-connect.yaml -f $RCFG/.generated/research.yaml -f $RCFG/.generated/rstudio.yaml -f $RCFG/.generated/ftp.yaml -f $RCFG/.generated/google-drive.yaml -f $RCFG/.generated/hostname.yaml -f $RCFG/.generated/restart.yaml --project-directory $RCFG -p research"
 : > "$DLOG"; rm -f "$OPLOG"; TOK=""
 AMBIENT=(OP_SERVICE_ACCOUNT_TOKEN=owner-op-token GH_TOKEN=owner-gh-token)
@@ -1652,7 +1659,8 @@ ureset alpha beta aaa-self research; uset research ghcr.io/allenlarocque/spades-
 # (the clone's origin must name the GitHub repo for this, so for this one run it does; a fake ssh serves that URL from the local bare repo)
 printf '#!/bin/sh\nfor a; do l=$a; done\ncase "$l" in "git-upload-pack "*) exec git upload-pack "%s" ;; esac\nexit 1\n' "$UO" > "$T/fakessh"; chmod +x "$T/fakessh"
 git -C "$UC" remote set-url origin git@github.com:AllenLarocque/agent-containers.git
-uout="$(cd "$UC" && AMBIENT+=(GIT_SSH_COMMAND="$T/fakessh" GIT_CONFIG_NOSYSTEM=1) && au update --all </dev/null 2>&1)" && rc=0 || rc=$?
+# (no system, global or XDG git config for this run: a user-level insteadOf rule must not send it to the real GitHub)
+uout="$(cd "$UC" && unset XDG_CONFIG_HOME && AMBIENT+=(GIT_SSH_COMMAND="$T/fakessh" GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null) && au update --all </dev/null 2>&1)" && rc=0 || rc=$?
 git -C "$UC" remote set-url origin "$UO"
 check "update --all: the project cloned from this repo runs last, and its up succeeds (research is not mistaken for it)" \
   test "$rc" -eq 0 -a "$(grep -oE '^agent-up: [a-z-]+: (updated|FAILED)' <<<"$uout" | awk '{print $2}' | tr '\n' ' ')" = "alpha: beta: research: aaa-self: "
@@ -1838,6 +1846,51 @@ check "update: stale while a publish run is in progress -> the row says so" \
   bash -c '[ "$1" -ne 0 ] && grep -qF "agent-up: alpha: NOT UPDATED (images for the newest main are not published yet (a publish run is in progress); see " <<<"$2"' _ "$rc" "$uout"
 check "  ...nothing changed, no prompt" unchanged_quiet alpha
 gu "$UW" reset -q --hard "$USHA"; gu "$UW" push -q -f origin main   # origin/main back at USHA
+ureset alpha beta; uset research "$BIMG" "$OLD1"
+
+# first pin: an image line that still holds the template placeholder (a hand-run init) gets its first digest, through the same verification
+for ph in REPLACE_WITH_DIGEST REPLACE_WITH_DIGEST_FROM_digests.md; do
+  ureset alpha; uset alpha "$GIMG" "$ph"; : > "$T/curl.log"; : > "$T/gh.log"
+  uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
+  check "update: placeholder @sha256:$ph -> pinned to latest's verified digest, 'updated, not started', exit 0" \
+    bash -c '[ "$1" -eq 0 ] && grep -qxF "agent-up: alpha: updated, not started (start with: agent-up up alpha)" <<<"$2" && grep -qx "    image: $3@sha256:$4" "$5" && ! grep -q REPLACE_WITH "$5"' _ "$rc" "$uout" "$GIMG" "$GISD" "$(ucfg alpha)"
+  check "  ...never started (no up, though the docker stub reports a running container), no token read" \
+    bash -c '[ "$1" -eq 0 ] && ! grep -q "^OP: read" "$2"' _ "$(uup alpha)" "$OPLOG"
+  check "  ...through the verification (one registry lookup, one attestation verify for spades-gis)" \
+    test "$(grep -c '^spades-gis latest$' "$T/curl.log") $(grep -c 'attestation verify oci://ghcr.io/allenlarocque/spades-gis@' "$T/gh.log")" = "1 1"
+done
+ureset alpha; uset alpha "$GIMG" REPLACE_WITH_DIGEST; cp "$(ucfg alpha)" "$T/alpha.compose.before"; : > "$T/attest"
+uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: placeholder + no attestation -> NOT UPDATED (NOT built by publish on main), exit non-zero" \
+  bash -c '[ "$1" -ne 0 ] && grep -qF "agent-up: alpha: NOT UPDATED ($2" <<<"$3"' _ "$rc" "$NOTMAIN" "$uout"
+check "  ...compose.yaml unchanged (still the placeholder), no up, no prompt" \
+  bash -c 'cmp -s "$1" "$2" && grep -qx "    image: $3@sha256:REPLACE_WITH_DIGEST" "$1" && [ "$4" -eq 0 ] && ! grep -qF "[c]ontinue" <<<"$5"' _ "$(ucfg alpha)" "$T/alpha.compose.before" "$GIMG" "$(uup alpha)" "$uout"
+cp "$T/attest.good" "$T/attest"
+ureset alpha; uset alpha ghcr.io/x/custom REPLACE_WITH_DIGEST; cp "$(ucfg alpha)" "$T/alpha.compose.before"; : > "$T/curl.log"; : > "$T/gh.log"
+uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: placeholder on an image this repo does not publish -> SKIP (not published by this repo), non-zero, file unchanged" \
+  bash -c '[ "$1" -ne 0 ] && grep -qF "agent-up: alpha: SKIP (image ghcr.io/x/custom is not published by this repo)" <<<"$2" && cmp -s "$3" "$4"' _ "$rc" "$uout" "$(ucfg alpha)" "$T/alpha.compose.before"
+check "  ...never looked up" bash -c '[ ! -s "$1" ] && ! grep -q attestation "$2"' _ "$T/curl.log" "$T/gh.log"
+for shape in "$GIMG@sha256:REPLACE_ME" "$GIMG:latest" "$GIMG"; do
+  ureset alpha; sed -i -E "s|^( *image: *).*|\1$shape|" "$(ucfg alpha)"; cp "$(ucfg alpha)" "$T/alpha.compose.before"; : > "$T/curl.log"
+  uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
+  check "update: image line '$shape' (neither a digest nor a placeholder) -> SKIP (no pinned image: line), unchanged, no lookup" \
+    bash -c '[ "$1" -ne 0 ] && grep -qF "agent-up: alpha: SKIP (no pinned image: line in compose.yaml)" <<<"$2" && cmp -s "$3" "$4" && [ ! -s "$5" ]' _ "$rc" "$uout" "$(ucfg alpha)" "$T/alpha.compose.before" "$T/curl.log"
+done
+ureset alpha beta; uset alpha "$GIMG" REPLACE_WITH_DIGEST; uset research "$BIMG" "$OLD1"; uidle research; : > "$T/curl.log"; : > "$T/gh.log"
+uout="$(au update --all </dev/null 2>&1)" && rc=0 || rc=$?
+check "update --all: a placeholder project and a pinned one -> both handled, exit 0" \
+  bash -c '[ "$1" -eq 0 ] && grep -qxF "agent-up: alpha: updated, not started (start with: agent-up up alpha)" <<<"$2" && grep -qxF "agent-up: beta: updated" <<<"$2" && grep -qx "    image: $3@sha256:$4" "$5" && grep -qx "    image: $3@sha256:$4" "$6"' _ "$rc" "$uout" "$GIMG" "$GISD" "$(ucfg alpha)" "$(ucfg beta)"
+check "  ...only the pinned (running) one restarted" test "$(uup alpha)$(uup beta)" = 01
+check "  ...one lookup per image name (spades-gis once for both)" \
+  test "$(grep -c '^spades-gis latest$' "$T/curl.log") $(grep -c 'attestation verify oci://ghcr.io/allenlarocque/spades-gis@' "$T/gh.log")" = "1 1"
+if [ "$(id -u)" -ne 0 ]; then
+  ureset alpha; uset alpha "$GIMG" REPLACE_WITH_DIGEST; cp "$(ucfg alpha)" "$T/alpha.compose.before"; chmod 500 "$UR/alpha"
+  uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
+  chmod 700 "$UR/alpha"
+  check "update: the digest cannot be written into compose.yaml -> NOT UPDATED (says so), non-zero, file unchanged, no up" \
+    bash -c '[ "$1" -ne 0 ] && grep -qF "agent-up: alpha: NOT UPDATED (could not write the digest into " <<<"$2" && cmp -s "$3" "$4" && [ "$5" -eq 0 ]' _ "$rc" "$uout" "$(ucfg alpha)" "$T/alpha.compose.before" "$(uup alpha)"
+fi
 ureset alpha beta; uset research "$BIMG" "$OLD1"
 refuses "update: no arguments prints usage" 'usage:' au update
 
