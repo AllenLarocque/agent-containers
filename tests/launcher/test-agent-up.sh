@@ -34,6 +34,12 @@ AMBIENT=()    # extra (hostile) environment for a call
 cat > "$T/bin/op" <<'STUB'
 #!/usr/bin/env bash
 echo "OP: $*" >> "$OPLOG"
+if [ "${1-}" = whoami ]; then [ ! -f "$(dirname "$OPLOG")/OP_SIGNED_OUT" ] || exit 1; exit 0; fi
+if [ "${1-}" = signin ]; then   # markers: OP_SIGNIN_FAIL -> exit 1; OP_SIGNIN_NOOP -> stays signed out
+  sd="$(dirname "$OPLOG")"; [ ! -f "$sd/OP_SIGNIN_FAIL" ] || exit 1
+  [ -f "$sd/OP_SIGNIN_NOOP" ] || rm -f "$sd/OP_SIGNED_OUT"
+  echo "export OP_SESSION_test=1"; exit 0
+fi
 if [ "${1-}" = read ]; then   # op read "op://Personal/agent-<n> service account/credential"
   n="${2#op://Personal/agent-}"; n="${n%% service account/*}"
   [ ! -f "$(dirname "$OPLOG")/OPREAD_FAIL_$n" ] || exit 1
@@ -1744,6 +1750,48 @@ check "update: image not in digests.md -> SKIP (image custom not in digests.md),
 refuses "update: unknown project" 'no config for' au update nosuch
 refuses "update: no arguments prints usage" 'usage:' au update
 
+# ---- 1Password sign-in check: update checks `op whoami` first (builder projects only), signs in at a terminal
+aun(){ au "$@" </dev/null; }   # no terminal on stdin, even when the suite itself runs at one
+auline(){ printf '%q ' env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/dstub:$T/bin:$PATH" "${AMBIENT[@]}" "$AU" "$@"; }
+tty(){ script -qec "$(auline "$@")" /dev/null; }   # runs agent-up with a terminal on stdin
+ureset alpha beta; touch "$T/OP_SIGNED_OUT"; cp "$(ucfg alpha)" "$T/a.before"
+refuses "update: signed out, no terminal -> dies with the sign-in message" \
+  'not signed in\. Sign in first: eval "\$\(op signin\)"' aun update --all
+check "  ...before anything else: no op read, no compose up, compose.yaml untouched" \
+  bash -c '! grep -q "^OP: read" "$1" && [ "$2" -eq 0 ] && cmp -s "$3" "$4"' _ "$OPLOG" "$(uup alpha)" "$(ucfg alpha)" "$T/a.before"
+check "  ...op whoami was the first op call" bash -c '[ "$(head -n1 "$1")" = "OP: whoami" ]' _ "$OPLOG"
+
+ureset alpha; touch "$T/OP_SIGNED_OUT"
+check "update: signed out at a terminal -> signs in and updates" \
+  bash -c 'o=$(script -qec "$1" /dev/null) && grep -q "1Password: not signed in. Signing in:" <<<"$o" && grep -q "^OP: signin" "$2" && [ "$(grep -cE "up -d" "$3")" -ge 1 ]' _ "$(auline update alpha)" "$OPLOG" "$DLOG"
+
+ureset alpha; touch "$T/OP_SIGNED_OUT" "$T/OP_SIGNIN_FAIL"
+refuses "update: sign-in fails at a terminal -> dies, nothing changed" 'not signed in' tty update alpha
+check "  ...no compose up" bash -c '[ "$1" -eq 0 ]' _ "$(uup alpha)"
+rm -f "$T/OP_SIGNIN_FAIL"; touch "$T/OP_SIGNIN_NOOP"; : > "$OPLOG"
+refuses "update: sign-in exits 0 but still signed out -> dies, no loop" 'not signed in' tty update alpha
+check "  ...exactly one signin attempt" bash -c '[ "$(grep -c "^OP: signin" "$1")" -eq 1 ]' _ "$OPLOG"
+rm -f "$T"/OP_SIGN*
+
+ureset alpha
+check "update: signed in -> silent (no 1Password line in the output)" bash -c '! grep -q "1Password" <<<"$1"' _ "$(aun update alpha 2>&1)"
+
+uset research ghcr.io/allenlarocque/spades-base "$OLD1"; uidle research; : > "$OPLOG"; touch "$T/OP_SIGNED_OUT"
+rout="$(aun update research 2>&1)" && rc=0 || rc=$?
+check "update research only: signed out is fine, op never called" \
+  bash -c '[ "$1" -eq 0 ] && [ ! -s "$2" ] && grep -q "research" <<<"$3"' _ "$rc" "$OPLOG" "$rout"
+rm -f "$T/OP_SIGNED_OUT"
+
+# op not installed: a PATH of symlinks to the system tools, without the op stub (skipped if op is still found)
+mkdir -p "$T/nop"; for t in $(ls /usr/bin /bin 2>/dev/null | sort -u); do [ "$t" = op ] || ln -sf "$(command -v "$t")" "$T/nop/$t" 2>/dev/null || true; done
+if PATH="$T/dstub:$T/nop" command -v op >/dev/null 2>&1; then echo "OK:   (skipped: op is installed system-wide)"
+else
+  ureset alpha
+  refuses "update: op not installed -> dies naming op" '1Password CLI \(op\) not found' \
+    env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/dstub:$T/nop" "${AMBIENT[@]}" "$AU" update alpha
+fi
+rm -rf "$T/nop"
+
 echo '[]' > "$T/pulls0.json"; echo '{"total_count": 0, "workflow_runs": []}' > "$T/runs0.json"
 export AGENT_UP_PULLS_URL="file://$T/pulls0.json" AGENT_UP_RUNS_URL="file://$T/runs0.json"   # no guard test below ever reaches the real GitHub API
 # the git guard: a clone not on main is refused (the test-only override is off)
@@ -1808,6 +1856,13 @@ echo junk > "$GP/untracked.txt"
 pout="$(pup "$GP" "file://$T/pulls0.json" alpha </dev/null)" && rc=0 || rc=$?
 check "update: behind main + clean -> pulls, re-execs the NEW launcher (pulls only once), uses the new digests.md" \
   bash -c '[ "$1" -eq 0 ] && grep -Eq "agent-up: pulled main \([0-9a-f]{7}\.\.[0-9a-f]{7}\)" <<<"$2" && grep -q NEWLAUNCHER <<<"$2" && [ "$(grep -c "pulled main" <<<"$2")" -eq 1 ] && grep -q "sha256:$3" "$4" && [ "$(git -C "$5" rev-parse HEAD)" = "$(git -C "$6" rev-parse HEAD)" ]' _ "$rc" "$pout" "$OLD1" "$(ucfg alpha)" "$GP" "$GW"
+# the same pull + re-exec while signed out, at a terminal: one sign-in only (the eval'd OP_SESSION_* survives the exec; the stub drops the marker)
+GP3="$T/pullclone3"; git clone -q "$OR" "$GP3" 2>/dev/null; git -C "$GP3" reset -q --hard HEAD~1
+ureset alpha; uset alpha ghcr.io/allenlarocque/spades-gis "$GISD"; touch "$T/OP_SIGNED_OUT"
+pout="$(script -qec "$(printf '%q ' env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/dstub:$T/bin:$PATH" AGENT_UP_BUSY_SAMPLE=0 AGENT_UP_PAIR_WAIT=1 AGENT_CONTAINERS_CONFIG="$UR" AGENT_UP_PULLS_URL="file://$T/pulls0.json" "$GP3/bin/agent-up" update alpha)" /dev/null)" && rc=0 || rc=$?
+check "update: signed out + behind main, at a terminal -> pulled, re-exec'd, exactly one signin, update completed" \
+  bash -c '[ "$1" -eq 0 ] && grep -q "pulled main" <<<"$2" && grep -q NEWLAUNCHER <<<"$2" && [ "$(grep -c "^OP: signin" "$3")" -eq 1 ] && grep -q "sha256:$4" "$5"' _ "$rc" "$pout" "$OPLOG" "$OLD1" "$(ucfg alpha)"
+rm -f "$T/OP_SIGNED_OUT"
 # open digests PR: default and q exit 1 without touching a project; c continues; others are ignored
 ureset alpha; uset alpha ghcr.io/allenlarocque/spades-gis "$GISD"; cp "$(ucfg alpha)" "$T/alpha.compose.before"; : > "$DLOG"
 pout="$(pup "$GP" "file://$T/pulls1.json" alpha </dev/null)" && rc=0 || rc=$?

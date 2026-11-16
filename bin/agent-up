@@ -516,6 +516,17 @@ check_project_env(){ # op:// references only; never echo a line (it could hold a
   bad="$(grep -nEv '^[[:space:]]*(#|$)' "$1" | grep -Ev '^[0-9]+:[A-Za-z_][A-Za-z0-9_]*=op://[^[:space:]]+$' | cut -d: -f1 | paste -sd, - || true)"
   [ -z "$bad" ] || die "$1 may hold only KEY=op://... references; offending line number(s): $bad (values not shown)"
 }
+op_ready(){ # the owner's 1Password session must be signed in (builder projects only); one sign-in attempt, at a terminal only
+  unset OP_SERVICE_ACCOUNT_TOKEN   # a project's token is never the owner's session
+  command -v op >/dev/null 2>&1 || die "1Password CLI (op) not found: install it (docs/runbooks/1password-project-vault.md)"
+  op whoami >/dev/null 2>&1 </dev/null && return 0
+  if [ -t 0 ]; then
+    printf 'agent-up: 1Password: not signed in. Signing in:\n' >&2
+    eval "$(op signin)" || true
+    op whoami >/dev/null 2>&1 </dev/null && return 0
+  fi
+  die '1Password: not signed in. Sign in first: eval "$(op signin)"'
+}
 warn(){ printf 'agent-up: WARNING: %s\n' "$*" >&2; }
 GD_TARGET=/run/secrets/google-drive-sa.json
 gd_candidate(){ # $1 config dir -> the key file as found (project, else shared; may be a symlink); nothing: off/none/research
@@ -1141,6 +1152,7 @@ cmd_update(){
     for n in "$@"; do cfg="$(cfg_dir "$n")"; wanted="$wanted$(basename "$cfg") "; done
     for n in "${all[@]}"; do [[ $wanted == *" $n "* ]] && names+=("$n"); done   # project_names order: the clone's own project last
   fi
+  for n in "${names[@]}"; do [ "$(profile "$CFG_ROOT/$n" 2>/dev/null)" = research ] || { op_ready; break; }; done   # research needs no 1Password session
   [ -f "$digests" ] || die "no digests.md at $digests"
   update_guard "$@"
   update_pending_pr
