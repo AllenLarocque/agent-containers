@@ -544,8 +544,16 @@ rm -rf "$PROJHOME/FbProj" "$CFGROOT/fbproj"
 echo "== 1Password sign-in check =="
 SIGNIN_RE='not signed in\. Sign in first'
 fullstate; touch "$STATE/OP_SIGNED_OUT"
-refuses "verify <project>, signed out, no terminal: refused" "$SIGNIN_RE" run verify newproj < /dev/null
+refuses "verify <owner>/<repo>, signed out, no terminal: refused" "$SIGNIN_RE" run verify allen/repo9 --vault agent-p1 < /dev/null
 check "  ...first op call was whoami, no op read after it" bash -c 'head -n1 "$1" | grep -qx "OP: whoami" && ! grep -q "^OP: read" "$1"' _ "$OPLOG"
+fullstate; touch "$STATE/OP_SIGNED_OUT"
+vo=$(run verify newproj < /dev/null 2>&1) || true
+check "verify <project> reads no 1Password: not refused for sign-in" bash -c '! grep -Eq "$2" <<<"$1"' _ "$vo" "$SIGNIN_RE"
+check "  ...and never calls op whoami" bash -c '! grep -q "^OP: whoami" "$1"' _ "$OPLOG"
+fullstate; touch "$STATE/OP_SIGNED_OUT"
+po=$(run protect allen/repo9 < /dev/null 2>&1) || true
+check "protect <owner>/<repo> without --vault: not refused for sign-in" bash -c '! grep -Eq "$2" <<<"$1"' _ "$po" "$SIGNIN_RE"
+check "  ...and never calls op whoami" bash -c '! grep -q "^OP: whoami" "$1"' _ "$OPLOG"
 fullstate; touch "$STATE/OP_SIGNED_OUT"
 refuses "protect <owner>/<repo>, signed out, no terminal: refused" "$SIGNIN_RE" run protect allen/repo9 --vault agent-p1 < /dev/null
 check "  ...first op call was whoami, no op read after it" bash -c 'head -n1 "$1" | grep -qx "OP: whoami" && ! grep -q "^OP: read" "$1"' _ "$OPLOG"

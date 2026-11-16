@@ -580,7 +580,7 @@ NEW=spades_pe
    for v in claude codex rlib t3; do docker volume create "$v-$NEW" && docker run --rm --user 0 --entrypoint cp -v "$v-$OLD:/from:ro" -v "$v-$NEW:/to" "$IMG" -a /from/. /to/; done
    ```
 5. In 1Password, rename the Personal item `agent-<OLD> service account` to
-   `agent-<NEW> service account` (`agent-up update` looks it up by that title). Renaming the
+   `agent-<NEW> service account` (`agent-up up` and `agent-up update` look it up by that title). Renaming the
    project's vault is optional; if you do, change every `op://<old vault>/...` line in
    `~/.config/agent-containers/$NEW/project.env` to match.
 6. Start it, and with `RESEARCH=1` also the research container, so it mounts the renamed exchange

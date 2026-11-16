@@ -152,7 +152,7 @@ op_create_secret(){ # $1 vault, $2 title, $3 field id+label, $4 secret (an API C
   s="" REPLY=""
 }
 project_vault(){
-  say "1Password (interactive; 1password-project-vault.md). Signing in:"
+  say "1Password (1password-project-vault.md):"
   op_ready
   if op vault get "$VAULT" >/dev/null 2>&1; then skip "vault $VAULT exists"
   else say "creating vault $VAULT"; op vault create "$VAULT" >/dev/null; fi
@@ -250,7 +250,7 @@ EOF
     t3 connect --headless       # approve with the SAME T3 account the apps use; 'n' to any service prompt
     t3 connect link --publish-only
     t3 connect publish
-  then: agent-up up $PROJ       # (token in env again) so the publish link takes effect
+  then: agent-up up $PROJ       # (reads its own token) so the publish link takes effect
 EOF
   cat <<EOF
   agent-up pair $PROJ           # pairing code for the apps
@@ -382,7 +382,7 @@ protect_warnings(){ # $1 owner/repo
     && warn "$repo lets Actions approve PRs: turn it OFF (Settings -> Actions -> General, runbook step 2.3)" || true
 }
 cmd_protect(){
-  op_ready
+  [ -z "$VAULT" ] || op_ready   # only --vault reads 1Password (the machine user's token)
   protect_collaborator "$1"
   protect_ruleset "$1"
   protect_warnings "$1"
@@ -404,7 +404,6 @@ expect_refusal(){ # $1 label, $2 reason ERE, $3 command string (runs via RUN_IN)
 }
 
 cmd_verify(){
-  op_ready
   VTARGET="$1"
   local mu; mu="$(machine_user)"
   if [[ "$VTARGET" == */* ]]; then
@@ -415,6 +414,7 @@ cmd_verify(){
     local tmp; tmp="$(mktemp -d)"
     # shellcheck disable=SC2064
     trap "rm -rf '$tmp' || true" EXIT
+    op_ready   # top level, not in mu_token: a sign-in inside $(...) would be lost
     local tok who; tok="$(mu_token)"
     who="$(GH_TOKEN="$tok" gh api user --jq .login)" || die "the machine-user token from op://$VAULT/github-agent/token does not work"
     [ "$who" = "$mu" ] || die "the token in op://$VAULT/github-agent/token is for '$who', not the machine user '$mu': refusing to verify as the wrong identity"
