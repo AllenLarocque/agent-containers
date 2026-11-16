@@ -184,7 +184,7 @@ check "  ...config is x" test -d "$CFGROOT/x"
 # ---- up: pre-flight refusals (the stub docker must never be reached)
 TOK=tok
 refuses "up refuses an unknown project" 'no config' au up nosuch
-refuses "up refuses the placeholder digest" 'not pinned to a real digest' au up "$NAME"
+refuses "up refuses the placeholder digest" 'not pinned to a real digest.*Set it with: agent-up update <project>' au up "$NAME"
 sed -i "s/REPLACE_WITH_DIGEST_FROM_digests.md/$H64/" "$CFG/compose.yaml"
 cp "$CFG/compose.yaml" "$T/compose-img.bak"
 sed -i -E "s|^( *image: *).*|\\1ghcr.io/allenlarocque/spades-research@sha256:$H64|" "$CFG/compose.yaml"
@@ -658,7 +658,7 @@ RCFG="$CFGROOT/research"; RD="$H/agent-research"
 refuses "init --profile research refuses another name" "always named 'research'" au init --profile research --name foo
 rinit="$(au init --profile research 2>&1)" && rrc=0 || rrc=$?
 check "init --profile research (no project dir)" test "$rrc" -eq 0
-check "  ...the Next text names the spades-research row" grep -q "the spades-research row" <<<"$rinit"
+check "  ...the Next text says to set the digest with agent-up update research" grep -qF "Set it with: agent-up update research" <<<"$rinit"
 check "  ...config dir 'research', mode 700" test "$(stat -c %a "$RCFG")" = 700
 check "  ...holds compose.yaml + project.conf ONLY (no project.env: no secrets; no allowlist)" \
   test "$(ls -A "$RCFG" | sort | paste -sd' ' -)" = "compose.yaml project.conf"
@@ -1586,19 +1586,32 @@ check "project_names: ssh:// origin form matches too" \
   test "$(auc busy --all 2>&1 | grep '^==' | tr '\n' ' ')" = "== ab == ac == pa == pb == pc == research == aa "
 rm -f "$T/RUNNING.pc-agent-1"; AMBIENT=()
 
-# ---- update: agent-up update --all | <project>... (owner-run; moves projects to the digests in digests.md)
+# ---- update: agent-up update --all | <project>... (owner-run; moves projects to the image publish attested from main, via scripts/verify-image.sh)
+# The launcher under test runs from a throwaway clone ($UC, on main) whose origin is a local bare repo ($UO), so verify-image.sh's
+# `git fetch origin main` stays offline; stub gh and curl (tests/launcher/stubs) stand in for GitHub and ghcr.io.
 UR="$T/upd-cfg"; mkdir -p "$UR"
 OLD1=$(printf '1%.0s' $(seq 64))
 GISD=$(printf 'c%.0s' $(seq 64)); BASED=$(printf 'b%.0s' $(seq 64))
-cat > "$T/digests.md" <<DIGESTS
-# Image digests
-
-| image | tag | digest |
-|---|---|---|
-| spades-base | 2026.10.17-x | \`sha256:$BASED\` |
-| spades-gis | 2026.10.17-x | \`sha256:$GISD\` |
-DIGESTS
-uenv(){ AMBIENT=(AGENT_UP_BUSY_SAMPLE=0 AGENT_CONTAINERS_CONFIG="$UR" AGENT_UP_DIGESTS="$T/digests.md" AGENT_UP_SKIP_GIT_CHECK=1); }
+GIMG=ghcr.io/allenlarocque/spades-gis; BIMG=ghcr.io/allenlarocque/spades-base
+unset GH_NOAUTH GH_DOWN GH_RUNNING GH_ATTEST_DOWN GH_ATTEST_SAN GH_ATTEST_REF
+cp "$ROOT/tests/launcher/stubs/gh" "$ROOT/tests/launcher/stubs/curl" "$T/bin/"
+UO="$T/uorigin.git"; UW="$T/uwork"; UC="$T/uclone"
+gu(){ git -C "$1" -c user.email=t@t -c user.name=t "${@:2}"; }
+git init -q --bare -b main "$UO"; git init -q -b main "$UW"
+mkdir -p "$UW/images/base"; cp -r "$ROOT/bin" "$ROOT/scripts" "$ROOT/project-template" "$UW/"; cp -r "$ROOT/images/base/agent-clis" "$UW/images/base/"
+gu "$UW" add -A; gu "$UW" commit -q -m fixture; gu "$UW" remote add origin "$UO"; gu "$UW" push -q origin main
+USHA="$(git -C "$UW" rev-parse HEAD)"
+git clone -q "$UO" "$UC" 2>/dev/null
+check "update fixture: the clone is on main at USHA, its own newest publish-path commit" \
+  test "$(git -C "$UC" rev-parse --abbrev-ref HEAD) $(git -C "$UC" rev-parse HEAD) $(git -C "$UC" log -1 --format=%H -- scripts/build-publish.sh)" = "main $USHA $USHA"
+AU="$UC/bin/agent-up"   # au/aun run the clone's launcher from here on
+printf 'spades-gis latest sha256:%s\nspades-base latest sha256:%s\n' "$GISD" "$BASED" > "$T/reg"
+uattest(){ # $@ source commits: a passing attestation line for spades-gis and spades-base per commit (run 77 attempt 1); none = empty
+  : > "$T/attest"; local s
+  for s in "$@"; do printf 'spades-gis sha256:%s %s %s %s 77 1\nspades-base sha256:%s %s %s %s 77 1\n' "$GISD" "$GIMG" "$GISD" "$s" "$BASED" "$BIMG" "$BASED" "$s" >> "$T/attest"; done; }
+uattest "$USHA"; echo "77 1" > "$T/latest"
+USTUB=(REG_TABLE="$T/reg" GH_ATTEST="$T/attest" GH_LATEST_RUN="$T/latest" GH_LOG="$T/gh.log" CURL_LOG="$T/curl.log")
+uenv(){ AMBIENT=(AGENT_UP_BUSY_SAMPLE=0 AGENT_CONTAINERS_CONFIG="$UR" AGENT_UP_SKIP_GIT_CHECK=1 "${USTUB[@]}"); }
 ucfg(){ echo "$UR/$1/compose.yaml"; }
 uset(){ # $1 project, $2 image path, $3 digest hex: rewrite the compose image line
   sed -i -E "s|^( *image: *).*|\1$2@sha256:$3|" "$(ucfg "$1")"; }
@@ -1636,7 +1649,11 @@ check "  ...lists the idle sessions of a project it restarts (IDLE: agent idle (
 mkdir -p "$T/upd-zz"; au init "$T/upd-zz" --name aaa-self >/dev/null
 sed -i "s|^PROJECT_DIR=.*|PROJECT_DIR=$SELFREPO|" "$UR/aaa-self/project.conf"
 ureset alpha beta aaa-self research; uset research ghcr.io/allenlarocque/spades-base "$OLD1"
-uout="$(auc update --all </dev/null 2>&1)" && rc=0 || rc=$?
+# (the clone's origin must name the GitHub repo for this, so for this one run it does; a fake ssh serves that URL from the local bare repo)
+printf '#!/bin/sh\nfor a; do l=$a; done\ncase "$l" in "git-upload-pack "*) exec git upload-pack "%s" ;; esac\nexit 1\n' "$UO" > "$T/fakessh"; chmod +x "$T/fakessh"
+git -C "$UC" remote set-url origin git@github.com:AllenLarocque/agent-containers.git
+uout="$(cd "$UC" && AMBIENT+=(GIT_SSH_COMMAND="$T/fakessh" GIT_CONFIG_NOSYSTEM=1) && au update --all </dev/null 2>&1)" && rc=0 || rc=$?
+git -C "$UC" remote set-url origin "$UO"
 check "update --all: the project cloned from this repo runs last, and its up succeeds (research is not mistaken for it)" \
   test "$rc" -eq 0 -a "$(grep -oE '^agent-up: [a-z-]+: (updated|FAILED)' <<<"$uout" | awk '{print $2}' | tr '\n' ' ')" = "alpha: beta: research: aaa-self: "
 rm -rf "$UR/aaa-self"
@@ -1764,12 +1781,64 @@ check "update: CLIs still missing when the wait expires -> 'installing (check la
   bash -c '[ "$1" -eq 0 ] && grep -qF "Claude Code: installing (check later: agent-up status alpha)" <<<"$2" && grep -qF "Codex: installing (check later: agent-up status alpha)" <<<"$2" && ! grep -qF "MISSING" <<<"$2"' _ "$rc" "$uout"
 rm -f "$T/CLI_FAILS" "$T/cli.count"; uenv
 
-# an image not in digests.md
-ureset alpha; uset alpha ghcr.io/x/custom "$OLD1"; cp "$(ucfg alpha)" "$T/alpha.compose.before"
+# an image this repo does not publish: never looked up
+ureset alpha; uset alpha ghcr.io/x/custom "$OLD1"; cp "$(ucfg alpha)" "$T/alpha.compose.before"; : > "$T/curl.log"; : > "$T/gh.log"
 uout="$(au update alpha </dev/null 2>&1)" && rc=0 || rc=$?
-check "update: image not in digests.md -> SKIP (image custom not in digests.md), non-zero, file unchanged" \
-  bash -c '[ "$1" -ne 0 ] && grep -qF "SKIP (image custom not in digests.md)" <<<"$2" && cmp -s "$3" "$4" && [ "$5" -eq 0 ]' _ "$rc" "$uout" "$(ucfg alpha)" "$T/alpha.compose.before" "$(uup alpha)"
+check "update: image outside ghcr.io/allenlarocque/spades-* -> SKIP (image ghcr.io/x/custom is not published by this repo), non-zero, file unchanged" \
+  bash -c '[ "$1" -ne 0 ] && grep -qF "SKIP (image ghcr.io/x/custom is not published by this repo)" <<<"$2" && cmp -s "$3" "$4" && [ "$5" -eq 0 ]' _ "$rc" "$uout" "$(ucfg alpha)" "$T/alpha.compose.before" "$(uup alpha)"
+check "  ...never looked up (no registry or attestation call for it)" bash -c '! grep -q custom "$1" && ! grep -q "attestation" "$2"' _ "$T/curl.log" "$T/gh.log"
 refuses "update: unknown project" 'no config for' au update nosuch
+
+# verification failures: that project's row is NOT UPDATED (<why>), compose untouched, no up; the others still update; non-zero; never a prompt
+NOTMAIN="the image 'latest' points to was NOT built by publish on main; do not use it."
+ufail(){ # $@ update args: reset alpha, beta, research to old digests, run update with stdin from /dev/null (uout, rc), keep compose copies
+  ureset alpha beta; uset research "$BIMG" "$OLD1"; uidle research; : > "$T/curl.log"; : > "$T/gh.log"
+  for pn in alpha beta research; do cp "$(ucfg "$pn")" "$T/$pn.compose.before"; done
+  uout="$(au update "$@" </dev/null 2>&1)" && rc=0 || rc=$?; }
+untouched(){ local pn; for pn in "$@"; do cmp -s "$(ucfg "$pn")" "$T/$pn.compose.before" && [ "$(uup "$pn")" -eq 0 ] || return 1; done; }
+noprompt(){ ! grep -qF "[c]ontinue" <<<"$uout" && ! grep -qF "[q]uit" <<<"$uout"; }
+unchanged_quiet(){ untouched "$@" && noprompt; }
+grep -v '^spades-gis ' "$T/attest" > "$T/attest.nogis"; cp "$T/attest" "$T/attest.good"; cp "$T/attest.nogis" "$T/attest"
+ufail --all
+check "update: spades-gis not attested -> alpha and beta NOT UPDATED (NOT built by publish on main), exit non-zero" \
+  bash -c '[ "$1" -ne 0 ] && grep -qF "agent-up: alpha: NOT UPDATED ($2" <<<"$3" && grep -qF "agent-up: beta: NOT UPDATED ($2" <<<"$3"' _ "$rc" "$NOTMAIN" "$uout"
+check "  ...research (spades-base, attested) still updated" bash -c 'grep -q "agent-up: research: updated" <<<"$1" && grep -q "sha256:$2" "$3" && [ "$4" -eq 1 ]' _ "$uout" "$BASED" "$(ucfg research)" "$(uup research)"
+check "  ...alpha and beta: compose unchanged, no up" untouched alpha beta
+check "  ...no prompt ([c]ontinue / [q]uit) and it returned with stdin at EOF" noprompt
+check "  ...the WARNING names alpha and beta to update again" bash -c 'l="$(tail -n 1 <<<"$1")"; [[ $l == WARNING:* ]] && grep -qF "agent-up update alpha beta" <<<"$l"' _ "$uout"
+check "update: each image is looked up once per run (two spades-gis projects, one registry lookup)" \
+  test "$(grep -c '^spades-gis latest$' "$T/curl.log") $(grep -c 'attestation verify oci://ghcr.io/allenlarocque/spades-gis@' "$T/gh.log")" = "1 1"
+cp "$T/attest.good" "$T/attest"
+ufail --all
+check "update: each image is looked up once per run when it passes too" test "$(grep -c '^spades-gis latest$' "$T/curl.log")" -eq 1 -a "$rc" -eq 0
+: > "$T/attest"
+ufail alpha
+check "update: AGENT_UP_SKIP_GIT_CHECK=1 (set here) does not skip verification: no attestation -> NOT UPDATED, unchanged, no prompt" \
+  bash -c '[ "$1" -ne 0 ] && grep -qF "agent-up: alpha: NOT UPDATED ($2" <<<"$3"' _ "$rc" "$NOTMAIN" "$uout"
+check "  ...compose unchanged, no up, no prompt" unchanged_quiet alpha
+cp "$T/attest.good" "$T/attest"
+echo "78 1" > "$T/latest"
+ufail --all
+check "update: latest is not the newest publish run -> every row NOT UPDATED (... points at an older build ...), non-zero" \
+  bash -c '[ "$1" -ne 0 ] && [ "$(grep "^agent-up: " <<<"$2" | grep -cF "NOT UPDATED ('"'"'latest'"'"' points at an older build; run publish on main to restore it.")" -eq 3 ]' _ "$rc" "$uout"
+check "  ...nothing changed, no prompt" unchanged_quiet alpha beta research
+echo "77 1" > "$T/latest"
+export GH_NOAUTH=1; ufail --all; unset GH_NOAUTH
+check "update: gh not logged in -> every row NOT UPDATED (... run 'gh auth login' on the host), non-zero" \
+  bash -c '[ "$1" -ne 0 ] && [ "$(grep "^agent-up: " <<<"$2" | grep -cF "NOT UPDATED (gh is missing or not logged in; run '"'"'gh auth login'"'"' on the host)")" -eq 3 ]' _ "$rc" "$uout"
+check "  ...nothing changed, no prompt" unchanged_quiet alpha beta research
+# stale: a newer image change lands on origin/main (published images not built from it yet)
+mkdir -p "$UW/images/gis"; echo change >> "$UW/images/gis/x"; gu "$UW" add -A; gu "$UW" commit -q -m "image change"; gu "$UW" push -q origin main
+ufail --all
+check "update: images for the newest main not published yet -> every row NOT UPDATED (... not published yet ...), non-zero" \
+  bash -c '[ "$1" -ne 0 ] && [ "$(grep "^agent-up: " <<<"$2" | grep -cF "NOT UPDATED (images for the newest main are not published yet; see ")" -eq 3 ]' _ "$rc" "$uout"
+check "  ...nothing changed, no prompt" unchanged_quiet alpha beta research
+export GH_RUNNING=1; ufail alpha; unset GH_RUNNING
+check "update: stale while a publish run is in progress -> the row says so" \
+  bash -c '[ "$1" -ne 0 ] && grep -qF "agent-up: alpha: NOT UPDATED (images for the newest main are not published yet (a publish run is in progress); see " <<<"$2"' _ "$rc" "$uout"
+check "  ...nothing changed, no prompt" unchanged_quiet alpha
+gu "$UW" reset -q --hard "$USHA"; gu "$UW" push -q -f origin main   # origin/main back at USHA
+ureset alpha beta; uset research "$BIMG" "$OLD1"
 refuses "update: no arguments prints usage" 'usage:' au update
 
 # ---- 1Password sign-in check: update checks `op whoami` first (builder projects only), signs in at a terminal
@@ -1813,125 +1882,72 @@ else
 fi
 rm -rf "$T/nop"
 
-echo '[]' > "$T/pulls0.json"; echo '{"total_count": 0, "workflow_runs": []}' > "$T/runs0.json"
-export AGENT_UP_PULLS_URL="file://$T/pulls0.json" AGENT_UP_RUNS_URL="file://$T/runs0.json"   # no guard test below ever reaches the real GitHub API
-# the git guard: a clone not on main is refused (the test-only override is off)
-GC="$T/gitclone"; mkdir -p "$GC/bin" "$GC/project-template"; cp "$AU" "$GC/bin/agent-up"; git -C "$GC" init -q -b side; git -C "$GC" -c user.email=t@t -c user.name=t commit -q --allow-empty -m x
-refuses "update: refuses when the clone is not on main" "is not on main: digests.md is not current" \
-  env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" PATH="$T/dstub:$T/bin:$PATH" AGENT_CONTAINERS_CONFIG="$UR" AGENT_UP_DIGESTS="$T/digests.md" "$GC/bin/agent-up" update --all
-# the fetch never prompts for credentials (GIT_TERMINAL_PROMPT=0): a failing fetch takes the warning path
+# the git guard (AGENT_UP_SKIP_GIT_CHECK is not set below): a clone not on main is refused
+GC="$T/gitclone"; mkdir -p "$GC/bin"; cp "$AU" "$GC/bin/agent-up"; cp -r "$ROOT/scripts" "$ROOT/project-template" "$GC/"
+git -C "$GC" init -q -b side; git -C "$GC" -c user.email=t@t -c user.name=t commit -q --allow-empty -m x
+refuses "update: refuses when the clone is not on main" "is not on main: the launcher and the images must match" \
+  env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" PATH="$T/dstub:$T/bin:$PATH" AGENT_CONTAINERS_CONFIG="$UR" "${USTUB[@]}" "$GC/bin/agent-up" update --all
+# the fetch never prompts for credentials (GIT_TERMINAL_PROMPT=0); a failing fetch warns, and then there is no verified digest:
+# every row is NOT UPDATED (verify-image.sh's own fetch fails too), even a project whose compose already has latest's digest
 git -C "$GC" branch -q -m side main
 REALGIT="$(command -v git)"; mkdir -p "$T/gitstub"
 printf '#!/bin/sh\ncase " $* " in *" fetch "*) echo "GTP=${GIT_TERMINAL_PROMPT-<unset>}" >> "%s"; exit 128 ;; esac\nexec "%s" "$@"\n' "$T/git.log" "$REALGIT" > "$T/gitstub/git"; chmod +x "$T/gitstub/git"
-uset alpha ghcr.io/allenlarocque/spades-gis "$GISD"; rm -f "$T/git.log"
-gout="$(env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/gitstub:$T/dstub:$T/bin:$PATH" AGENT_UP_BUSY_SAMPLE=0 AGENT_CONTAINERS_CONFIG="$UR" AGENT_UP_DIGESTS="$T/digests.md" "$GC/bin/agent-up" update alpha </dev/null 2>&1)" && rc=0 || rc=$?
-check "update: git fetch runs with GIT_TERMINAL_PROMPT=0; its failure is a warning and the update goes on" \
-  bash -c 'grep -qx "GTP=0" "$1" && grep -qF "WARNING: could not fetch origin main" <<<"$2" && grep -qF "agent-up: alpha: " <<<"$2"' _ "$T/git.log" "$gout"
+ureset alpha beta; uset alpha "$GIMG" "$GISD"; for pn in alpha beta; do cp "$(ucfg "$pn")" "$T/$pn.compose.before"; done; rm -f "$T/git.log"
+uout="$(env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/gitstub:$T/dstub:$T/bin:$PATH" AGENT_UP_BUSY_SAMPLE=0 AGENT_CONTAINERS_CONFIG="$UR" "${USTUB[@]}" "$GC/bin/agent-up" update alpha beta </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: git fetch runs with GIT_TERMINAL_PROMPT=0; its failure warns, then every row is NOT UPDATED (could not bring origin/main up to date), non-zero" \
+  bash -c 'grep -qx "GTP=0" "$1" && grep -qF "WARNING: could not fetch origin main" <<<"$2" && [ "$3" -ne 0 ] && grep -qF "agent-up: alpha: NOT UPDATED (could not bring origin/main up to date" <<<"$2" && grep -qF "agent-up: beta: NOT UPDATED (could not bring origin/main up to date" <<<"$2"' _ "$T/git.log" "$uout" "$rc"
+check "  ...nothing changed (compose untouched, no up), no prompt" unchanged_quiet alpha beta
 
-# update_guard pull + re-exec, and the pending digests PR check (a file:// URL stands in for the GitHub API)
-prjson(){ # $1 file, rest = head refs: a minimal pretty-printed pulls list (own html_url first, nested user/repo urls after)
-  local f="$1" i=0 r; shift; { echo '['; for r in "$@"; do i=$((i+1)); [ "$i" -eq 1 ] || echo ','; cat <<PR
-  {
-    "html_url": "https://github.com/AllenLarocque/agent-containers/pull/$((70+i))",
-    "title": "x \"ref\": \"chore/digests-fake\"",
-    "user": { "login": "a", "html_url": "https://github.com/a" },
-    "head": { "label": "AllenLarocque:$r", "ref": "$r", "repo": { "html_url": "https://github.com/AllenLarocque/agent-containers" } },
-    "base": { "ref": "main" }
-  }
-PR
-  done; echo ']'; } > "$f"; }
+# update_guard pull + re-exec: a second launcher clone ($GP) whose origin ($OR) moves on with a launcher that announces itself
 OR="$T/origin.git"; GP="$T/pullclone"; GW="$T/pullwork"
 git init -q --bare -b main "$OR"; git clone -q "$OR" "$GW" 2>/dev/null
-mkdir -p "$GW/bin" "$GW/project-template"; cp "$AU" "$GW/bin/agent-up"; cp "$T/digests.md" "$GW/digests.md"
+mkdir -p "$GW/bin"; cp "$AU" "$GW/bin/agent-up"; cp -r "$ROOT/scripts" "$ROOT/project-template" "$GW/"; echo readme > "$GW/README.md"
 gw(){ git -C "$GW" -c user.email=t@t -c user.name=t "$@"; }
 gw add -A; gw commit -q -m base; gw push -q origin HEAD:main
+GBASE="$(git -C "$GW" rev-parse HEAD)"   # touches scripts/build-publish.sh: this origin's newest publish-path commit
 git clone -q "$OR" "$GP" 2>/dev/null
-# upstream moves on: a new digests.md (gis -> OLD1, a digest the projects do not have) and a launcher that announces itself
-sed -i "s/$GISD/$OLD1/" "$GW/digests.md"; sed -i '0,/^HERE=/s//echo NEWLAUNCHER >\&2\nHERE=/' "$GW/bin/agent-up"
-gw commit -q -am "digests moved"; gw push -q origin HEAD:main
-prjson "$T/pulls1.json" chore/digests-2026.11.01-x; prjson "$T/pulls2.json" feat/other chore/digests-2026.11.01-y; prjson "$T/pulls3.json" feat/other docs/x
-pup(){ # $1 clone, $2 pulls URL, rest = update args; stdin = the prompt answer
-  local c="$1" u="$2"; shift 2
-  env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/dstub:$T/bin:$PATH" AGENT_UP_BUSY_SAMPLE=0 AGENT_UP_PAIR_WAIT=1 AGENT_CONTAINERS_CONFIG="$UR" AGENT_UP_PULLS_URL="$u" "$c/bin/agent-up" update "$@" 2>&1; }
-ureset alpha; uset alpha ghcr.io/allenlarocque/spades-gis "$GISD"; : > "$DLOG"
+sed -i '0,/^HERE=/s//echo NEWLAUNCHER >\&2\nHERE=/' "$GW/bin/agent-up"
+gw commit -q -am "new launcher"; gw push -q origin HEAD:main
+uattest "$USHA" "$GBASE"   # images attested from either origin's publish commit (a line for a commit a clone lacks never passes there)
+pup(){ # $1 clone, rest = update args
+  local c="$1"; shift
+  env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/dstub:$T/bin:$PATH" AGENT_UP_BUSY_SAMPLE=0 AGENT_UP_PAIR_WAIT=1 AGENT_CONTAINERS_CONFIG="$UR" "${USTUB[@]}" "$c/bin/agent-up" update "$@" 2>&1; }
+ureset alpha
 # dirty tracked file: nothing pulled
-echo dirt >> "$GP/digests.md"; before="$(git -C "$GP" rev-parse HEAD)"
-pout="$(pup "$GP" "file://$T/pulls0.json" alpha </dev/null)" && rc=0 || rc=$?
+echo dirt >> "$GP/README.md"; before="$(git -C "$GP" rev-parse HEAD)"
+pout="$(pup "$GP" alpha </dev/null)" && rc=0 || rc=$?
 check "update: behind main + uncommitted tracked changes -> dies explaining, nothing pulled, no compose change" \
-  bash -c '[ "$1" -ne 0 ] && grep -qF "uncommitted changes" <<<"$2" && [ "$(git -C "$3" rev-parse HEAD)" = "$4" ] && ! grep -qF "pulled main" <<<"$2" && [ "$5" -eq 0 ]' _ "$rc" "$pout" "$GP" "$before" "$(uup alpha)"
-git -C "$GP" checkout -q digests.md
+  bash -c '[ "$1" -ne 0 ] && grep -qF "uncommitted changes" <<<"$2" && [ "$(git -C "$3" rev-parse HEAD)" = "$4" ] && ! grep -qF "pulled main" <<<"$2" && [ "$5" -eq 0 ] && grep -q "sha256:$6" "$7"' _ "$rc" "$pout" "$GP" "$before" "$(uup alpha)" "$OLD1" "$(ucfg alpha)"
+git -C "$GP" checkout -q README.md
 # not on main: dies, never switches
 git -C "$GP" switch -q -c side2
-pout="$(pup "$GP" "file://$T/pulls0.json" alpha </dev/null)" && rc=0 || rc=$?
+pout="$(pup "$GP" alpha </dev/null)" && rc=0 || rc=$?
 check "update: not on main -> dies with a switch hint, branch unchanged" \
-  bash -c '[ "$1" -ne 0 ] && grep -qF "is not on main" <<<"$2" && [ "$(git -C "$3" rev-parse --abbrev-ref HEAD)" = side2 ]' _ "$rc" "$pout" "$GP"
+  bash -c '[ "$1" -ne 0 ] && grep -qF "is not on main: the launcher and the images must match; switch it with: git -C $3 switch main" <<<"$2" && [ "$(git -C "$3" rev-parse --abbrev-ref HEAD)" = side2 ]' _ "$rc" "$pout" "$GP"
 git -C "$GP" switch -q main
 # diverged: dies
 git -C "$GP" -c user.email=t@t -c user.name=t commit -q --allow-empty -m local; before="$(git -C "$GP" rev-parse HEAD)"
-pout="$(pup "$GP" "file://$T/pulls0.json" alpha </dev/null)" && rc=0 || rc=$?
+pout="$(pup "$GP" alpha </dev/null)" && rc=0 || rc=$?
 check "update: main diverged from origin -> dies, nothing pulled" \
   bash -c '[ "$1" -ne 0 ] && grep -qF "diverged" <<<"$2" && [ "$(git -C "$3" rev-parse HEAD)" = "$4" ]' _ "$rc" "$pout" "$GP" "$before"
 git -C "$GP" reset -q --hard HEAD~1
-# behind + clean (an untracked file is fine): pulls, re-execs the new launcher once, applies the new digests.md
-echo junk > "$GP/untracked.txt"
-pout="$(pup "$GP" "file://$T/pulls0.json" alpha </dev/null)" && rc=0 || rc=$?
-check "update: behind main + clean -> pulls, re-execs the NEW launcher (pulls only once), uses the new digests.md" \
-  bash -c '[ "$1" -eq 0 ] && grep -Eq "agent-up: pulled main \([0-9a-f]{7}\.\.[0-9a-f]{7}\)" <<<"$2" && grep -q NEWLAUNCHER <<<"$2" && [ "$(grep -c "pulled main" <<<"$2")" -eq 1 ] && grep -q "sha256:$3" "$4" && [ "$(git -C "$5" rev-parse HEAD)" = "$(git -C "$6" rev-parse HEAD)" ]' _ "$rc" "$pout" "$OLD1" "$(ucfg alpha)" "$GP" "$GW"
+# behind + clean (an untracked file is fine): pulls, re-execs the new launcher once, which pins the verified digest
+echo junk > "$GP/untracked.txt"; ureset alpha
+pout="$(pup "$GP" alpha </dev/null)" && rc=0 || rc=$?
+check "update: behind main + clean -> pulls, re-execs the NEW launcher (pulls only once), pins the verified digest" \
+  bash -c '[ "$1" -eq 0 ] && grep -Eq "agent-up: pulled main \([0-9a-f]{7}\.\.[0-9a-f]{7}\)" <<<"$2" && grep -q NEWLAUNCHER <<<"$2" && [ "$(grep -c "pulled main" <<<"$2")" -eq 1 ] && grep -q "sha256:$3" "$4" && [ "$(git -C "$5" rev-parse HEAD)" = "$(git -C "$6" rev-parse HEAD)" ]' _ "$rc" "$pout" "$GISD" "$(ucfg alpha)" "$GP" "$GW"
 # the same pull + re-exec while signed out, at a terminal: one sign-in only (the eval'd OP_SESSION_* survives the exec; the stub drops the marker)
 GP3="$T/pullclone3"; git clone -q "$OR" "$GP3" 2>/dev/null; git -C "$GP3" reset -q --hard HEAD~1
-ureset alpha; uset alpha ghcr.io/allenlarocque/spades-gis "$GISD"; touch "$T/OP_SIGNED_OUT"
-pout="$(script -qec "$(printf '%q ' env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/dstub:$T/bin:$PATH" AGENT_UP_BUSY_SAMPLE=0 AGENT_UP_PAIR_WAIT=1 AGENT_CONTAINERS_CONFIG="$UR" AGENT_UP_PULLS_URL="file://$T/pulls0.json" "$GP3/bin/agent-up" update alpha)" /dev/null)" && rc=0 || rc=$?
+ureset alpha; touch "$T/OP_SIGNED_OUT"
+pout="$(script -qec "$(printf '%q ' env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/dstub:$T/bin:$PATH" AGENT_UP_BUSY_SAMPLE=0 AGENT_UP_PAIR_WAIT=1 AGENT_CONTAINERS_CONFIG="$UR" "${USTUB[@]}" "$GP3/bin/agent-up" update alpha)" /dev/null)" && rc=0 || rc=$?
 check "update: signed out + behind main, at a terminal -> pulled, re-exec'd, exactly one signin, update completed" \
-  bash -c '[ "$1" -eq 0 ] && grep -q "pulled main" <<<"$2" && grep -q NEWLAUNCHER <<<"$2" && [ "$(grep -c "^OP: signin" "$3")" -eq 1 ] && grep -q "sha256:$4" "$5"' _ "$rc" "$pout" "$OPLOG" "$OLD1" "$(ucfg alpha)"
+  bash -c '[ "$1" -eq 0 ] && grep -q "pulled main" <<<"$2" && grep -q NEWLAUNCHER <<<"$2" && [ "$(grep -c "^OP: signin" "$3")" -eq 1 ] && grep -q "sha256:$4" "$5"' _ "$rc" "$pout" "$OPLOG" "$GISD" "$(ucfg alpha)"
 rm -f "$T/OP_SIGNED_OUT" "$T/OP_NEEDS_SESSION"
-# open digests PR: default and q exit 1 without touching a project; c continues; others are ignored
-ureset alpha; uset alpha ghcr.io/allenlarocque/spades-gis "$GISD"; cp "$(ucfg alpha)" "$T/alpha.compose.before"; : > "$DLOG"
-pout="$(pup "$GP" "file://$T/pulls1.json" alpha </dev/null)" && rc=0 || rc=$?
-check "update: open digests PR, default answer -> lists it, exits 1, project untouched" \
-  bash -c '[ "$1" -eq 1 ] && grep -qF "agent-up: a digests PR is waiting: https://github.com/AllenLarocque/agent-containers/pull/71" <<<"$2" && grep -qF "Do that first (merge the digests PR), or the projects get the older images in digests.md." <<<"$2" && grep -qF "(default q)" <<<"$2" && cmp -s "$3" "$4" && [ "$5" -eq 0 ]' _ "$rc" "$pout" "$(ucfg alpha)" "$T/alpha.compose.before" "$(uup alpha)"
-pout="$(pup "$GP" "file://$T/pulls2.json" alpha <<<q)" && rc=0 || rc=$?
-check "update: open digests PR, q -> exits 1, project untouched; only the chore/digests-* PR is listed" \
-  bash -c '[ "$1" -eq 1 ] && grep -qF "pull/72" <<<"$2" && ! grep -qF "pull/71" <<<"$2" && cmp -s "$3" "$4" && [ "$5" -eq 0 ]' _ "$rc" "$pout" "$(ucfg alpha)" "$T/alpha.compose.before" "$(uup alpha)"
-pout="$(pup "$GP" "file://$T/pulls1.json" alpha <<<c)" && rc=0 || rc=$?
-check "update: open digests PR, c -> continues with the current digests.md" \
-  bash -c '[ "$1" -eq 0 ] && grep -qF "digests PR is waiting" <<<"$2" && ! cmp -s "$3" "$4"' _ "$rc" "$pout" "$(ucfg alpha)" "$T/alpha.compose.before"
-ureset alpha; uset alpha ghcr.io/allenlarocque/spades-gis "$GISD"
-pout="$(pup "$GP" "file://$T/pulls3.json" alpha </dev/null)" && rc=0 || rc=$?
-check "update: open PRs that are not digests PRs are ignored (no prompt)" \
-  bash -c '[ "$1" -eq 0 ] && ! grep -qF "digests PR" <<<"$2"' _ "$rc" "$pout"
-ureset alpha; uset alpha ghcr.io/allenlarocque/spades-gis "$GISD"
-# a fork's chore/digests-* PR, and an own PR INTO a chore/digests-* base: neither counts
-cat > "$T/pulls4.json" <<'J'
-[{"html_url":"https://github.com/AllenLarocque/agent-containers/pull/90","head":{"label":"evil:chore/digests-x","ref":"chore/digests-x"},"base":{"label":"AllenLarocque:main","ref":"main"}},
- {"html_url":"https://github.com/AllenLarocque/agent-containers/pull/91","head":{"label":"AllenLarocque:docs/fix","ref":"docs/fix"},"base":{"label":"AllenLarocque:chore/digests-stale","ref":"chore/digests-stale"}}]
-J
-pout="$(pup "$GP" "file://$T/pulls4.json" alpha </dev/null)" && rc=0 || rc=$?
-check "update: a fork's chore/digests-* PR and a PR into a chore/digests-* base -> no prompt" bash -c '! grep -qF "digests PR is waiting" <<<"$1" && grep -qF "agent-up: alpha: " <<<"$1"' _ "$pout"
-# not a pulls list (e.g. a redirect or error body): a warning, the update goes on
-echo '{"message":"Moved Permanently","url":"https://api.github.com/repositories/1/pulls"}' > "$T/pulls5.json"
-pout="$(pup "$GP" "file://$T/pulls5.json" alpha </dev/null)" && rc=0 || rc=$?
-check "update: a non-list API body -> warning, update goes on" bash -c 'grep -qF "could not check GitHub for an open digests PR" <<<"$1" && grep -qF "agent-up: alpha: " <<<"$1"' _ "$pout"
-# 100 open PRs: only the first page was read, so say so
-{ echo '['; for i in $(seq 100); do [ "$i" -eq 1 ] || echo ','; printf '{"html_url":"https://github.com/AllenLarocque/agent-containers/pull/%s","head":{"label":"AllenLarocque:feat/f%s"}}\n' "$i" "$i"; done; echo ']'; } > "$T/pulls6.json"
-pout="$(pup "$GP" "file://$T/pulls6.json" alpha </dev/null)" && rc=0 || rc=$?
-check "update: 100 open PRs -> warns that only the newest 100 were checked" bash -c 'grep -qF "only the newest 100 were checked" <<<"$1"' _ "$pout"
-# publish still running (no digests PR yet) -> the same prompt; default quits, no compose change
-echo '{"total_count": 1, "workflow_runs": [{"id": 1}]}' > "$T/runs1.json"; ureset alpha
-pout="$(AGENT_UP_RUNS_URL="file://$T/runs1.json" pup "$GP" "file://$T/pulls0.json" alpha </dev/null)" && rc=0 || rc=$?
-check "update: publish still running -> says so, default quits, no compose change" bash -c '[ "$1" -ne 0 ] && grep -qF "publish is still running" <<<"$2" && ! grep -qF "digests PR is waiting" <<<"$2" && grep -q "sha256:$4" "$3"' _ "$rc" "$pout" "$(ucfg alpha)" "$OLD1"
-pout="$(AGENT_UP_RUNS_URL="file://$T/no-such-runs.json" pup "$GP" "file://$T/pulls0.json" alpha </dev/null)" && rc=0 || rc=$?
-check "update: the runs lookup failing -> no prompt, update goes on" bash -c '! grep -qF "publish is still running" <<<"$1" && grep -qF "agent-up: alpha: " <<<"$1"' _ "$pout"
 # loop guard: already re-exec'd once (AGENT_UP_PULLED=1) and still behind -> dies, pulls nothing
 GP2="$T/pullclone2"; git clone -q "$OR" "$GP2" 2>/dev/null; git -C "$GP2" reset -q --hard HEAD~1; before="$(git -C "$GP2" rev-parse HEAD)"
-pout="$(AGENT_UP_PULLED=1 pup "$GP2" "file://$T/pulls0.json" alpha </dev/null)" && rc=0 || rc=$?
+pout="$(AGENT_UP_PULLED=1 pup "$GP2" alpha </dev/null)" && rc=0 || rc=$?
 check "update: AGENT_UP_PULLED=1 and still behind -> dies (no second pull)" bash -c '[ "$1" -ne 0 ] && grep -qF "still behind origin/main after pulling" <<<"$2" && [ "$(git -C "$3" rev-parse HEAD)" = "$4" ]' _ "$rc" "$pout" "$GP2" "$before"
-pout="$(pup "$GP" "file://$T/no-such-pulls.json" alpha </dev/null)" && rc=0 || rc=$?
-check "update: API failure -> one warning line, continues" \
-  bash -c '[ "$1" -eq 0 ] && [ "$(grep -c "could not check GitHub for an open digests PR" <<<"$2")" -eq 1 ]' _ "$rc" "$pout"
-check "update: AGENT_UP_SKIP_GIT_CHECK=1 skips the digests PR check too" \
-  bash -c 'out="$("$@" 2>&1 </dev/null)"; ! grep -qF "digests PR" <<<"$out"' _ \
-  env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/dstub:$T/bin:$PATH" AGENT_UP_BUSY_SAMPLE=0 AGENT_CONTAINERS_CONFIG="$UR" AGENT_UP_SKIP_GIT_CHECK=1 AGENT_UP_PULLS_URL="file://$T/pulls1.json" "$GP/bin/agent-up" update alpha
-uenv
+uattest "$USHA"; uenv
 
 # pair: the default wait is 180 s (the first start after an image update installs the CLIs)
 AMBIENT=(); mkdir -p "$T/fastsleep"; printf '#!/bin/sh\nexit 0\n' > "$T/fastsleep/sleep"; chmod +x "$T/fastsleep/sleep"
