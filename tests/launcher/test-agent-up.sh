@@ -1626,7 +1626,8 @@ uidle(){ printf '%s\n' "$BASEPS" | snap "$1-agent-1" 1; printf '%s\n' "$BASEPS" 
 ubusy(){ { printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 R              /usr/local/lib/R/bin/exec/R --no-save --no-restore --no-echo --no-restore --file=x.R'; } | snap "$1-agent-1" 1
          { printf '%s\n' "$BASEPS"; echo '  400   300  7300  60 R              /usr/local/lib/R/bin/exec/R --no-save --no-restore --no-echo --no-restore --file=x.R'; } | snap "$1-agent-1" 2; }
 uup(){ grep -cE "^ARGS: compose .* -p $1 up -d" "$DLOG" || true; }
-ureset(){ for pn in "$@"; do uset "$pn" ghcr.io/allenlarocque/spades-gis "$OLD1"; uidle "$pn"; done; : > "$DLOG"; : > "$OPLOG"; }
+# (ureset also forgets the high-water marks, so a test that varies the run id does not inherit an earlier test's mark)
+ureset(){ for pn in "$@"; do uset "$pn" ghcr.io/allenlarocque/spades-gis "$OLD1"; uidle "$pn"; done; : > "$DLOG"; : > "$OPLOG"; rm -f "$UR/images.seen"; }
 uenv
 for pn in alpha beta; do
   mkdir -p "$T/upd-$pn"; au init "$T/upd-$pn" --name "$pn" >/dev/null
@@ -1636,6 +1637,8 @@ ureset alpha beta; uset research ghcr.io/allenlarocque/spades-base "$OLD1"; uidl
 rm -f "$T"/RUNNING*
 uout="$(au update --all </dev/null 2>&1)" && rc=0 || rc=$?
 check "update --all: exit 0 when all three updated" test "$rc" -eq 0
+check "  ...the config root's images.seen holds the accepted run for each image looked up (77 1), mode 600" \
+  test "$(sort "$UR/images.seen" | tr '\n' ' ')|$(stat -c %a "$UR/images.seen")" = "spades-base 77 1 spades-gis 77 1 |600"
 check "  ...builders' compose digest rewritten" bash -c 'grep -qx "    image: ghcr.io/allenlarocque/spades-gis@sha256:$2" "$1/alpha/compose.yaml" && grep -qx "    image: ghcr.io/allenlarocque/spades-gis@sha256:$2" "$1/beta/compose.yaml"' _ "$UR" "$GISD"
 check "  ...research digest rewritten (spades-base)" grep -qx "    image: ghcr.io/allenlarocque/spades-base@sha256:$BASED" "$(ucfg research)"
 check "  ...compose.yaml keeps its mode (600)" test "$(stat -c %a "$(ucfg alpha)")" = 600
@@ -1831,6 +1834,18 @@ check "update: latest is not the newest publish run -> every row NOT UPDATED (..
   bash -c '[ "$1" -ne 0 ] && [ "$(grep "^agent-up: " <<<"$2" | grep -cF "NOT UPDATED ('"'"'latest'"'"' points at an older build; run publish on main to restore it.")" -eq 3 ]' _ "$rc" "$uout"
 check "  ...nothing changed, no prompt" unchanged_quiet alpha beta research
 echo "77 1" > "$T/latest"
+# rollback: a first update accepts run 77; then the run list and latest are made to name an older attested build (run 70) -> refused
+ufail --all
+check "update: run 77 accepted -> exit 0, images.seen at 77 1" test "$rc" -eq 0 -a "$(grep -c ' 77 1$' "$UR/images.seen")" -eq 2
+for pn in alpha beta; do uset "$pn" "$GIMG" "$OLD1"; uidle "$pn"; done; uset research "$BIMG" "$OLD1"; uidle research; : > "$DLOG"
+for pn in alpha beta research; do cp "$(ucfg "$pn")" "$T/$pn.compose.before"; done; cp "$UR/images.seen" "$T/seen.before" 2>/dev/null || : > "$T/seen.before"
+sed 's/ 77 1$/ 70 1/' "$T/attest.good" > "$T/attest"; echo "70 1" > "$T/latest"
+uout="$(au update --all </dev/null 2>&1)" && rc=0 || rc=$?
+check "update: latest and the newest run both name a build older than this host accepted -> every row NOT UPDATED (... points at an older build ...), non-zero" \
+  bash -c '[ "$1" -ne 0 ] && [ "$(grep "^agent-up: " <<<"$2" | grep -F "NOT UPDATED (" | grep -cF "points at an older build than one this host has already accepted")" -eq 3 ]' _ "$rc" "$uout"
+check "  ...images.seen unchanged" bash -c 'cmp -s "$1" "$2"' _ "$UR/images.seen" "$T/seen.before"
+check "  ...compose files unchanged, no up" unchanged_quiet alpha beta research
+cp "$T/attest.good" "$T/attest"; echo "77 1" > "$T/latest"
 export GH_NOAUTH=1; ufail --all; unset GH_NOAUTH
 check "update: gh not logged in -> every row NOT UPDATED (... run 'gh auth login' on the host), non-zero" \
   bash -c '[ "$1" -ne 0 ] && [ "$(grep "^agent-up: " <<<"$2" | grep -cF "NOT UPDATED (gh is missing or not logged in; run '"'"'gh auth login'"'"' on the host)")" -eq 3 ]' _ "$rc" "$uout"

@@ -15,6 +15,9 @@ concurrency:
   group: publish
   cancel-in-progress: false
 jobs:
+  # scripts/verify-image.sh trusts an image only for this workflow's identity on refs/heads/main. So never add a
+  # workflow_call trigger, a shared layer cache (registry or Actions cache), or continue-on-error / if: always()
+  # between build and promote: each would let something other than this job's own build reach an attested latest.
   publish:
     if: github.ref == 'refs/heads/main'   # only main's builds may be attested and promoted (a dispatch from a branch is skipped)
     runs-on: ubuntu-24.04

@@ -1073,10 +1073,11 @@ cmd_busy(){
 }
 declare -A IMG_D=() IMG_W=()   # image_digest's cache for this run: image name -> digest / why (failures are cached too)
 image_digest(){ # $1 image name (spades-<x>) -> IMG_DIGEST: the digest `latest` points to, only when scripts/verify-image.sh proves publish on main built it
-  # from current main and it is the newest build (empty otherwise); IMG_WHY: why not (its message minus "verify-image: <image>: "). One lookup per image per run.
+  # from current main, it is the newest build and not older than one this host accepted (empty otherwise); IMG_WHY: why not (its message minus "verify-image: <image>: "). One lookup per image per run.
   if [ -z "${IMG_D[$1]+x}" ]; then
     local out rc=0
-    out="$("$HERE/../scripts/verify-image.sh" "$1" "$(cd "$HERE/.." && pwd)" </dev/null 2>&1)" || rc=$?
+    # $CFG_ROOT/images.seen: the high-water mark (newest publish run accepted per image), a file next to agent-up.conf that no container can write
+    out="$("$HERE/../scripts/verify-image.sh" "$1" "$(cd "$HERE/.." && pwd)" "$CFG_ROOT/images.seen" </dev/null 2>&1)" || rc=$?
     if [ "$rc" -eq 0 ] && [[ $out =~ ^sha256:[0-9a-f]{64}$ ]]; then IMG_D[$1]="$out"; IMG_W[$1]=""
     else   # anything else is no digest (fail closed)
       out="${out#"verify-image: $1: "}"; out="${out//$'\n'/ }"
