@@ -14,6 +14,18 @@ say(){ printf 'agent-new: %s\n' "$*"; }
 skip(){ printf 'agent-new: SKIP (done): %s\n' "$*"; }
 warn(){ printf 'agent-new: WARNING: %s\n' "$*" >&2; }
 die(){ printf 'agent-new: %s\n' "$*" >&2; exit 1; }
+# as in agent-up
+op_ready(){ # the owner's 1Password session must be signed in; one sign-in attempt, at a terminal only
+  unset OP_SERVICE_ACCOUNT_TOKEN   # a project's token is never the owner's session
+  command -v op >/dev/null 2>&1 || die "1Password CLI (op) not found: install it (docs/runbooks/1password-project-vault.md)"
+  op whoami >/dev/null 2>&1 </dev/null && return 0
+  if [ -t 0 ]; then
+    printf 'agent-new: 1Password: not signed in. Signing in:\n' >&2
+    eval "$(op signin)" || true
+    op whoami >/dev/null 2>&1 </dev/null && return 0
+  fi
+  die '1Password: not signed in. Sign in first: eval "$(op signin)"'
+}
 usage(){
   cat >&2 <<'USAGE'
 usage:
@@ -141,7 +153,7 @@ op_create_secret(){ # $1 vault, $2 title, $3 field id+label, $4 secret (an API C
 }
 project_vault(){
   say "1Password (interactive; 1password-project-vault.md). Signing in:"
-  eval "$(op signin)"
+  op_ready
   if op vault get "$VAULT" >/dev/null 2>&1; then skip "vault $VAULT exists"
   else say "creating vault $VAULT"; op vault create "$VAULT" >/dev/null; fi
   local sa="$VAULT service account"
@@ -205,7 +217,7 @@ project_tailscale(){
 }
 project_up(){
   say "starting the container (token read into this one command's environment)"
-  unset OP_SERVICE_ACCOUNT_TOKEN
+  op_ready
   local sat; sat="$(op read "op://Personal/$VAULT service account/credential")" \
     || die "could not read the service account token from op://Personal/$VAULT service account/credential (op signed in?)"
   [ -n "$sat" ] || die "the service account token at op://Personal/$VAULT service account/credential is empty"
@@ -370,6 +382,7 @@ protect_warnings(){ # $1 owner/repo
     && warn "$repo lets Actions approve PRs: turn it OFF (Settings -> Actions -> General, runbook step 2.3)" || true
 }
 cmd_protect(){
+  op_ready
   protect_collaborator "$1"
   protect_ruleset "$1"
   protect_warnings "$1"
@@ -391,6 +404,7 @@ expect_refusal(){ # $1 label, $2 reason ERE, $3 command string (runs via RUN_IN)
 }
 
 cmd_verify(){
+  op_ready
   VTARGET="$1"
   local mu; mu="$(machine_user)"
   if [[ "$VTARGET" == */* ]]; then

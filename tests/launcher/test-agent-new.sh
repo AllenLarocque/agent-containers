@@ -59,8 +59,21 @@ STUB
 cat > "$T/bin/op" <<'STUB'
 #!/usr/bin/env bash
 echo "OP${OP_SERVICE_ACCOUNT_TOKEN:+(sa)}: $*" >> "$OPLOG"
+if [ "${1-}" = whoami ]; then   # markers in $STATE: OP_SIGNED_OUT; OP_NEEDS_SESSION (signed in only with the eval'd OP_SESSION_test=1); OP_WHOAMI_OK=<n> (signed in for the first n calls only)
+  [ ! -f "$STATE/OP_SIGNED_OUT" ] || exit 1
+  [ ! -f "$STATE/OP_NEEDS_SESSION" ] || [ "${OP_SESSION_test-}" = 1 ] || exit 1
+  if [ -f "$STATE/OP_WHOAMI_OK" ]; then
+    n=$(( $(cat "$STATE/whoami.count" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$STATE/whoami.count"
+    [ "$n" -le "$(cat "$STATE/OP_WHOAMI_OK")" ] || exit 1
+  fi
+  exit 0
+fi
+if [ "${1-}" = signin ]; then   # markers: OP_SIGNIN_FAIL -> exit 1; OP_SIGNIN_NOOP -> stays signed out
+  [ ! -f "$STATE/OP_SIGNIN_FAIL" ] || exit 1
+  [ -f "$STATE/OP_SIGNIN_NOOP" ] || { rm -f "$STATE/OP_SIGNED_OUT"; : > "$STATE/OP_NEEDS_SESSION"; }
+  echo "export OP_SESSION_test=1"; exit 0
+fi
 case "$1 ${2:-}" in
-  "signin ")            echo ":" ;;
   "vault get")          [ -f "$STATE/vault" ] ;;
   "vault create")       touch "$STATE/vault" ;;
   "vault list")
@@ -527,5 +540,24 @@ check "digest fallback rewrites the image line"      grep -qx 'image: ghcr.io/x/
 check "  leaves an unrelated @ line untouched"       grep -qx '# maintainer: me@example.com' "$CFGROOT/fbproj/compose.yaml"
 unset AGENT_NEW_STOP_AFTER
 rm -rf "$PROJHOME/FbProj" "$CFGROOT/fbproj"
+
+echo "== 1Password sign-in check =="
+SIGNIN_RE='not signed in\. Sign in first'
+fullstate; touch "$STATE/OP_SIGNED_OUT"
+refuses "verify <project>, signed out, no terminal: refused" "$SIGNIN_RE" run verify newproj < /dev/null
+check "  ...first op call was whoami, no op read after it" bash -c 'head -n1 "$1" | grep -qx "OP: whoami" && ! grep -q "^OP: read" "$1"' _ "$OPLOG"
+fullstate; touch "$STATE/OP_SIGNED_OUT"
+refuses "protect <owner>/<repo>, signed out, no terminal: refused" "$SIGNIN_RE" run protect allen/repo9 --vault agent-p1 < /dev/null
+check "  ...first op call was whoami, no op read after it" bash -c 'head -n1 "$1" | grep -qx "OP: whoami" && ! grep -q "^OP: read" "$1"' _ "$OPLOG"
+fullstate; echo 2 > "$STATE/OP_WHOAMI_OK"   # signed in for the vault and protect steps, out by the up step
+rm -rf "$PROJHOME/SoProj" "$CFGROOT/soproj"
+refuses "project flow, signed out at the up step: refused" "$SIGNIN_RE" run project SoProj --token-from agent-old < /dev/null
+check "  ...no op call after the failed whoami (no token read)" bash -c 'tail -n1 "$1" | grep -qx "OP: whoami"' _ "$OPLOG"
+check "  ...agent-up up never called" bash -c '! grep -q " up soproj" "$1"' _ "$AULOG"
+rm -rf "$PROJHOME/SoProj" "$CFGROOT/soproj"
+fullstate; touch "$STATE/OP_SIGNED_OUT"
+rm -rf "$PROJHOME/SoProj2" "$CFGROOT/soproj2"
+refuses "project flow, signed out at the vault step: refused" "$SIGNIN_RE" run project SoProj2 --token-from agent-old < /dev/null
+rm -rf "$PROJHOME/SoProj2" "$CFGROOT/soproj2"
 
 [ "$fail" -eq 0 ] && echo "AGENT-NEW: ALL PASSED" || { echo "AGENT-NEW: FAILURES"; exit 1; }
