@@ -13,8 +13,8 @@ event=${1:?event}; base=${2:?base rev}; head=${3:?head rev}; draft=${5:-false}
 mapfile -t files < <(git diff --name-only "$base...$head")
 printf 'changed: %s\n' "${files[@]:-<none>}" >&2
 
-# Docs: any *.md or anything under docs/, but never a file
-# under images/ or tests/ (a Dockerfile could COPY it; a test could read it).
+# Docs: any *.md or anything under docs/, but never a file under images/ or tests/
+# (a Dockerfile could COPY it; a test could read it).
 docs_only=true
 [ "${#files[@]}" -gt 0 ] || docs_only=false     # an empty diff proves nothing: build
 for f in "${files[@]}"; do

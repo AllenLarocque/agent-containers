@@ -22,6 +22,10 @@ check "every build takes its digest from --metadata-file" \
 old1="render-""digests"; old2="digests""\\.md"
 check "the old digests table flow is gone" \
   bash -c '! grep -qE "$3|$4" "$1" && [ ! -e "$2/scripts/$3.sh" ] && [ ! -e "$2/tests/ci/test-$3.sh" ]' _ "$BP" "$ROOT" "$old1" "$old2"
+# the body of build_phase(), up to its first build/docker call
+build_phase_head(){ awk '/^build_phase\(\)/{p=1; next} p&&/^[[:space:]]+(build base|docker )/{exit} p{print}' "$BP"; }
+check "the build phase removes a stale digests file before its first build/docker call" \
+  bash -c 'grep -qF "rm -f \"\$out\"" <<<"$1"' _ "$(build_phase_head)"
 check "latest is touched only inside promote()" \
   bash -c '! grep -n ":latest" <<<"$1"' _ "$(outside_promote)"
 refuses "unknown phase prints usage" 'usage' "$BP" nope
