@@ -882,6 +882,7 @@ cmd_up(){
     else
       op run --env-file "$cfg/project.env" -- "${COMPOSE[@]}" up -d --force-recreate
     fi
+    tok=""   # done with it
     if research_on "$cfg"; then
       echo "agent-up: research exchange ON: $(research_dir "$cfg")/$name (briefs rw; reports + downloads read-only, at /research)"
       if [ -f "$CFG_ROOT/research/project.conf" ] && [ "$(research_dir "$CFG_ROOT/research")" != "$(research_dir "$cfg")" ]; then

@@ -195,11 +195,15 @@ TOK=""; : > "$OPLOG"; : > "$DLOG"
 check "up with no token: reads the project's own service-account item and starts" au up "$NAME"
 check "  ...op calls, in order: whoami, read (that one item), run" \
   bash -c 'diff <(sed -E "s/^(OP: run) .*/\1/" "$1") <(printf "%s\n" "OP: whoami" "OP: read op://Personal/agent-$2 service account/credential" "OP: run")' _ "$OPLOG" "$NAME"
-check "  ...op run got that token; the container did not" \
-  bash -c 'grep -qx "OPTOK: sat-$2" "$1" && ! grep -q "OP_SERVICE_ACCOUNT_TOKEN" <(grep "^ENV:" "$1")' _ "$DLOG" "$NAME"
+check "  ...op run got that token" grep -qx "OPTOK: sat-$NAME" "$DLOG"
+check "  ...the container did not: no OP_ name and not the token in the passthrough file" \
+  bash -c 'f="$1/.generated/env-passthrough.yaml"; [ -s "$f" ] && ! grep -q "OP_" "$f" && ! grep -qF "sat-$2" "$f"' _ "$CFG" "$NAME"
+: > "$OPLOG"; : > "$DLOG"
 touch "$T/OPREAD_FAIL_$NAME"
 refuses "up with no token: a failed read dies naming the item and the runbook" \
   "op://Personal/agent-$NAME service account/credential.*1password-project-vault\.md" au up "$NAME"
+check "  ...and reached neither op run nor compose up" \
+  bash -c '! grep -q "^OP: run" "$1" && ! grep -q "up -d" "$2"' _ "$OPLOG" "$DLOG"
 rm -f "$T/OPREAD_FAIL_$NAME"
 touch "$T/OP_SIGNED_OUT"
 refuses "up with no token, signed out, no terminal: dies with the sign-in message" 'not signed in' aun up "$NAME"
