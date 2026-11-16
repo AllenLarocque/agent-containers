@@ -42,19 +42,20 @@ The last line must list ONLY `agent-<project>`. (Your personal vault is `Persona
 Do **not** `export OP_SERVICE_ACCOUNT_TOKEN=...` in a global shell profile: that leaves the token in plaintext on disk and exposes it to every process you start, for every project. Prefer one of:
 
 - **Per-project `direnv`:** keep BOTH the token file and any `.envrc` outside every agent-writable folder (the project folder, spades.ai, `~/agent-memory`). For example, put the `.envrc` in a parent directory the agent never mounts, and have it source `~/.config/agent-tokens/<project>.envrc` (mode 600), which sets `OP_SERVICE_ACCOUNT_TOKEN`. direnv runs the `.envrc` in your shell, so an agent-writable one would run agent-written code with your token. Reading the token at use time (`op read`, next bullet) is safer still.
-- **Read at use time:** fetch the token from the macOS Keychain, the Windows credential store, or `op` itself (using your own biometric-unlocked session) into the **current shell only**, then run `agent-up up <project>`, for example `export OP_SERVICE_ACCOUNT_TOKEN="$(op read 'op://Personal/agent-<project> service account/credential')"` (the Personal-vault item saved in step 2). **Run `unset OP_SERVICE_ACCOUNT_TOKEN` before every such `op read`:** if another project's token is still exported, `op` reads AS that service account, which cannot see `Personal` (error: `"Personal" isn't a vault in this account`). For several projects in one shell:
+- **Read at use time (default):** run `agent-up up <project>` with no token set. It checks your 1Password sign-in first (at a terminal it signs you in on the spot; otherwise it stops and tells you to run `eval "$(op signin)"`), then reads the one item `op://Personal/agent-<project> service account/credential` for that command and drops it. It reads nothing else on your session, and nothing is exported to your shell. A token already in `OP_SERVICE_ACCOUNT_TOKEN` is used as before.
+- **Read it yourself:** for a project whose item is named differently, fetch the token into the **current shell only**, then run `agent-up up <project>`, for example `export OP_SERVICE_ACCOUNT_TOKEN="$(op read 'op://Personal/<item name>/credential')"`. **Run `unset OP_SERVICE_ACCOUNT_TOKEN` before every such `op read`:** if another project's token is still exported, `op` reads AS that service account, which cannot see `Personal` (error: `"Personal" isn't a vault in this account`). For several projects in one shell:
 
   ```bash
   unset OP_SERVICE_ACCOUNT_TOKEN
-  export OP_SERVICE_ACCOUNT_TOKEN="$(op read 'op://Personal/agent-<project-a> service account/credential')"
+  export OP_SERVICE_ACCOUNT_TOKEN="$(op read 'op://Personal/<item-a>/credential')"
   agent-up up <project-a>
   unset OP_SERVICE_ACCOUNT_TOKEN
-  export OP_SERVICE_ACCOUNT_TOKEN="$(op read 'op://Personal/agent-<project-b> service account/credential')"
+  export OP_SERVICE_ACCOUNT_TOKEN="$(op read 'op://Personal/<item-b>/credential')"
   agent-up up <project-b>
   unset OP_SERVICE_ACCOUNT_TOKEN
   ```
 
-`agent-up up` reads `OP_SERVICE_ACCOUNT_TOKEN` from the host environment and stops with an error if it is missing.
+If `OP_SERVICE_ACCOUNT_TOKEN` is set, `agent-up up` uses it and does not read 1Password itself.
 **Warning:** if the wrong project's token is in your environment, `agent-up up` either fails (vault not readable) or reads a different vault than you intended. Check the project before `agent-up up`.
 Never commit the token. Each project repo runs gitleaks in CI as a backstop (`.github/workflows/gitleaks.yml`, added by `agent-up init`).
 

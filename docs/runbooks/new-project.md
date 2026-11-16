@@ -68,8 +68,8 @@ MACHINE_USER=<machine-user-login>
    agent-up up <project>
    ```
 
-   `agent-up up` needs `OP_SERVICE_ACCOUNT_TOKEN` for **this** project in your shell (see the
-   vault runbook).
+   With no `OP_SERVICE_ACCOUNT_TOKEN` set, `agent-up up` checks your 1Password sign-in and reads
+   **this** project's token itself (see the vault runbook).
 8. **Machine user, "verify the gate" (after `agent-up up`):** run
    [machine-user-and-rulesets.md](machine-user-and-rulesets.md) step 6 inside the container
    (`agent-up shell <project>`). Don't start real work until it passes.

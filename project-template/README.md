@@ -586,10 +586,7 @@ NEW=spades_pe
 6. Start it, and with `RESEARCH=1` also the research container, so it mounts the renamed exchange
    folder:
    ```bash
-   unset OP_SERVICE_ACCOUNT_TOKEN
-   export OP_SERVICE_ACCOUNT_TOKEN="$(op read "op://Personal/agent-$NEW service account/credential")"
-   agent-up up $NEW
-   unset OP_SERVICE_ACCOUNT_TOKEN
+   agent-up up $NEW        # with no token set, it reads agent-$NEW's item itself
    agent-up up research
    ```
    Compose warns that the copied volumes "already exist but were not created by Docker Compose":
