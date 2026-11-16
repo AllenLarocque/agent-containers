@@ -120,15 +120,37 @@ case "$1" in
   *)     exec "$REALGIT" "$@" ;;
 esac
 STUB
-# ---- stub agent-up: logs; mimics `init` by materializing the config dir from fixtures
+# ---- the pin step: agent-new runs `agent-up update <project>`, which verifies `latest` with scripts/verify-image.sh. The stub agent-up
+# below hands `update` to the REAL launcher of a throwaway clone ($NC, on main; its origin is a local bare repo, so every fetch stays
+# offline), with $ABIN first on PATH: stub gh and curl (tests/launcher/stubs) answer for GitHub and ghcr.io, git is the real one, and
+# docker knows no container. Nothing reaches the real GitHub or ghcr.io.
+unset GH_NOAUTH GH_DOWN GH_RUNNING GH_ATTEST_DOWN GH_ATTEST_SAN GH_ATTEST_REF REG_TOKEN_FAIL
+NO="$T/norigin.git"; NW="$T/nwork"; NC="$T/nclone"; ABIN="$T/abin"
+"$REALGIT" init -q --bare -b main "$NO"; "$REALGIT" init -q -b main "$NW"
+mkdir -p "$NW/images/base" "$ABIN"; cp -r "$ROOT/bin" "$ROOT/scripts" "$ROOT/project-template" "$NW/"; cp -r "$ROOT/images/base/agent-clis" "$NW/images/base/"
+"$REALGIT" -C "$NW" add -A; "$REALGIT" -C "$NW" commit -q -m fixture; "$REALGIT" -C "$NW" remote add origin "$NO"; "$REALGIT" -C "$NW" push -q origin main
+NSHA="$("$REALGIT" -C "$NW" rev-parse HEAD)"; "$REALGIT" clone -q "$NO" "$NC" 2>/dev/null
+AN="$NC/bin/agent-new"   # agent-new resolves its clone from its own location: run the throwaway clone's copy
+cp "$ROOT/tests/launcher/stubs/gh" "$ROOT/tests/launcher/stubs/curl" "$ABIN/"
+printf '#!/bin/sh\nexec "$REALGIT" "$@"\n' > "$ABIN/git"; printf '#!/bin/sh\nexit 1\n' > "$ABIN/docker"; chmod +x "$ABIN"/*
+GISD=$(printf 'c%.0s' $(seq 64)); BIOD=$(printf 'd%.0s' $(seq 64))
+printf 'spades-gis latest sha256:%s\nspades-bio latest sha256:%s\n' "$GISD" "$BIOD" > "$T/reg"
+printf 'spades-gis sha256:%s ghcr.io/allenlarocque/spades-gis %s %s 77 1\nspades-bio sha256:%s ghcr.io/allenlarocque/spades-bio %s %s 77 1\n' \
+  "$GISD" "$GISD" "$NSHA" "$BIOD" "$BIOD" "$NSHA" > "$T/attest.good"; cp "$T/attest.good" "$T/attest"
+echo "77 1" > "$T/latest"
+REG_TABLE="$T/reg" GH_ATTEST="$T/attest" GH_LATEST_RUN="$T/latest" GH_LOG="$T/agh.log" CURL_LOG="$T/curl.log"
+export NC ABIN REG_TABLE GH_ATTEST GH_LATEST_RUN GH_LOG CURL_LOG
+NOTMAIN="the image 'latest' points to was NOT built by publish on main; do not use it."
+# ---- stub agent-up: logs; mimics `init` by materializing the config dir from fixtures; `update` runs the real launcher (above)
 cat > "$T/bin/agent-up" <<'STUB'
 #!/usr/bin/env bash
 echo "AU${OP_SERVICE_ACCOUNT_TOKEN:+(tok)}: $*" >> "$AULOG"
+if [ "$1" = update ]; then PATH="$ABIN:$PATH" exec "$NC/bin/agent-up" "$@"; fi
 if [ "$1" = init ]; then
-  p="$(basename "$2" | tr 'A-Z' 'a-z')"
+  p="$(basename "$2" | tr 'A-Z' 'a-z')"; i=gis; [ "${3:-}" != --image ] || i="$4"
   mkdir -p "$AGENT_CONTAINERS_CONFIG/$p" "$2/.github/workflows"
-  printf 'image: ghcr.io/x/spades-gis@sha256:REPLACE_WITH_DIGEST_FROM_digests.md\n' > "$AGENT_CONTAINERS_CONFIG/$p/compose.yaml"
-  printf 'PROJECT=%s\nT3_PORT=3778\nT3_CONNECT=0\nRESEARCH=0\n' "$p" > "$AGENT_CONTAINERS_CONFIG/$p/project.conf"
+  printf 'services:\n  agent:\n    image: ghcr.io/allenlarocque/spades-%s@sha256:REPLACE_WITH_DIGEST\n' "$i" > "$AGENT_CONTAINERS_CONFIG/$p/compose.yaml"
+  printf 'PROJECT=%s\nIMAGE=%s\nT3_PORT=3778\nT3_CONNECT=0\nRESEARCH=0\n' "$p" "$i" > "$AGENT_CONTAINERS_CONFIG/$p/project.conf"
   printf '* @OWNER\n' > "$2/.github/CODEOWNERS"
   touch "$2/.github/workflows/gitleaks.yml" "$2/.gitignore"
 fi
@@ -144,8 +166,6 @@ case "$1" in
 esac
 STUB
 chmod +x "$T/bin/tailscale.exe"
-mkdir -p "$T/repo-root"
-printf '| image | tag | digest |\n|---|---|---|\n| spades-gis | 2026.10.12 | `sha256:aaa111` |\n| spades-bio | 2026.10.12 | `sha256:bbb222` |\n' > "$T/repo-root/digests.md"
 run(){ HOME="$H" AGENT_CONTAINERS_CONFIG="$CFGROOT" PATH="$T/bin:$PATH" "$AN" "$@"; }
 
 echo "== task 1: CLI and preflight =="
@@ -312,13 +332,14 @@ unset TMPDIR
 
 echo "== task 5: project steps 1-6 =="
 newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
-export AGENT_NEW_DIGESTS="$T/repo-root/digests.md"
 export AGENT_NEW_STOP_AFTER=token
 PROJHOME="$H/GitHub"; mkdir -p "$PROJHOME"
 check "fresh project run (stops after token)" run project NewProj --token-from agent-old < /dev/null
 check "  repo created"            grep -q '^GH: repo create allen/NewProj --private --clone' "$GHLOG"
 check "  agent-up init called"    grep -q '^AU: init' "$AULOG"
-check "  digest injected"         grep -q 'sha256:aaa111' "$CFGROOT/newproj/compose.yaml"
+check "  image pinned to latest's verified digest" grep -qx "    image: ghcr.io/allenlarocque/spades-gis@sha256:$GISD" "$CFGROOT/newproj/compose.yaml"
+check "  ...by agent-up update newproj, through the verification" \
+  bash -c 'grep -qx "AU: update newproj" "$1" && grep -qx "spades-gis latest" "$2" && grep -q "attestation verify oci://ghcr.io/allenlarocque/spades-gis@sha256:$4" "$3"' _ "$AULOG" "$CURL_LOG" "$GH_LOG" "$GISD"
 check "  RESEARCH=1 single line"  test "$(grep -c '^RESEARCH=' "$CFGROOT/newproj/project.conf")" = 1
 check "  RESEARCH value 1"        grep -qx 'RESEARCH=1' "$CFGROOT/newproj/project.conf"
 check "  T3_CONNECT=publish"      grep -qx 'T3_CONNECT=publish' "$CFGROOT/newproj/project.conf"
@@ -531,13 +552,34 @@ refuses "service-account token read fails -> die" 'could not read the service ac
 check "  agent-up up never called" sh -c "! grep -q ' up safail' '$AULOG'"
 rm -rf "$PROJHOME/SaFail" "$CFGROOT/safail"
 
-newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
+# the pin step on an existing config: old placeholder spelling, verification failure, already pinned, an image line update will not pin
 export AGENT_NEW_STOP_AFTER=token
-mkdir -p "$CFGROOT/fbproj"; printf 'PROJECT=fbproj\nT3_PORT=3779\n' > "$CFGROOT/fbproj/project.conf"
-printf '# maintainer: me@example.com\nimage: ghcr.io/x/spades-gis@REPLACE_WITH_DIGEST\n' > "$CFGROOT/fbproj/compose.yaml"
-run project FbProj --token-from agent-old < /dev/null >/dev/null 2>&1
-check "digest fallback rewrites the image line"      grep -qx 'image: ghcr.io/x/spades-gis@sha256:aaa111' "$CFGROOT/fbproj/compose.yaml"
-check "  leaves an unrelated @ line untouched"       grep -qx '# maintainer: me@example.com' "$CFGROOT/fbproj/compose.yaml"
+fbcfg(){ # $1 image line: a fresh fbproj config holding it
+  rm -rf "$PROJHOME/FbProj" "$CFGROOT/fbproj"; mkdir -p "$CFGROOT/fbproj"; printf 'PROJECT=fbproj\nIMAGE=bio\nT3_PORT=3779\n' > "$CFGROOT/fbproj/project.conf"
+  printf '# maintainer: me@example.com\nservices:\n  agent:\n    image: %s\n' "$1" > "$CFGROOT/fbproj/compose.yaml"; cp "$CFGROOT/fbproj/compose.yaml" "$T/fb.before"
+  : > "$CURL_LOG"; : > "$GH_LOG"; }
+newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
+fbcfg ghcr.io/allenlarocque/spades-bio@sha256:REPLACE_WITH_DIGEST_FROM_digests.md
+check "old placeholder spelling: run completes" run project FbProj --token-from agent-old < /dev/null
+check "  ...pinned to latest's verified digest for its own image (spades-bio)" grep -qx "    image: ghcr.io/allenlarocque/spades-bio@sha256:$BIOD" "$CFGROOT/fbproj/compose.yaml"
+check "  ...leaves an unrelated @ line untouched" grep -qx '# maintainer: me@example.com' "$CFGROOT/fbproj/compose.yaml"
+newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
+fbcfg ghcr.io/allenlarocque/spades-bio@sha256:REPLACE_WITH_DIGEST; : > "$T/attest"
+refuses "no attestation -> the pin step dies with the verification's reason" "could not pin the image.*NOT UPDATED \\($(sed 's/[.]/\\./g' <<<"$NOTMAIN")" \
+  run project FbProj --token-from agent-old < /dev/null
+check "  ...compose.yaml unchanged (still the placeholder)" cmp -s "$CFGROOT/fbproj/compose.yaml" "$T/fb.before"
+check "  ...and the run stopped there (no vault step)" test ! -f "$STATE/vault"
+cp "$T/attest.good" "$T/attest"
+newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
+fbcfg "ghcr.io/allenlarocque/spades-bio@sha256:$(printf 'e%.0s' $(seq 64))"
+OUT=$(run project FbProj --token-from agent-old < /dev/null 2>&1)
+check "already pinned -> SKIP, file unchanged" bash -c 'grep -qF "SKIP (done): digest already pinned" <<<"$1" && cmp -s "$2" "$3"' _ "$OUT" "$CFGROOT/fbproj/compose.yaml" "$T/fb.before"
+check "  ...no update, no registry or attestation call" bash -c '! grep -q "^AU: update" "$1" && [ ! -s "$2" ] && [ ! -s "$3" ]' _ "$AULOG" "$CURL_LOG" "$GH_LOG"
+newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
+fbcfg ghcr.io/allenlarocque/spades-bio@REPLACE_WITH_DIGEST
+refuses "a placeholder without @sha256: -> dies with update's SKIP reason" 'could not pin the image.*SKIP \(no pinned image: line in compose.yaml\)' \
+  run project FbProj --token-from agent-old < /dev/null
+check "  ...file unchanged, nothing looked up" bash -c 'cmp -s "$1" "$2" && [ ! -s "$3" ]' _ "$CFGROOT/fbproj/compose.yaml" "$T/fb.before" "$CURL_LOG"
 unset AGENT_NEW_STOP_AFTER
 rm -rf "$PROJHOME/FbProj" "$CFGROOT/fbproj"
 
@@ -557,7 +599,7 @@ check "  ...and never calls op whoami" bash -c '! grep -q "^OP: whoami" "$1"' _ 
 fullstate; touch "$STATE/OP_SIGNED_OUT"
 refuses "protect <owner>/<repo>, signed out, no terminal: refused" "$SIGNIN_RE" run protect allen/repo9 --vault agent-p1 < /dev/null
 check "  ...first op call was whoami, no op read after it" bash -c 'head -n1 "$1" | grep -qx "OP: whoami" && ! grep -q "^OP: read" "$1"' _ "$OPLOG"
-fullstate; echo 2 > "$STATE/OP_WHOAMI_OK"   # signed in for the vault and protect steps, out by the up step
+fullstate; echo 4 > "$STATE/OP_WHOAMI_OK"   # signed in for the pin step (agent-new, then agent-up update), the vault and protect steps; out by the up step
 rm -rf "$PROJHOME/SoProj" "$CFGROOT/soproj"
 refuses "project flow, signed out at the up step: refused" "$SIGNIN_RE" run project SoProj --token-from agent-old < /dev/null
 check "  ...no op call after the failed whoami (no token read)" bash -c 'tail -n1 "$1" | grep -qx "OP: whoami"' _ "$OPLOG"
