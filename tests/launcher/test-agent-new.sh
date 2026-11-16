@@ -124,7 +124,7 @@ STUB
 # below hands `update` to the REAL launcher of a throwaway clone ($NC, on main; its origin is a local bare repo, so every fetch stays
 # offline), with $ABIN first on PATH: stub gh and curl (tests/launcher/stubs) answer for GitHub and ghcr.io, git is the real one, and
 # docker knows no container. Nothing reaches the real GitHub or ghcr.io.
-unset GH_NOAUTH GH_DOWN GH_RUNNING GH_ATTEST_DOWN GH_ATTEST_SAN GH_ATTEST_REF REG_TOKEN_FAIL
+unset GH_NOAUTH GH_DOWN GH_RUNNING GH_ATTEST_DOWN GH_ATTEST_SAN GH_ATTEST_REF REG_TOKEN_FAIL AGENT_UP_SKIP_GIT_CHECK AGENT_UP_PULLED
 NO="$T/norigin.git"; NW="$T/nwork"; NC="$T/nclone"; ABIN="$T/abin"
 "$REALGIT" init -q --bare -b main "$NO"; "$REALGIT" init -q -b main "$NW"
 mkdir -p "$NW/images/base" "$ABIN"; cp -r "$ROOT/bin" "$ROOT/scripts" "$ROOT/project-template" "$NW/"; cp -r "$ROOT/images/base/agent-clis" "$NW/images/base/"
@@ -580,8 +580,25 @@ fbcfg ghcr.io/allenlarocque/spades-bio@REPLACE_WITH_DIGEST
 refuses "a placeholder without @sha256: -> dies with update's SKIP reason" 'could not pin the image.*SKIP \(no pinned image: line in compose.yaml\)' \
   run project FbProj --token-from agent-old < /dev/null
 check "  ...file unchanged, nothing looked up" bash -c 'cmp -s "$1" "$2" && [ ! -s "$3" ]' _ "$CFGROOT/fbproj/compose.yaml" "$T/fb.before" "$CURL_LOG"
-unset AGENT_NEW_STOP_AFTER
 rm -rf "$PROJHOME/FbProj" "$CFGROOT/fbproj"
+# the pin step runs agent-up update, so it inherits update_guard: the launcher clone must be on main (AGENT_UP_SKIP_GIT_CHECK unset here)
+"$REALGIT" -C "$NC" switch -q -c not-main
+newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"; rm -rf "$PROJHOME/OffMain" "$CFGROOT/offmain"; : > "$CURL_LOG"; : > "$GH_LOG"
+OUT=$(run project OffMain --token-from agent-old < /dev/null 2>&1); RC=$?
+check "launcher clone not on main -> the pin step dies: could not pin the image: ... is not on main" \
+  bash -c '[ "$1" -ne 0 ] && grep -Eq "could not pin the image: .*is not on main" <<<"$2"' _ "$RC" "$OUT"
+check "  ...compose.yaml still holds the placeholder" grep -qx "    image: ghcr.io/allenlarocque/spades-gis@sha256:REPLACE_WITH_DIGEST" "$CFGROOT/offmain/compose.yaml"
+check "  ...the vault step was not reached (no vault created)" bash -c '! grep -q "^OP: vault create" "$1" && [ ! -f "$2/vault" ]' _ "$OPLOG" "$STATE"
+newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"; rm -rf "$PROJHOME/OffMain" "$CFGROOT/offmain"; : > "$CURL_LOG"; : > "$GH_LOG"
+check "same, with AGENT_UP_SKIP_GIT_CHECK=1 (skips the on-main check only) -> run completes" \
+  env AGENT_UP_SKIP_GIT_CHECK=1 HOME="$H" AGENT_CONTAINERS_CONFIG="$CFGROOT" PATH="$T/bin:$PATH" "$AN" project OffMain --token-from agent-old < /dev/null
+check "  ...pinned to latest's verified digest" grep -qx "    image: ghcr.io/allenlarocque/spades-gis@sha256:$GISD" "$CFGROOT/offmain/compose.yaml"
+check "  ...verification still ran (a registry lookup and an attestation verify)" \
+  bash -c 'grep -qx "spades-gis latest" "$1" && grep -q "attestation verify oci://ghcr.io/allenlarocque/spades-gis@sha256:" "$2"' _ "$CURL_LOG" "$GH_LOG"
+"$REALGIT" -C "$NC" switch -q main; "$REALGIT" -C "$NC" branch -q -D not-main
+check "  (fixture: the launcher clone is back on main)" test "$("$REALGIT" -C "$NC" rev-parse --abbrev-ref HEAD)" = main
+rm -rf "$PROJHOME/OffMain" "$CFGROOT/offmain"
+unset AGENT_NEW_STOP_AFTER
 
 echo "== 1Password sign-in check =="
 SIGNIN_RE='not signed in\. Sign in first'
@@ -605,9 +622,19 @@ refuses "project flow, signed out at the up step: refused" "$SIGNIN_RE" run proj
 check "  ...no op call after the failed whoami (no token read)" bash -c 'tail -n1 "$1" | grep -qx "OP: whoami"' _ "$OPLOG"
 check "  ...agent-up up never called" bash -c '! grep -q " up soproj" "$1"' _ "$AULOG"
 rm -rf "$PROJHOME/SoProj" "$CFGROOT/soproj"
+fullstate; echo 2 > "$STATE/OP_WHOAMI_OK"   # signed in for the pin step (agent-new, then agent-up update); out by the vault step
+rm -rf "$PROJHOME/SoProj2" "$CFGROOT/soproj2"
+OUT=$(run project SoProj2 --token-from agent-old < /dev/null 2>&1); RC=$?
+check "project flow, signed out at the vault step: refused there" \
+  bash -c '[ "$1" -ne 0 ] && grep -Eq "$3" <<<"$2" && grep -qF "agent-new: 1Password (1password-project-vault.md):" <<<"$2"' _ "$RC" "$OUT" "$SIGNIN_RE"
+check "  ...the image was pinned first" grep -qx "    image: ghcr.io/allenlarocque/spades-gis@sha256:$GISD" "$CFGROOT/soproj2/compose.yaml"
+check "  ...no vault created, no op call after the failed whoami" bash -c '! grep -q "^OP: vault" "$1" && [ ! -f "$2/vault" ] && tail -n1 "$1" | grep -qx "OP: whoami"' _ "$OPLOG" "$STATE"
+rm -rf "$PROJHOME/SoProj2" "$CFGROOT/soproj2"
 fullstate; touch "$STATE/OP_SIGNED_OUT"
-rm -rf "$PROJHOME/SoProj2" "$CFGROOT/soproj2"
-refuses "project flow, signed out at the vault step: refused" "$SIGNIN_RE" run project SoProj2 --token-from agent-old < /dev/null
-rm -rf "$PROJHOME/SoProj2" "$CFGROOT/soproj2"
+rm -rf "$PROJHOME/SoProj3" "$CFGROOT/soproj3"
+refuses "project flow, signed out at the pin step: refused" "$SIGNIN_RE" run project SoProj3 --token-from agent-old < /dev/null
+check "  ...compose.yaml still holds the placeholder, update never ran" \
+  bash -c 'grep -qx "    image: ghcr.io/allenlarocque/spades-gis@sha256:REPLACE_WITH_DIGEST" "$1" && ! grep -q "^AU: update" "$2"' _ "$CFGROOT/soproj3/compose.yaml" "$AULOG"
+rm -rf "$PROJHOME/SoProj3" "$CFGROOT/soproj3"
 
 [ "$fail" -eq 0 ] && echo "AGENT-NEW: ALL PASSED" || { echo "AGENT-NEW: FAILURES"; exit 1; }

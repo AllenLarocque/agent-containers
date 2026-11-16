@@ -1249,6 +1249,7 @@ rewrite_digest(){ # $1 compose.yaml, $2 sha256:<64 hex>: only the first IMG_LINE
   [[ $2 =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
   local tmp want; want="$(sed -nE "s/$IMG_LINE_RE/\2/p" "$1" | head -n 1) ${2#sha256:}"
   tmp="$(mktemp "$1.XXXXXX" 2>/dev/null)" || return 1
+  # the re-parse of $tmp is a backstop (not reachable from outside: $2 is format-checked above) against a sed that silently matched nothing
   if sed -E "0,/$IMG_LINE_RE/s//\1\2@$2\4/" "$1" > "$tmp" && [ "$(sed -nE "s/$IMG_LINE_RE/\2 \3/p" "$tmp" | head -n 1)" = "$want" ] \
      && chmod --reference="$1" "$tmp" && mv "$tmp" "$1"; then return 0; fi
   rm -f "$tmp"; return 1
