@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Stub gh for scripts/verify-image.sh (tests copy it to a PATH dir). Every call is logged to $GH_LOG (one line, arguments joined by spaces).
+#   gh auth status                      exit 1 if $GH_NOAUTH is set, else 0.
+#   gh attestation verify oci://ghcr.io/allenlarocque/<img>@<digest> ...
+#       exit 1 + "HTTP 503" if $GH_DOWN; exit 1 + "no attestations found" unless all four verification flags are present with their exact values;
+#       else print every line of $GH_ATTEST whose first two fields are "<img> <digest>", minus those two fields (exit 1 if none).
+#       $GH_ATTEST lines: <img> <digest> <subject-name> <subject-sha256-hex> <source-sha> <run-id> <attempt>
+#   gh api ... status=success ...      print the contents of $GH_LATEST_RUN ("<run-id> <attempt>"); exit 1 if $GH_DOWN.
+#   gh api ... status=in_progress|queued ...   print $GH_RUNNING (a count) if set, else 0; exit 1 if $GH_DOWN.
+[ -z "${GH_LOG:-}" ] || echo "$*" >> "$GH_LOG"
+case "${1:-} ${2:-}" in
+  "auth status")
+    [ -z "${GH_NOAUTH:-}" ] || { echo "You are not logged into any GitHub hosts. To log in, run: gh auth login" >&2; exit 1; }
+    exit 0 ;;
+  "attestation verify")
+    [ -z "${GH_DOWN:-}" ] || { echo "HTTP 503: Service Unavailable" >&2; exit 1; }
+    args=" $* "
+    for want in " -R AllenLarocque/agent-containers " \
+                " --signer-workflow AllenLarocque/agent-containers/.github/workflows/publish.yml " \
+                " --source-ref refs/heads/main " \
+                " --deny-self-hosted-runners "; do
+      [[ $args == *"$want"* ]] || { echo "no attestations found" >&2; exit 1; }
+    done
+    ref=${3:-}; ref=${ref#oci://ghcr.io/allenlarocque/}; img=${ref%@*}; dig=${ref#*@}
+    out=$(awk -v i="$img" -v d="$dig" '$1==i && $2==d {$1=""; $2=""; sub(/^ +/, ""); print}' "${GH_ATTEST:-/dev/null}")
+    [ -n "$out" ] || { echo "no attestations found" >&2; exit 1; }
+    printf '%s\n' "$out" ;;
+  "api "*)
+    [ -z "${GH_DOWN:-}" ] || { echo "HTTP 503: Service Unavailable" >&2; exit 1; }
+    case " $* " in
+      *" status=success "*) cat "${GH_LATEST_RUN:-/dev/null}" ;;
+      *" status=in_progress "*|*" status=queued "*) echo "${GH_RUNNING:-0}" ;;
+      *) echo "stub gh: unexpected api call: $*" >&2; exit 1 ;;
+    esac ;;
+  *) echo "stub gh: unexpected call: $*" >&2; exit 1 ;;
+esac
