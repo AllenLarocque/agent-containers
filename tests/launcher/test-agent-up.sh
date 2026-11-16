@@ -27,6 +27,7 @@ H="$T/home"; CFGROOT="$H/.config/agent-containers"
 mkdir -p "$H/GitHub/spades.ai" "$T/bin" "$T/dstub"
 OPLOG="$T/op.log"; DLOG="$T/docker.log"
 H64=$(printf 'a%.0s' $(seq 64))
+aun(){ au "$@" </dev/null; }   # no terminal on stdin, even when the suite itself runs at one
 TOK=""        # fake service-account token; empty = unset for agent-up
 AMBIENT=()    # extra (hostile) environment for a call
 
@@ -190,9 +191,23 @@ sed -i -E "s|^( *image: *).*|\\1ghcr.io/allenlarocque/spades-research@sha256:$H6
 refuses "up refuses a builder pinned to spades-research" 'spades-research is for the research container only' au up "$NAME"
 refuses "config refuses a builder pinned to spades-research" 'spades-research is for the research container only' au config "$NAME"
 cp "$T/compose-img.bak" "$CFG/compose.yaml"
-TOK=""
-refuses "up refuses without OP_SERVICE_ACCOUNT_TOKEN" 'OP_SERVICE_ACCOUNT_TOKEN' au up "$NAME"
-TOK=tok
+TOK=""; : > "$OPLOG"; : > "$DLOG"
+check "up with no token: reads the project's own service-account item and starts" au up "$NAME"
+check "  ...op calls, in order: whoami, read (that one item), run" \
+  bash -c 'diff <(sed -E "s/^(OP: run) .*/\1/" "$1") <(printf "%s\n" "OP: whoami" "OP: read op://Personal/agent-$2 service account/credential" "OP: run")' _ "$OPLOG" "$NAME"
+check "  ...op run got that token; the container did not" \
+  bash -c 'grep -qx "OPTOK: sat-$2" "$1" && ! grep -q "OP_SERVICE_ACCOUNT_TOKEN" <(grep "^ENV:" "$1")' _ "$DLOG" "$NAME"
+touch "$T/OPREAD_FAIL_$NAME"
+refuses "up with no token: a failed read dies naming the item and the runbook" \
+  "op://Personal/agent-$NAME service account/credential.*1password-project-vault\.md" au up "$NAME"
+rm -f "$T/OPREAD_FAIL_$NAME"
+touch "$T/OP_SIGNED_OUT"
+refuses "up with no token, signed out, no terminal: dies with the sign-in message" 'not signed in' aun up "$NAME"
+TOK=given-token; : > "$OPLOG"; : > "$DLOG"
+au up "$NAME" >/dev/null 2>&1 && rc=0 || rc=$?
+check "up with a token set: uses it; no whoami, no read (signed out does not matter)" \
+  bash -c '[ "$1" -eq 0 ] && grep -q "^OP: run" "$2" && ! grep -qE "^OP: (whoami|read|signin)" "$2" && grep -qx "OPTOK: given-token" "$3"' _ "$rc" "$OPLOG" "$DLOG"
+rm -f "$T/OP_SIGNED_OUT" "$OPLOG" "$DLOG"; TOK=tok
 mv "$H/GitHub/spades.ai" "$H/GitHub/spades.ai.off"
 refuses "up refuses a missing spades.ai dir" 'SPADES_AI_DIR directory not found' au up "$NAME"
 mv "$H/GitHub/spades.ai.off" "$H/GitHub/spades.ai"
@@ -1754,7 +1769,6 @@ refuses "update: unknown project" 'no config for' au update nosuch
 refuses "update: no arguments prints usage" 'usage:' au update
 
 # ---- 1Password sign-in check: update checks `op whoami` first (builder projects only), signs in at a terminal
-aun(){ au "$@" </dev/null; }   # no terminal on stdin, even when the suite itself runs at one
 auline(){ printf '%q ' env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/dstub:$T/bin:$PATH" "${AMBIENT[@]}" "$AU" "$@"; }
 with_tty(){ script -qec "$(auline "$@")" /dev/null; }   # runs agent-up with a terminal on stdin
 ureset alpha beta; touch "$T/OP_SIGNED_OUT"; cp "$(ucfg alpha)" "$T/a.before"

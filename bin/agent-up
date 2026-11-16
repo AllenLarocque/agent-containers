@@ -16,6 +16,7 @@ usage:
   agent-up init <project-dir> [--name NAME] [--image base|gis|bio]   a builder project
   agent-up init --profile research [--image research|base|gis|bio]  the ONE shared research container (default: research)
   agent-up up <project>                  resolve secrets with `op run`, (re)create the container
+                                         (OP_SERVICE_ACCOUNT_TOKEN unset: reads the project's token from the Personal vault)
                                          (research: no secrets, no `op run`)
   agent-up config <project> [ARGS...]    print the rendered compose config (no secrets needed)
   agent-up shell <project>               zsh in the container as `agent`
@@ -864,14 +865,23 @@ cmd_up(){
     echo "agent-up: '$name' running (research: open public egress, no secrets). Shell: agent-up shell $name"
     echo "agent-up: research projects: $(exchange_projects "$(research_dir "$cfg")" 2>/dev/null | paste -sd' ' - || true)"
   else
-    [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] || die "OP_SERVICE_ACCOUNT_TOKEN is not set for this project (docs/runbooks/1password-project-vault.md)"
+    local tok=""   # the project's own token: command-scoped to the one `op run` below, never exported
+    if [ -z "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]; then
+      op_ready
+      tok="$(op read "op://Personal/agent-$name service account/credential" </dev/null 2>/dev/null)" && [ -n "$tok" ] \
+        || die "could not read op://Personal/agent-$name service account/credential (docs/runbooks/1password-project-vault.md)"
+    fi
     make_exchange "$cfg"
     prepare "$cfg"
     local v
     for v in require-cache-shared npm-cache-shared; do
       docker volume inspect "$v" >/dev/null 2>&1 || docker volume create "$v" >/dev/null
     done
-    op run --env-file "$cfg/project.env" -- "${COMPOSE[@]}" up -d --force-recreate
+    if [ -n "$tok" ]; then
+      OP_SERVICE_ACCOUNT_TOKEN="$tok" op run --env-file "$cfg/project.env" -- "${COMPOSE[@]}" up -d --force-recreate
+    else
+      op run --env-file "$cfg/project.env" -- "${COMPOSE[@]}" up -d --force-recreate
+    fi
     if research_on "$cfg"; then
       echo "agent-up: research exchange ON: $(research_dir "$cfg")/$name (briefs rw; reports + downloads read-only, at /research)"
       if [ -f "$CFG_ROOT/research/project.conf" ] && [ "$(research_dir "$CFG_ROOT/research")" != "$(research_dir "$cfg")" ]; then
