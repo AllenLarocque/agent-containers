@@ -168,8 +168,8 @@ still update, and the command exits non-zero. Messages say which step failed and
 `agent-up update` keeps `update_guard` (clone on `main`, fast-forward, re-exec), because the
 launcher and template have to match the images. `update_pending_pr` and its prompt are removed; the
 stale case replaces it. `AGENT_UP_SKIP_GIT_CHECK=1` keeps skipping the on-`main` check and the
-fast-forward only; it never skips steps 2 to 5 or the fetch they need. `agent-new` does not need
-the clone to be on `main`; it only needs `origin/main` fetched.
+fast-forward only; it never skips steps 2 to 5 or the fetch they need. `agent-new` pins by running
+`agent-up update <project>`, so the same guard applies to it: the launcher clone must be on `main`.
 
 Known limit of step 5: if someone re-runs an older `publish` run on `main`, that run builds fresh
 and promotes `latest`, but it is not the newest run in GitHub's list, so `update` refuses until
@@ -178,7 +178,7 @@ and promotes `latest`, but it is not the newest run in GitHub's list, so `update
 `update` still accepts only image lines from `ghcr.io/allenlarocque/spades-*`, looks each image up
 once per run, and rewrites the digest in `compose.yaml` as today.
 
-`agent-new` pins through the same routine. The template placeholder becomes `REPLACE_WITH_DIGEST`
+`agent-new` pins through the same routine, by running `agent-up update <project>`. The template placeholder becomes `REPLACE_WITH_DIGEST`
 (the old `REPLACE_WITH_DIGEST_FROM_digests.md` is still accepted).
 
 The list of publish paths lives in two places (`publish.yml` and the launcher). A test compares
@@ -252,3 +252,19 @@ nothing. Running projects are untouched throughout.
 - Exact message wording and exit codes.
 - Whether the freshness rule reads the path list from `publish.yml` at run time or keeps a copy
   guarded by the test.
+
+## Amendments during implementation (2026-11-16)
+
+1. `agent-new` pins by running `agent-up update <project>`, so it inherits `update`'s guard: the
+   launcher clone must be on `main` (and may be fast-forwarded). *Why: there is one implementation
+   of "replace the placeholder with a verified digest", and the launcher and template have to match
+   the images for `agent-new` too.* `AGENT_UP_SKIP_GIT_CHECK=1` lifts only that guard, never the
+   verification.
+2. `agent-up update` also pins a first digest over the template placeholder. *Why: without
+   `digests.md`, a hand-run `agent-up init` had no other way to get one.*
+3. `scripts/verify-image.sh` does not rely on `gh` returning only the attestations that matched the
+   workflow and branch flags. It re-checks, per attestation, that the signing certificate's identity
+   is exactly `https://github.com/AllenLarocque/agent-containers/.github/workflows/publish.yml@refs/heads/main`
+   and that the source ref is `refs/heads/main`.
+4. An image line that is neither a pinned digest nor `@sha256:<placeholder>` is skipped and left
+   unchanged. The earlier fallback that rewrote any `@...` suffix is gone.

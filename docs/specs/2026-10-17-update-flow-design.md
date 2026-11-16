@@ -207,3 +207,11 @@ The digests PR stays: merging it is still the human gate. Two frictions are remo
   `AGENT_UP_PULLS_URL` / `AGENT_UP_RUNS_URL` point the lookups elsewhere (tests).
 - Transition: a host clone still on the older launcher dies with "pull main first" once; pull by
   hand that one time.
+
+## Amendment 2026-11-16: attested images replace the digests PR
+
+`2026-11-16-attested-images-design.md` supersedes the 2026-11-01 amendment's digests PR check. There
+is no digests PR and no `[q]uit / [c]ontinue` prompt any more: `agent-up update` pins a digest only
+if the build attestation on `latest` shows `publish` built it on `main`, from the newest image
+change, in the newest successful run. Otherwise the project is skipped with a reason. The pull of
+`main` and the re-exec of the new launcher stay as that amendment describes.

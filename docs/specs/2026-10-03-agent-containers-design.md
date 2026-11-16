@@ -728,3 +728,11 @@ validation, rendering, and the behavioural chain into the real firewall).
 
 **Residual risk:** cleartext credentials and data; each FTP host is an upload channel for any
 credentials the agent holds (`project-template/README.md`, Known residual risks).
+
+## Amendment 2026-11-16: attested images replace the digests PR
+
+`2026-11-16-attested-images-design.md` replaces the `digests.md` file and the digests PR described
+above. `publish` now attaches a build attestation to each image before it moves `latest`, and
+`agent-up update` (and `agent-new`) pin a digest only after verifying that attestation. Everything
+here that says a digest is copied from `digests.md`, or that merging the digests PR is the human
+gate, no longer applies. Pinning by digest in `compose.yaml` is unchanged.

@@ -70,7 +70,7 @@ Each container runs a T3 Code server (`t3 serve`, pinned in the image, telemetry
 ```bash
 CFG=~/.config/agent-containers/<project>
 cp ~/GitHub/agent-containers/project-template/config/compose.yaml "$CFG/compose.yaml"
-sed -i 's|/spades-gis@sha256:REPLACE_WITH_DIGEST_FROM_digests.md|/spades-<image>@sha256:<digest>|' "$CFG/compose.yaml"
+agent-up update <project>   # replaces the template placeholder with the verified digest
 grep -h '^T3_PORT=' ~/.config/agent-containers/*/project.conf   # ports already taken
 grep -q '^T3_PORT=' "$CFG/project.conf" || echo 'T3_PORT=3773' >> "$CFG/project.conf"   # a FREE one; `up` refuses a duplicate
 agent-up up <project>
@@ -126,8 +126,8 @@ tunnel, at most 3 per T3 account) and `publish` (publish-only: notifications thr
 no tunnel; you connect over Tailscale instead). **`publish` is the recommended mode**: no tunnel
 limit and no public hostname. `publish` opens `t3.codes` only (no Cloudflare edge, no port 7844).
 
-**An image published before `T3_CONNECT=publish` support (2026-10-11) refuses it and the container fails closed.** Pin a
-digest from digests.md built after that date first; until then `T3_CONNECT=1` plus a
+**An image published before `T3_CONNECT=publish` support (2026-10-11) refuses it and the container fails closed.** Run
+`agent-up update <project>` first (it pins the newest published image, built after that date); until then `T3_CONNECT=1` plus a
 publish-only link also works.
 
 **Publish-only first time:** `agent-up shell <project>`, then `t3 connect --headless`,
@@ -201,8 +201,8 @@ without it, the server keeps trying to reach the relay, which the firewall now b
 
 **Upgrading an existing project:** nothing to do to keep it off (a `project.conf` without
 `T3_CONNECT` means 0). To opt in, add the line `T3_CONNECT=1` to its `project.conf` and follow
-the steps above; the image must be one that includes T3 Connect support (a digest from
-`digests.md` dated after this change).
+the steps above; the image must be one that includes T3 Connect support (run
+`agent-up update <project>`: `latest` was published after this change).
 
 ## Phone and desktop apps (Tailscale)
 
@@ -263,9 +263,10 @@ relay, not Tailscale).
 **First, turn off auto-update for the T3 phone and desktop apps.** Update them only after
 `agent-up update` (last step), so an app never gets ahead of the containers.
 
-1. Merge the update PR, then the digests PR.
+1. Merge the update PR, then wait for the `publish` run it triggers to finish (Actions → publish).
+   There is nothing else to merge.
 2. Optional: `bin/agent-up busy --all` shows running R work and agents mid-task (exit 1 = busy).
-3. `bin/agent-up update --all` (or `update <project>...`). Your clone must be on `main`; update fast-forwards it from origin first (clean tracked tree only, then it restarts itself on the new code and digests.md). If a digests PR is still open, or `publish` is still building (so its PR is not there yet), it says so and asks `[q]uit / [c]ontinue` (default quit): merge it first. It moves each project to the new digest,
+3. `bin/agent-up update --all` (or `update <project>...`). Your clone must be on `main`; update fast-forwards it from origin first (clean tracked tree only, then it restarts itself on the new code). It asks ghcr.io which digest `latest` points to and pins it only if `scripts/verify-image.sh` confirms that `publish` built it on `main`, from the newest image change, in the newest successful run. It needs `gh auth login` on the host. If the image fails the check, or `publish` has not finished yet, that project is skipped with the reason (there is no "continue anyway"), the other projects still update, and the exit code is non-zero. It moves each project to the new digest,
    leaves stopped projects stopped, and asks `[s]kip / [r]estart anyway / [q]uit` for busy ones
    (default skip). It prints a summary table. A stopped project shows "updated, not started": start
    it later with `bin/agent-up up <project>`, never with `docker start` or Docker Desktop's Start
@@ -297,7 +298,7 @@ the builder's exact project name:
 
 ```bash
 agent-up init --profile research          # ~/.config/agent-containers/research/ + ~/agent-research/
-# set the spades-research digest from digests.md in ~/.config/agent-containers/research/compose.yaml
+agent-up update research                  # pins the verified spades-research digest in its compose.yaml
 # for each builder that should use it: RESEARCH=1 in ~/.config/agent-containers/<project>/project.conf
 agent-up up <project>                     # each opted-in builder: mounts its three folders
 agent-up up research                      # no OP_SERVICE_ACCOUNT_TOKEN needed; mounts every project folder
@@ -310,12 +311,13 @@ The PDF tools come in stage 2; none are installed yet, so the agent reads PDFs w
 `agent-up init --profile research` sets this by default.
 
 **Migrating an existing research config.** In this order:
-1. After the change that adds `spades-research` merges, publish opens a digests PR.
+1. After the change that adds `spades-research` merges, wait for `publish` to finish.
 2. Make `spades-research` public on GitHub (Packages → spades-research → Package settings →
    Change visibility → Public).
-3. Re-run CI on that PR, then merge it.
-4. Migrate the config: set `IMAGE=research` in `~/.config/agent-containers/research/project.conf`,
-   put the `spades-research` digest in `~/.config/agent-containers/research/compose.yaml`, and run
+3. Migrate the config: set `IMAGE=research` in `~/.config/agent-containers/research/project.conf`,
+   set the image line in `~/.config/agent-containers/research/compose.yaml` to
+   `ghcr.io/allenlarocque/spades-research@sha256:REPLACE_WITH_DIGEST`, run `agent-up update research`
+   to pin the verified digest, and run
    `agent-up up research`.
 
 Until you do, a config with `IMAGE=gis` keeps working unchanged.
@@ -395,8 +397,8 @@ container that reaches it could bypass the machine user and the merge gate), and
 
 **Upgrading a builder created before the research container:** nothing to do to keep it off
 (`RESEARCH` absent = 0). To opt in, add `RESEARCH=1` (and, only if you moved it, `RESEARCH_DIR=...`)
-to its `project.conf`. The research container needs an image digest from `digests.md` dated after
-this change (an older image ignores the switch and stays on the builder allowlist).
+to its `project.conf`. The research container needs an image published after
+this change (`agent-up update <project>` pins it) (an older image ignores the switch and stays on the builder allowlist).
 ## RStudio Server (opt-in)
 
 The open-source RStudio Server (AGPLv3, pinned in the image) can run in a project's container, so
@@ -453,7 +455,7 @@ in, add both lines to its `project.conf`, with a port no other project uses
 ```bash
 printf 'RSTUDIO=1\nRSTUDIO_PORT=8787\n' >> ~/.config/agent-containers/<project>/project.conf
 ```
-The image must include RStudio Server (a digest from `digests.md` dated after this change).
+The image must include RStudio Server (an image published after this change; `agent-up update <project>` pins it).
 `agent-up up` refuses a port that is taken.
 
 ## FTP uploads (sequence archives)
@@ -529,7 +531,7 @@ helper and the set are gone.
   `EPSV` first (same address, port only), which always fits; a server that only speaks `PASV` and
   announces a different address than the one you connected to will not work.
 - An existing project: just add the line to its `project.conf` (no other key is needed), with an
-  image digest from `digests.md` dated after this change (an older image ignores the list and keeps
+  image published after this change, pinned by `agent-up update <project>` (an older image ignores the list and keeps
   port 21 closed).
 
 ## Lifecycle

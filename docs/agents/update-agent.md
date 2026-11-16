@@ -140,8 +140,10 @@ rules).
   `npm view @openai/codex@<pin> deprecated` (empty = not deprecated). Also watch the notes for
   "end of support", "will stop working", "minimum version" for old versions.
 - **OS patches, every week (Ubuntu 24.04 "noble", base image `rocker/r-ver` in
-  `images/base/Dockerfile`).** Since the last publish
-  (`git log -1 --format=%cs origin/main -- digests.md`), look for Ubuntu security notices (USNs) for
+  `images/base/Dockerfile`).** Since the last
+  successful publish on `main` (its date:
+  `gh api 'repos/AllenLarocque/agent-containers/actions/workflows/publish.yml/runs?branch=main&status=success&per_page=1' --jq '.workflow_runs[0].created_at[:10]'`;
+  if that gives nothing, use the date 7 days ago), look for Ubuntu security notices (USNs) for
   packages the images install (the `apt-get install` lines in `images/*/Dockerfile`, plus core
   packages such as libc6, openssl, sudo, openssh, curl, git). The only source to try is
   GitHub-hosted:
@@ -375,9 +377,10 @@ this repo). Exactly these five parts, in this order:
 - Restart: yes (always; the images are rebuilt, so pending OS patches come too)
 - Re-add environments: <yes | no | unsure> — <one-line evidence, e.g. the protocol constant at both tags>
 - New app needed: <yes | no>
-- Steps: merge this PR; merge the digests PR the `publish` workflow then opens; run
-  `bin/agent-up update --all` (it pulls `main` itself, warns if a digests PR is still open or publish is still running, checks for busy R work first and prints pairing codes
-  only where the T3 protocol changed); re-add environments only if it tells you to; then update the
+- Steps: merge this PR; wait for the `publish` run it triggers to finish (nothing else to merge);
+  run `bin/agent-up update --all` (it pulls `main` itself, pins only an image `publish` built on
+  `main` and skips a project, saying why, if `publish` has not finished, checks for busy R work
+  first and prints pairing codes only where the T3 protocol changed); re-add environments only if it tells you to; then update the
   T3 phone and desktop apps (not before). On your first `agent-up update` (containers started
   before the `T3_PROTOCOL` marker existed), it cannot compare protocols and prints a pairing code
   for every project under "Can't tell"; re-add an environment only if its app no longer connects.
@@ -409,8 +412,9 @@ for you". The body ends with the `🤖 Generated with` line exactly as shown.
 
 **Issue body (route D):** the same five parts and ending, with these differences:
 - OS issue, "What it means for you": restart: yes; re-add environments: no; new app needed: no;
-  steps: on GitHub, Actions → publish → Run workflow on `main`; merge the digests PR it opens;
-  `bin/agent-up update --all` (it pulls `main` itself and warns if a digests PR is still open or publish is still running); no app update needed. "What's new": "No
+  steps: on GitHub, Actions → publish → Run workflow on `main`; when it finishes, run
+  `bin/agent-up update --all` (it pulls `main` itself and pins only an image `publish` built on
+  `main`; it skips a project, saying why, if `publish` has not finished); no app update needed. "What's new": "No
   version changes; the rebuild picks up the patched OS packages." (You never run the workflow
   yourself.)
 - T3 verification issue, "What it means for you": restart: no; re-add environments: no; new app
