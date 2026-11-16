@@ -5,6 +5,8 @@
 #       exit 1 + "HTTP 503" if $GH_DOWN; exit 1 + "no attestations found" unless all four verification flags are present with their exact values;
 #       else print every line of $GH_ATTEST whose first two fields are "<img> <digest>", minus those two fields (exit 1 if none).
 #       $GH_ATTEST lines: <img> <digest> <subject-name> <subject-sha256-hex> <source-sha> <run-id> <attempt>
+#       and appends " <san> <ref>" (the certificate's subjectAlternativeName and sourceRepositoryRef), defaulting to the correct publish.yml@refs/heads/main values; override with $GH_ATTEST_SAN / $GH_ATTEST_REF.
+#       $GH_ATTEST_DOWN=<text>: only this call fails (exit 1, <text> on stderr).
 #   gh api ... status=success ...      print the contents of $GH_LATEST_RUN ("<run-id> <attempt>"); exit 1 if $GH_DOWN.
 #   gh api ... status=in_progress|queued ...   print $GH_RUNNING (a count) if set, else 0; exit 1 if $GH_DOWN.
 [ -z "${GH_LOG:-}" ] || echo "$*" >> "$GH_LOG"
@@ -14,6 +16,7 @@ case "${1:-} ${2:-}" in
     exit 0 ;;
   "attestation verify")
     [ -z "${GH_DOWN:-}" ] || { echo "HTTP 503: Service Unavailable" >&2; exit 1; }
+    [ -z "${GH_ATTEST_DOWN:-}" ] || { echo "$GH_ATTEST_DOWN" >&2; exit 1; }   # fails only this call (gh api still works)
     args=" $* "
     for want in " -R AllenLarocque/agent-containers " \
                 " --signer-workflow AllenLarocque/agent-containers/.github/workflows/publish.yml " \
@@ -24,7 +27,8 @@ case "${1:-} ${2:-}" in
     ref=${3:-}; ref=${ref#oci://ghcr.io/allenlarocque/}; img=${ref%@*}; dig=${ref#*@}
     out=$(awk -v i="$img" -v d="$dig" '$1==i && $2==d {$1=""; $2=""; sub(/^ +/, ""); print}' "${GH_ATTEST:-/dev/null}")
     [ -n "$out" ] || { echo "no attestations found" >&2; exit 1; }
-    printf '%s\n' "$out" ;;
+    # the certificate fields the real --jq would add: signer workflow identity and source ref (overridable to test the launcher's own re-check)
+    printf '%s\n' "$out" | sed "s|\$| ${GH_ATTEST_SAN:-https://github.com/AllenLarocque/agent-containers/.github/workflows/publish.yml@refs/heads/main} ${GH_ATTEST_REF:-refs/heads/main}|" ;;
   "api "*)
     [ -z "${GH_DOWN:-}" ] || { echo "HTTP 503: Service Unavailable" >&2; exit 1; }
     case " $* " in

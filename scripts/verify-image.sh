@@ -13,7 +13,7 @@ img=${1:-}; clone=${2:-}
 die(){ echo "verify-image: ${img:-?}: $2" >&2; exit "$1"; }
 
 # 1. arguments
-[[ $# -eq 2 && $img =~ ^spades-[a-z]+$ ]] && git -C "$clone" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+[[ $# -eq 2 && $img =~ ^spades-[a-z]+$ && -n $clone ]] && git -C "$clone" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
   || die 2 "usage: verify-image.sh spades-<name> <clone-of-agent-containers>"
 
 # 2. gh installed and logged in
@@ -38,29 +38,38 @@ latest=$(gh api -X GET "repos/$REPO/actions/workflows/publish.yml/runs" -f branc
 errf=$(mktemp); trap 'rm -f "$errf"' EXIT
 if ! lines=$(gh attestation verify "oci://ghcr.io/allenlarocque/$img@$digest" \
     -R "$REPO" --signer-workflow "$REPO/.github/workflows/publish.yml" --source-ref refs/heads/main --deny-self-hosted-runners \
-    --format json --jq '.[] | .verificationResult | "\(.statement.subject[0].name) \(.statement.subject[0].digest.sha256) \(.signature.certificate.sourceRepositoryDigest) \(.signature.certificate.runInvocationURI | capture("/runs/(?<r>[0-9]+)/attempts/(?<a>[0-9]+)") | "\(.r) \(.a)")"' 2>"$errf"); then
+    --format json --jq '.[] | .verificationResult | "\(.statement.subject[0].name) \(.statement.subject[0].digest.sha256) \(.signature.certificate.sourceRepositoryDigest) \(.signature.certificate.runInvocationURI | capture("/runs/(?<r>[0-9]+)/attempts/(?<a>[0-9]+)") | "\(.r) \(.a)") \(.signature.certificate.subjectAlternativeName) \(.signature.certificate.sourceRepositoryRef)"' 2>"$errf"); then
   grep -Eq 'HTTP 5|HTTP 429|rate limit|dial tcp|timeout|no such host' "$errf" \
     && die 11 "could not reach GitHub to verify the attestation; try again, nothing was changed"
   die 12 "the image 'latest' points to was NOT built by publish on main; do not use it. Publish runs: $RUNS"
 fi
 [ -n "$lines" ] || die 12 "the image 'latest' points to was NOT built by publish on main; do not use it. Publish runs: $RUNS"
 
-# 7. each attestation must pass, in order: image (13), source commit known (16), on main (12), contains newest publish change (14), newest run (15).
-# The first failing check is that line's code; with several lines, the one that got furthest decides, so a stray attestation cannot hide the reason.
+# 7. each attestation must pass, in this order of stages (the first failing stage is that line's code):
+#   1 shape: exactly 7 fields, subject name and digest are this image (13)
+#   2 signer workflow and ref re-checked here, not trusted to gh (12; also a source sha that is not hex)
+#   3 source commit is in the clone (16)   4 it is an ancestor of origin/main (12)
+#   5 it contains the newest publish-path change (14)   6 it is the newest run and attempt (15)
+# With several lines, the one that got furthest decides, so a stray attestation cannot hide the real reason.
+SAN="https://github.com/$REPO/.github/workflows/publish.yml@refs/heads/main"
 newest=$(git -C "$clone" log -1 --format=%H "$main" -- "${PUBLISH_PATHS[@]}")
-pos(){ case $1 in 0) echo 0 ;; 13) echo 1 ;; 16) echo 2 ;; 12) echo 3 ;; 14) echo 4 ;; 15) echo 5 ;; esac; }
-best=0
-while read -r name hex sha run attempt _; do
-  code=0
-  if [ "$name" != "ghcr.io/allenlarocque/$img" ] || [ "sha256:$hex" != "$digest" ]; then code=13
-  elif ! [[ $sha =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]] || ! git -C "$clone" cat-file -e "$sha^{commit}" 2>/dev/null; then code=16
-  elif ! git -C "$clone" merge-base --is-ancestor "$sha" "$main" 2>/dev/null; then code=12
-  elif [ -z "$newest" ] || ! git -C "$clone" merge-base --is-ancestor "$newest" "$sha" 2>/dev/null; then code=14
-  elif [ "$run $attempt" != "$latest" ]; then code=15
+best=0; bestcode=12
+while read -r line; do
+  read -r -a f <<<"$line"
+  stage=0; code=0
+  if [ "${#f[@]}" -ne 7 ] || [ "${f[0]}" != "ghcr.io/allenlarocque/$img" ] || [ "sha256:${f[1]}" != "$digest" ] \
+     || ! [[ ${f[1]} =~ ^[0-9a-f]{64}$ ]]; then stage=1; code=13
+  elif [ "${f[5]}" != "$SAN" ] || [ "${f[6]}" != "refs/heads/main" ]; then stage=2; code=12
+  elif ! [[ ${f[2]} =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then stage=3; code=12
+  elif ! git -C "$clone" cat-file -e "${f[2]}^{commit}" 2>/dev/null; then stage=3; code=16
+  elif ! git -C "$clone" merge-base --is-ancestor "${f[2]}" "$main" 2>/dev/null; then stage=4; code=12
+  elif [ -z "$newest" ] || ! git -C "$clone" merge-base --is-ancestor "$newest" "${f[2]}" 2>/dev/null; then stage=5; code=14
+  elif [ "${f[3]} ${f[4]}" != "$latest" ]; then stage=6; code=15
   fi
   if [ "$code" -eq 0 ]; then printf '%s\n' "$digest"; exit 0; fi
-  [ "$(pos "$code")" -le "$(pos "$best")" ] || best=$code
+  if [ "$stage" -gt "$best" ]; then best=$stage; bestcode=$code; fi
 done <<<"$lines"
+best=$bestcode
 
 case $best in
   13) die 13 "'latest' for this image points at a different image; do not use it" ;;

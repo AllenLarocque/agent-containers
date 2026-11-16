@@ -42,7 +42,10 @@ expect(){
   local name=$1 want=$2 f; shift 2
   [ "$rc" = "$want" ] || { bad "$name (rc=$rc want $want: $err)"; return; }
   [ -z "$out" ] || { bad "$name (stdout not empty: $out)"; return; }
-  for f in "$@"; do [[ $err == *"$f"* ]] || { bad "$name (message lacks '$f': $err)"; return; }; done
+  for f in "$@"; do
+    if [[ $f == "!"* ]]; then [[ $err != *"${f#!}"* ]] || { bad "$name (message has '${f#!}': $err)"; return; }
+    else [[ $err == *"$f"* ]] || { bad "$name (message lacks '$f': $err)"; return; }; fi
+  done
   [[ $err == "verify-image: spades-gis: "* ]] || { bad "$name (message prefix: $err)"; return; }
   ok "$name"
 }
@@ -59,12 +62,10 @@ check "C5 unknown to the clone before the fetch" bash -c '! git -C "$1" cat-file
 git -C "$T/seed" push -q origin main
 attest "$N $DH $C5 77 1"; run; check "pass: source only reachable after fetch" test "$rc" = 0 -a "$out" = "$D"
 
-attest "$N $DH $C2 77 1"; run; expect "stale" 14 "not published yet" "$RUNS"
-[[ $err != *"a publish run is in progress"* ]] && ok "stale: no run in progress, not claimed" || bad "stale claims a run in progress"
+attest "$N $DH $C2 77 1"; run; expect "stale" 14 "not published yet" "$RUNS" "!a publish run is in progress"
 export GH_RUNNING=1; run; expect "stale, a run in progress" 14 "not published yet" "a publish run is in progress"; unset GH_RUNNING
 
-attest "$N $DH $X 77 1"; run; expect "not on main" 12 "was NOT built by publish on main"
-[[ $err != *"not published yet"* ]] && ok "not on main: not reported as stale" || bad "not on main reported as stale"
+attest "$N $DH $X 77 1"; run; expect "not on main" 12 "was NOT built by publish on main" "!not published yet"
 
 attest "$N $DH $C3 70 1"; run; expect "not the newest build" 15 "points at an older build" "run publish on main"
 attest "$N $DH $C3 77 1"; latest "77 2"; run; expect "newest run, older attempt" 15 "points at an older build"; latest "77 1"
@@ -78,16 +79,44 @@ attest "$N $DH $C3 70 1" "$N $DH $C3 77 1"; run; check "several attestations, on
 attest "$N $DH $C3 77 1" "$NB $DH $C3 77 1"; run; check "several attestations, good one last" test "$rc" = 0 -a "$out" = "$D"
 attest "$NB $DH $C3 77 1" "$N $DH $C3 70 1"; run; expect "several, none good: furthest failure wins" 15 "points at an older build"
 
-attest "$N $DH $A40 77 1"; run; expect "commit not in clone" 16 "could not bring origin/main up to date"
-[[ $err != *"NOT built"* ]] && ok "commit not in clone: not 'NOT built'" || bad "commit not in clone said NOT built"
+attest "$N $DH $A40 77 1"; run; expect "commit not in clone" 16 "could not bring origin/main up to date" "!NOT built"
 
 attest "$N $DH $C3 77 1"
-GH_DOWN=1 run; expect "GitHub down" 11 "could not reach" "nothing was changed"
-[[ $err != *"NOT built"* ]] && ok "GitHub down: not 'NOT built'" || bad "GitHub down said NOT built"
+GH_DOWN=1 run; expect "GitHub down" 11 "could not reach" "nothing was changed" "!NOT built"
 printf "spades-base latest %s\n" "$D" > "$T/reg.none"   # a table with no line for spades-gis
 mv "$T/reg" "$T/reg.bak"; cp "$T/reg.none" "$T/reg"
 run; expect "registry down" 11 "could not reach" "nothing was changed"
 mv "$T/reg.bak" "$T/reg"
+
+# gh attestation verify itself unreachable (gh api works): classified by stderr text, never as "NOT built"
+for txt in "HTTP 503: Service Unavailable" "API rate limit exceeded" "dial tcp: lookup api.github.com: no such host"; do
+  GH_ATTEST_DOWN=$txt run; expect "attestation lookup unreachable: $txt" 11 "could not reach" "nothing was changed" "!NOT built"
+done
+GH_ATTEST_DOWN="HTTP 404: Not Found" run; expect "attestation lookup failing otherwise is 'NOT built'" 12 "was NOT built by publish on main"
+
+# malformed lines never pass: surplus tokens, missing tokens, null / option-like source sha
+attest "$N $DH $C3 77 1 EXTRA junk"; run; expect "extra trailing fields" 13 "points at a different image"
+attest "$N $DH $C3 77"; run; expect "too few fields" 13 "points at a different image"
+attest "$N ${DH}0 $C3 77 1"; run; expect "subject digest not 64 hex" 13 "points at a different image"
+for s in null -x --all; do
+  : > "$T/log"; attest "$N $DH $s 77 1"; run; expect "malformed source sha '$s'" 12 "was NOT built by publish on main" "!could not bring"
+  ! grep -q -e "$s" <(grep -v 'attestation verify' "$T/log") && ok "malformed source sha '$s' is never handed to gh" || bad "sha '$s' leaked into a call"
+done
+
+# signer workflow and ref are re-checked per attestation, not trusted to gh
+attest "$N $DH $C3 77 1"
+GH_ATTEST_SAN="https://github.com/AllenLarocque/agent-containers/.github/workflows/ci.yml@refs/heads/main" run
+expect "signer is another workflow file" 12 "was NOT built by publish on main"
+GH_ATTEST_SAN="https://github.com/AllenLarocque/agent-containers/.github/workflows/publish.yml@refs/heads/evil" run
+expect "signer identity at another ref" 12 "was NOT built by publish on main"
+GH_ATTEST_REF=refs/heads/evil run; expect "certificate source ref is not main" 12 "was NOT built by publish on main"
+GH_ATTEST_SAN=null run; expect "signer identity missing" 12 "was NOT built by publish on main"
+attest "$N $DH $C3 70 1" "$N $DH $C3 77 1"; GH_ATTEST_REF=refs/heads/evil run; expect "bad ref on every line beats older-build" 12 "was NOT built by publish on main"
+attest "$N $DH $C3 77 1"
+
+# an empty clone argument is not "the current directory"
+out=$(vi spades-gis '' 2>"$T/err"); rc=$?; err=$(<"$T/err")
+{ [ "$rc" = 2 ] && [ -z "$out" ] && [[ $err == *usage* ]]; } && ok "empty clone argument" || bad "empty clone argument (rc=$rc: $err)"
 
 GH_NOAUTH=1 run; expect "not logged in" 10 "gh auth login"
 mkdir -p "$T/nogh"; cp "$ROOT/tests/launcher/stubs/curl" "$T/nogh/curl"; ln -s "$(command -v git)" "$T/nogh/git"; ln -s "$(command -v dirname)" "$T/nogh/dirname"
