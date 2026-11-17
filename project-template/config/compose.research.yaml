@@ -9,7 +9,7 @@
 name: ${PROJECT:?set PROJECT in project.conf}
 services:
   agent:
-    image: ghcr.io/allenlarocque/spades-gis@sha256:REPLACE_WITH_DIGEST_FROM_digests.md
+    image: ghcr.io/allenlarocque/spades-gis@sha256:REPLACE_WITH_DIGEST
     user: "1000:1000"
     working_dir: /research          # agent-up's overlay sets /research/_general (persistent) and wins
     init: true

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Stub gh for scripts/verify-image.sh (tests copy it to a PATH dir). Every call is logged to $GH_LOG (one line, arguments joined by spaces).
+#   gh auth status [--hostname github.com]   exit 1 if $GH_NOAUTH is set; with $GH_BADHOST set (another configured host has a bad token),
+#                                       exit 1 unless the call names --hostname github.com; else 0.
+#   gh attestation verify oci://ghcr.io/allenlarocque/<img>@<digest> ...
+#       exit 1 + "HTTP 503" if $GH_DOWN; exit 1 + "no attestations found" unless all four verification flags are present with their exact values;
+#       else print every line of $GH_ATTEST whose first two fields are "<img> <digest>", minus those two fields (exit 1 if none).
+#       $GH_ATTEST lines: <img> <digest> <subject-name> <subject-sha256-hex> <source-sha> <run-id> <attempt>
+#       and appends " <san> <ref>" (the certificate's subjectAlternativeName and sourceRepositoryRef), defaulting to the correct publish.yml@refs/heads/main values; override with $GH_ATTEST_SAN / $GH_ATTEST_REF.
+#       $GH_ATTEST_DOWN=<text>: only this call fails (exit 1, <text> on stderr).
+#   gh api ... status=success ...      print the contents of $GH_LATEST_RUN ("<run-id> <attempt>"); exit 1 if $GH_DOWN.
+#   gh api ... status=in_progress|queued ...   print $GH_RUNNING (a count) if set, else 0; exit 1 if $GH_DOWN.
+[ -z "${GH_LOG:-}" ] || echo "$*" >> "$GH_LOG"
+case "${1:-} ${2:-}" in
+  "auth status")
+    [ -z "${GH_NOAUTH:-}" ] || { echo "You are not logged into any GitHub hosts. To log in, run: gh auth login" >&2; exit 1; }
+    if [ -n "${GH_BADHOST:-}" ] && [[ " $* " != *" --hostname github.com "* ]]; then
+      echo "ghe.example.com: X Failed to log in to ghe.example.com using token (GH_ENTERPRISE_TOKEN)" >&2; exit 1
+    fi
+    exit 0 ;;
+  "attestation verify")
+    [ -z "${GH_DOWN:-}" ] || { echo "HTTP 503: Service Unavailable" >&2; exit 1; }
+    [ -z "${GH_ATTEST_DOWN:-}" ] || { echo "$GH_ATTEST_DOWN" >&2; exit 1; }   # fails only this call (gh api still works)
+    args=" $* "
+    for want in " -R AllenLarocque/agent-containers " \
+                " --signer-workflow AllenLarocque/agent-containers/.github/workflows/publish.yml " \
+                " --source-ref refs/heads/main " \
+                " --deny-self-hosted-runners "; do
+      [[ $args == *"$want"* ]] || { echo "no attestations found" >&2; exit 1; }
+    done
+    ref=${3:-}; ref=${ref#oci://ghcr.io/allenlarocque/}; img=${ref%@*}; dig=${ref#*@}
+    out=$(awk -v i="$img" -v d="$dig" '$1==i && $2==d {$1=""; $2=""; sub(/^ +/, ""); print}' "${GH_ATTEST:-/dev/null}")
+    [ -n "$out" ] || { echo "no attestations found" >&2; exit 1; }
+    # the certificate fields the real --jq would add: signer workflow identity and source ref (overridable to test the launcher's own re-check)
+    printf '%s\n' "$out" | sed "s|\$| ${GH_ATTEST_SAN:-https://github.com/AllenLarocque/agent-containers/.github/workflows/publish.yml@refs/heads/main} ${GH_ATTEST_REF:-refs/heads/main}|" ;;
+  "api "*)
+    [ -z "${GH_DOWN:-}" ] || { echo "HTTP 503: Service Unavailable" >&2; exit 1; }
+    case " $* " in
+      *" status=success "*) cat "${GH_LATEST_RUN:-/dev/null}" ;;
+      *" status=in_progress "*|*" status=queued "*) echo "${GH_RUNNING:-0}" ;;
+      *) echo "stub gh: unexpected api call: $*" >&2; exit 1 ;;
+    esac ;;
+  *) echo "stub gh: unexpected call: $*" >&2; exit 1 ;;
+esac

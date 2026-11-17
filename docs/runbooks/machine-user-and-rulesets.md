@@ -6,14 +6,13 @@ GitHub UI paths below are as of 2026-10 and may move; if a label differs, look f
 > **Decisions for the owner to confirm** (made while writing these runbooks, not yet confirmed by you):
 > 1. The ruleset bypass list contains the **Repository admin** role, mode **"For pull requests only"**. You can merge your own PRs without a second approver, but nobody can push straight to `main`. The machine user has Write, so it is not a bypass actor and the gate binds it.
 > 2. **CODEOWNERS** (`* @AllenLarocque`) plus "Require review from Code Owners": only your approval counts.
-> 3. "Allow GitHub Actions to create and approve pull requests" is ON for `agent-containers` only, never for project repos.
-> 4. The machine-user token has **no** workflow permission by default.
-> 5. **Token type (to be verified by you on first setup):** GitHub fine-grained tokens generally cannot target repos owned by another *personal* account, even for a collaborator. So for personal repos the plan is a **classic PAT** on the machine user. If you find a fine-grained token CAN be created for your personal repos, prefer it. See step 3.
+> 3. The machine-user token has **no** workflow permission by default.
+> 4. **Token type (to be verified by you on first setup):** GitHub fine-grained tokens generally cannot target repos owned by another *personal* account, even for a collaborator. So for personal repos the plan is a **classic PAT** on the machine user. If you find a fine-grained token CAN be created for your personal repos, prefer it. See step 3.
 
 **Why this exists.** The agent pushes code and opens pull requests as a separate GitHub account (a "machine user"), not as you.
 A branch ruleset on `main` makes it impossible for that account to merge its own work: only you can approve and merge.
 
-For repos you admin, `agent-new protect` automates step 2.1 (the collaborator invite and its acceptance) and step 4 (the ruleset), and warns — without fixing — when step 2.2 (CODEOWNERS) or 2.3 (the Actions approval setting) is missing; `agent-new verify` automates step 6 (as the machine user, in a throwaway worktree or clone, leaving your checkout alone). Step 1 (the account) and step 3 (minting tokens) stay manual.
+For repos you admin, `agent-new protect` automates step 2.1 (the collaborator invite and its acceptance) and step 4 (the ruleset), and warns — without fixing — when step 2.2 is not done (CODEOWNERS is missing) or step 2.3 is not done (the Actions approval setting is ON; it must be OFF on every repo); `agent-new verify` automates step 6 (as the machine user, in a throwaway worktree or clone, leaving your checkout alone). Step 1 (the account) and step 3 (minting tokens) stay manual.
 
 Step 1 is done once. Steps 2 and 4 are done per repo. Step 3 is done once per project (a token reaches only the repos the machine user is invited to). Step 5 is a note on ordering. Step 6 is done per project after its container is up (see [new-project.md](new-project.md)). Step 7 is done once, for `agent-containers`.
 
@@ -39,8 +38,7 @@ Step 1 is done once. Steps 2 and 4 are done per repo. Step 3 is done once per pr
 
    *Why: with "Require review from Code Owners" (step 4), only an approval from you counts. Without it, any account that is allowed to approve could satisfy the "1 approval" rule.* (`agent-containers` already has this file.)
 3. Repo → Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve pull requests":
-   - **`agent-containers` ONLY: tick it and Save.** The `publish` workflow needs it to open the digests PR.
-   - **On every project repo it must stay OFF.** If it is on, a workflow can approve a PR. With Code Owners required (step 4) a bot approval cannot satisfy the gate, so this is defence in depth rather than the only barrier, but there is no reason to leave it on.
+   - **Leave it OFF on every repo, `agent-containers` included.** If it is on, a workflow can approve a PR. With Code Owners required (step 4) a bot approval cannot satisfy the gate, so this is defence in depth rather than the only barrier, but there is no reason to leave it on. (`publish` no longer opens a pull request, so it does not need it. If you turned it on for `agent-containers` earlier, turn it off.)
 
 ## 3. Create the machine user's GitHub token
 
@@ -117,16 +115,17 @@ gh pr merge --squash --admin        # 5. expected: FAILS (the machine user is no
 **Item 3** is GitHub behaviour regardless of rulesets (nobody can approve their own PR), so it is a sanity check, not proof of the ruleset.
 **Item 4** must be rejected because of the protected branch or repository rule. A "non-fast-forward" rejection is not the right reason: it means the branch merely diverged, and the rule was not what stopped you.
 
-Pass criteria: 2, 4 and 5 fail as described (and 3 is refused). If any succeeds, stop: the ruleset is not active, the account has too much access, or its bypass is misconfigured. Also confirm that on **project repos** the "Allow GitHub Actions to create and approve pull requests" setting is OFF (on `agent-containers` it is ON by design). With "Require review from Code Owners", a bot approval cannot satisfy the gate anyway, so that setting is defence in depth.
+Pass criteria: 2, 4 and 5 fail as described (and 3 is refused). If any succeeds, stop: the ruleset is not active, the account has too much access, or its bypass is misconfigured. Also confirm that the "Allow GitHub Actions to create and approve pull requests" setting is OFF. With "Require review from Code Owners", a bot approval cannot satisfy the gate anyway, so that setting is defence in depth.
 
 Finally, as **you** in the browser: open the PR, approve it, and merge it (or close it and delete the branch). Only your approval should count.
 
 ## 7. First publish of `agent-containers` (one-time)
 
-After the first run of the `publish` workflow:
+After the first run of the `publish` workflow on `main`:
 
 1. GitHub → your profile → Packages → `spades-base`, then `spades-gis`, `spades-research` (later `spades-bio`) → Package settings. Confirm the package is **linked to the `agent-containers` repo**, then Danger Zone → **Change visibility → Public**. *Why: public images pull without credentials.*
-2. Open the auto-created `chore/digests-*` PR and confirm a `build-test` run appears as a check on it. *Why: PRs opened by Actions do not trigger workflows by themselves; `publish` dispatches CI explicitly, and this proves it worked.* If it does not appear, **stop and decide**: the fallback is a GitHub App token, which would be a documented exception to the "no extra credentials" rule.
-3. Review and merge that PR yourself. Copy the digest from `digests.md` into projects as in [new-project.md](new-project.md).
+2. Run `agent-up update <project>` on a project. *Why: it asks ghcr.io anonymously for the digest, so it also proves the packages are public, and it checks the build attestation `publish` attached.*
 
-**A package added later** (e.g. `spades-research`): its first `chore/digests-*` PR shows a red `build-test`, because CI checks digests anonymously and a new package starts private. Make it public (step 1), re-run the failed job (or `gh workflow run ci.yml --ref chore/digests-<tag>`), then merge.
+**A package added later** (e.g. `spades-research`): do step 1 for it after the first `publish` run that builds it. Until it is public, `agent-up update` cannot read its digest and skips the project.
+
+**The host needs `gh` logged in** (`gh auth login`, any account that can read the public repo), because `agent-up update` and `agent-new` verify the build attestation with it.

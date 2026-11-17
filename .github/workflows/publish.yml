@@ -2,20 +2,24 @@ name: publish
 on:
   push:
     branches: [main]
-    paths: ["images/**", "scripts/build-publish.sh", "scripts/render-digests.sh", ".github/workflows/publish.yml"]
+    paths: ["images/**", "scripts/build-publish.sh", ".github/workflows/publish.yml"]  # keep equal to PUBLISH_PATHS in scripts/verify-image.sh (tests/ci/test-publish-paths.sh)
   schedule:
-    - cron: "17 9 * * 1"        # Mondays: rebuild + test for OS patches; no digests PR (they ride with the next bundle)
+    - cron: "17 9 * * 1"        # Mondays: rebuild for OS patches; does everything a push does (build, attest, promote latest)
   workflow_dispatch:
 permissions:
-  contents: write
-  packages: write
-  pull-requests: write
-  actions: write          # to dispatch ci.yml on the digests PR branch
+  contents: read
+  packages: write         # push the images and promote latest
+  id-token: write         # sign the provenance attestations (OIDC)
+  attestations: write     # store them
 concurrency:
   group: publish
   cancel-in-progress: false
 jobs:
+  # scripts/verify-image.sh trusts an image only for this workflow's identity on refs/heads/main. So never add a
+  # workflow_call trigger, a shared layer cache (registry or Actions cache), or continue-on-error / if: always()
+  # between build and promote: each would let something other than this job's own build reach an attested latest.
   publish:
+    if: github.ref == 'refs/heads/main'   # only main's builds may be attested and promoted (a dispatch from a branch is skipped)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -33,24 +37,39 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: tag
         run: echo "tag=$(date -u +%Y.%m.%d)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-      - name: Build, push, smoke-by-digest, promote latest, render digests.md
+      # Build and smoke-test, then attest each digest, and only then promote latest: a failed attestation
+      # stops the job before latest moves. Digests come from the build itself, never from a tag.
+      - name: Build, push by tag, smoke-test by digest
+        id: build
         env:
           TAG: ${{ steps.tag.outputs.tag }}
-        run: scripts/build-publish.sh ghcr.io/allenlarocque "$TAG" digests.md
-      # The Monday OS-patch rebuild builds and tests only; its patches ride along with the next update bundle.
-      - uses: peter-evans/create-pull-request@v7
-        id: cpr
-        if: github.event_name != 'schedule'
+        run: |
+          set -euo pipefail
+          scripts/build-publish.sh build ghcr.io/allenlarocque "$TAG" digests.txt
+          for x in base gis bio research; do
+            d=$(awk -v n="spades-$x" '$1 == n {print $2}' digests.txt)
+            [[ $d =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no valid digest for spades-$x in digests.txt ('$d')"; exit 1; }
+            echo "$x=$d" >> "$GITHUB_OUTPUT"
+          done
+      - name: Attest spades-base
+        uses: actions/attest-build-provenance@v4
         with:
-          branch: chore/digests-${{ steps.tag.outputs.tag }}
-          title: "chore: image digests ${{ steps.tag.outputs.tag }}"
-          commit-message: "chore: image digests ${{ steps.tag.outputs.tag }}"
-          add-paths: digests.md
-          body: "Published by the `publish` workflow. Merge, then bump projects when convenient."
-      # PRs created with GITHUB_TOKEN do not trigger pull_request workflows, but main requires build-test.
-      # Dispatch ci.yml on the PR branch: its build-test check reports on the branch head SHA (= PR head).
-      - name: Run CI on the digests PR branch
-        if: steps.cpr.outputs.pull-request-number
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh workflow run ci.yml --ref "${{ steps.cpr.outputs.pull-request-branch }}"
+          subject-name: ghcr.io/allenlarocque/spades-base
+          subject-digest: ${{ steps.build.outputs.base }}
+      - name: Attest spades-gis
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/allenlarocque/spades-gis
+          subject-digest: ${{ steps.build.outputs.gis }}
+      - name: Attest spades-bio
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/allenlarocque/spades-bio
+          subject-digest: ${{ steps.build.outputs.bio }}
+      - name: Attest spades-research
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/allenlarocque/spades-research
+          subject-digest: ${{ steps.build.outputs.research }}
+      - name: Promote latest (only after all four attestations)
+        run: scripts/build-publish.sh promote ghcr.io/allenlarocque digests.txt

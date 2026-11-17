@@ -7,6 +7,8 @@ permissions).
 - Linux or WSL2 (GNU coreutils);
 - Docker;
 - the 1Password CLI (`op`);
+- the GitHub CLI (`gh`), logged in with `gh auth login` (any account that can read the public
+  repo): `agent-up update` and `agent-new` use it to verify the image they pin;
 - a clone of this repo at `~/GitHub/agent-containers`. The commands below assume
   `~/GitHub/agent-containers/bin` is on your `PATH`; otherwise type the full path.
 
@@ -38,10 +40,11 @@ MACHINE_USER=<machine-user-login>
    - It adds `.github/CODEOWNERS`, `.github/workflows/gitleaks.yml` and `.gitignore` to the
      project wherever they're missing.
 
-2. **Set the image digest.** In `~/.config/agent-containers/<project>/compose.yaml`, replace
-   `REPLACE_WITH_DIGEST_FROM_digests.md` with the digest from `agent-containers/digests.md` (the
-   matching `spades-gis` or `spades-bio` row). `agent-up up` refuses to run until it's a real
-   digest.
+2. **Set the image digest.** Run `agent-up update <project>`. It replaces the placeholder
+   (`REPLACE_WITH_DIGEST`) in `~/.config/agent-containers/<project>/compose.yaml` with the digest
+   `latest` points to, but only after checking that `publish` built it on `main`. If `publish` has
+   not finished yet, it says so and changes nothing: run it again after the run is green.
+   `agent-up up` refuses to run until it's a real digest.
 3. **Run the vault runbook** (when storing the GitHub token with `read -rs`, run that line ON ITS OWN: pasted together with the next line, `read` swallows that line as the "token"): [1password-project-vault.md](1password-project-vault.md) (vault,
    service account, host token). `project.env` already names the vault `agent-<project>`.
 4. **Machine user, "set up" half (before `agent-up up`):**
