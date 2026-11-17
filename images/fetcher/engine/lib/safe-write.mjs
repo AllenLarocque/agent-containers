@@ -1,13 +1,21 @@
-// Writes into a folder the research agent can also write to (and can plant symbolic
-// links in). Rules: the root is resolved ONCE (realpath, so the root itself may be
-// reached through a link, e.g. a mount path); below it, every existing component is
-// checked with lstat and a link anywhere is an error; the parent is re-resolved and
-// must be exactly where the walk says it is; files are created with O_EXCL|O_NOFOLLOW
-// in the target directory and renamed into place (rename replaces a link, never
-// follows it).
-// Residual: a process that swaps a directory for a link between the final check and
-// the open can still win a race. Node has no openat; the files written are PDFs and
-// text, and the fetcher runs one write at a time.
+// Writes into a folder the research agent (another container on the same bind mount)
+// can also write to at any moment, and can plant symbolic links in.
+//
+// LINUX ONLY by design: directories are walked with held descriptors and every later
+// step goes through /proc/self/fd/<dirfd>/<name>, so no step re-resolves a path through
+// components an attacker can swap.
+//   1. The root is resolved once (realpath, so the root itself may be reached through a
+//      link, e.g. a mount path) and opened O_DIRECTORY|O_NOFOLLOW.
+//   2. Each component is opened relative to the previous directory descriptor with
+//      O_DIRECTORY|O_NOFOLLOW (created first with mkdir when missing). A link, or a
+//      non-directory, is an EscapeError. O_NOFOLLOW applies to <name>; <dirfd> is a held
+//      descriptor, not a path lookup.
+//   3. The temp file (O_EXCL|O_NOFOLLOW) and the final rename both go through the last
+//      directory descriptor, so they land in the directory that was opened, even if that
+//      directory is renamed or replaced by a link afterwards. rename replaces a link
+//      sitting at the final name; it never follows it.
+// Residual: none known inside the root. The root's own ancestors are resolved once at
+// the start by realpath; they are the owner's mount path, not attacker-writable.
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -19,7 +27,8 @@ export class EscapeError extends Error {
   }
 }
 
-const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW, O_RDONLY } = fs.constants;
+const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW, O_RDONLY, O_DIRECTORY } = fs.constants;
+const viaFd = (fd, name) => `/proc/self/fd/${fd}/${name}`;
 
 function parts(relPath) {
   if (typeof relPath !== 'string' || relPath === '' || relPath.includes('\0') || path.isAbsolute(relPath))
@@ -29,62 +38,81 @@ function parts(relPath) {
   return segs;
 }
 
-// Returns { dir, name }: dir is an existing real directory inside the root.
-function prepare(root, relPath) {
-  const segs = parts(relPath);
-  const name = segs.pop();
-  const realRoot = fs.realpathSync(root);
-  if (!fs.statSync(realRoot).isDirectory()) throw new EscapeError('root is not a directory');
-  let dir = realRoot;
-  for (const seg of segs) {
-    const next = path.join(dir, seg);
-    let st = fs.lstatSync(next, { throwIfNoEntry: false });
-    if (!st) {
-      try { fs.mkdirSync(next, { mode: 0o755 }); } catch (e) { if (e.code !== 'EEXIST') throw e; }
-      st = fs.lstatSync(next);
-    }
-    if (st.isSymbolicLink() || !st.isDirectory()) throw new EscapeError(`not a plain directory: ${seg}`);
-    dir = next;
-  }
-  if (fs.realpathSync(dir) !== dir || !(dir === realRoot || dir.startsWith(realRoot + path.sep)))
-    throw new EscapeError('resolved outside the root');
-  const final = path.join(dir, name);
-  const st = fs.lstatSync(final, { throwIfNoEntry: false });
-  if (st && !st.isFile()) throw new EscapeError(`not a plain file: ${name}`);
-  return { dir, final };
-}
-
-function place(root, relPath, fill) {
-  const { dir, final } = prepare(root, relPath);
-  const tmp = path.join(dir, `.tmp-${randomBytes(8).toString('hex')}`);
-  const fd = fs.openSync(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o644);
+function openDirAt(parentFd, name, held) {
+  const p = viaFd(parentFd, name);
+  let created = false;
+  try { fs.mkdirSync(p, { mode: 0o755 }); created = true; } catch (e) { if (e.code !== 'EEXIST') throw e; }
+  let fd;
   try {
-    fs.fchmodSync(fd, 0o644);
-    try { fill(fd); } finally { fs.closeSync(fd); }
-    fs.renameSync(tmp, final);
+    fd = fs.openSync(p, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
   } catch (e) {
-    fs.rmSync(tmp, { force: true });
+    if (e.code === 'ELOOP' || e.code === 'ENOTDIR') throw new EscapeError(`not a plain directory: ${name}`);
     throw e;
   }
+  held.push(fd);
+  if (created) fs.fchmodSync(fd, 0o755);   // exactly 755 whatever the umask
+  return fd;
 }
 
-export function writeFileInside(root, relPath, data) {
-  place(root, relPath, (fd) => fs.writeSync(fd, typeof data === 'string' ? Buffer.from(data) : data));
+// Short writes are looped over; a zero-byte write is an error rather than a spin.
+function writeAll(fd, buf, write) {
+  for (let off = 0; off < buf.length;) {
+    const n = write(fd, buf, off, buf.length - off);
+    if (!(n > 0)) throw new Error('write made no progress');
+    off += n;
+  }
+}
+
+// opts (tests only): write(fd, buf, off, len) replaces fs.writeSync; beforeCreate()
+// runs after the parent directory is opened and before the temp file is created.
+function place(root, relPath, fill, opts) {
+  const segs = parts(relPath);
+  const name = segs.pop();
+  const held = [];
+  let tmp;
+  try {
+    const rootFd = fs.openSync(fs.realpathSync(root), O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    held.push(rootFd);
+    let dir = rootFd;
+    for (const seg of segs) dir = openDirAt(dir, seg, held);
+    opts.beforeCreate?.();
+    const st = fs.lstatSync(viaFd(dir, name), { throwIfNoEntry: false });
+    if (st && !st.isFile()) throw new EscapeError(`not a plain file: ${name}`);
+    tmp = viaFd(dir, `.tmp-${randomBytes(8).toString('hex')}`);
+    const fd = fs.openSync(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o644);
+    try {
+      fs.fchmodSync(fd, 0o644);
+      fill(fd, opts.write ?? fs.writeSync);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmp, viaFd(dir, name));
+    tmp = undefined;
+  } catch (e) {
+    if (tmp) fs.rmSync(tmp, { force: true });
+    throw e;
+  } finally {
+    for (const fd of held) fs.closeSync(fd);
+  }
+}
+
+export function writeFileInside(root, relPath, data, opts = {}) {
+  const buf = typeof data === 'string' ? Buffer.from(data) : data;
+  place(root, relPath, (fd, write) => writeAll(fd, buf, write), opts);
 }
 
 // Copies tmpPath (a regular file, not a link) into place, then removes it. A copy
 // rather than a bare rename because the download folder is usually another filesystem.
-export function moveInside(tmpPath, root, relPath) {
+// On any failure nothing is left in the destination and the source is kept.
+export function moveInside(tmpPath, root, relPath, opts = {}) {
   let src;
   try {
     src = fs.openSync(tmpPath, O_RDONLY | O_NOFOLLOW);
     if (!fs.fstatSync(src).isFile()) throw new EscapeError('source is not a plain file');
-    place(root, relPath, (fd) => {
+    place(root, relPath, (fd, write) => {
       const buf = Buffer.allocUnsafe(1 << 20);
-      for (let n; (n = fs.readSync(src, buf, 0, buf.length, null)) > 0;) {
-        for (let off = 0; off < n;) off += fs.writeSync(fd, buf, off, n - off);
-      }
-    });
+      for (let n; (n = fs.readSync(src, buf, 0, buf.length, null)) > 0;) writeAll(fd, buf.subarray(0, n), write);
+    }, opts);
   } catch (e) {
     if (e.code === 'ELOOP') throw new EscapeError('source is a symbolic link');
     throw e;

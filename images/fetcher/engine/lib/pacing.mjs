@@ -1,7 +1,10 @@
 // Politeness limits, persisted so a restart does not reset them. Counts are per UTC
 // day; the gaps use the last record times. `now()` returns milliseconds.
+// The state file lives on a volume only the fetcher mounts, so reading it with plain
+// fs is fine; it is still written with the same no-follow temp+rename as everything else.
 import fs from 'node:fs';
 import path from 'node:path';
+import { writeFileInside } from './safe-write.mjs';
 
 export const DEFAULT_CAPS = Object.freeze({
   gapMs: 25000, hostGapMs: 60000, perHost: 30, perDay: 100, libraryPerDay: 20,
@@ -40,8 +43,9 @@ export class Pacer {
   }
 
   #rollover() {
+    // Only a LATER UTC date rolls the day over: a clock stepping back keeps the counts.
     const today = day(this.now());
-    if (this.state.date !== today) {
+    if (today > this.state.date) {
       this.state.date = today;
       this.state.total = 0;
       this.state.library = 0;
@@ -55,10 +59,9 @@ export class Pacer {
     const lastHost = Object.fromEntries([...s.lastHost].filter(([, t]) => now - t < this.caps.hostGapMs));
     const out = { date: s.date, total: s.total, library: s.library, hosts: Object.fromEntries(s.hosts),
                   lastAny: s.lastAny, lastHost };
-    fs.mkdirSync(path.dirname(this.statePath), { recursive: true });
-    const tmp = `${this.statePath}.tmp-${process.pid}`;
-    fs.writeFileSync(tmp, JSON.stringify(out));
-    fs.renameSync(tmp, this.statePath);
+    const dir = path.dirname(this.statePath);
+    fs.mkdirSync(dir, { recursive: true });
+    writeFileInside(dir, path.basename(this.statePath), JSON.stringify(out));
   }
 
   check(host, library) {
@@ -71,10 +74,11 @@ export class Pacer {
 
   waitMs(host) {
     const now = this.now();
-    const anyWait = this.state.lastAny ? this.caps.gapMs - (now - this.state.lastAny) : 0;
-    const last = this.state.lastHost.get(host);
-    const hostWait = last === undefined ? 0 : this.caps.hostGapMs - (now - last);
-    return Math.max(0, anyWait, hostWait);
+    // A stored time in the future (bad clock, bad file) counts as now, and no wait ever
+    // exceeds its gap.
+    const left = (last, gap) => (last === undefined ? 0 : Math.min(gap, Math.max(0, gap - (now - Math.min(last, now)))));
+    return Math.max(left(this.state.lastAny || undefined, this.caps.gapMs),
+                    left(this.state.lastHost.get(host), this.caps.hostGapMs));
   }
 
   record(host, library) {

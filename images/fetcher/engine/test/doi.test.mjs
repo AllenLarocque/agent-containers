@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseDoi, folderName } from '../lib/doi.mjs';
+import { parseDoi, folderName, DOI_PATTERN } from '../lib/doi.mjs';
 
 test('parseDoi trims and lower-cases', () => {
   assert.equal(parseDoi(' 10.1111/MEC.15060 '), '10.1111/mec.15060');
@@ -45,4 +45,9 @@ test('folderName', () => {
   assert.match(long, /^doi_[a-z0-9_]{1,100}_[0-9a-f]{8}$/);
   assert.equal(long.length, 'doi_'.length + 100 + 1 + 8);
   assert.match(folderName('10.1002/(sici)x<y>[z];a:b/c'), /^doi_[a-z0-9_]+_[0-9a-f]{8}$/);
+});
+
+test('folderName hash and readable part agree on case; DOI_PATTERN is exported', () => {
+  assert.equal(folderName('10.1111/ABC'), folderName('10.1111/abc'));
+  assert.ok(DOI_PATTERN instanceof RegExp);
 });

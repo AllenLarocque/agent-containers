@@ -135,3 +135,102 @@ test('moveInside refuses a symlink as the source', () => {
   assert.throws(() => moveInside(src, root, 'p.pdf'), EscapeError);
   assert.equal(fs.existsSync(path.join(root, 'p.pdf')), false);
 });
+
+// ---- fix round 1 ----
+const shortWriter = (max) => (fd, buf, off, len) => fs.writeSync(fd, buf, off, Math.min(len, max));
+const noTemps = (d) => assert.deepEqual(listing(d).filter((n) => n.startsWith('.tmp-')), []);
+
+test('short writes are looped: the whole content lands', () => {
+  const { root } = sandbox();
+  const data = 'x'.repeat(1000);
+  writeFileInside(root, 'a.txt', data, { write: shortWriter(7) });
+  assert.equal(fs.readFileSync(path.join(root, 'a.txt'), 'utf8'), data);
+});
+
+test('a write error leaves neither the final file nor a temp file, and keeps an older file', () => {
+  const { root } = sandbox();
+  writeFileInside(root, 'a.txt', 'old');
+  let calls = 0;
+  const failing = (fd, buf, off, len) => { if (++calls === 2) throw new Error('ENOSPC'); return fs.writeSync(fd, buf, off, Math.min(len, 3)); };
+  assert.throws(() => writeFileInside(root, 'a.txt', 'new content', { write: failing }), /ENOSPC/);
+  assert.equal(fs.readFileSync(path.join(root, 'a.txt'), 'utf8'), 'old');
+  writeFileInside(root, 'd/b.txt', 'ok');
+  calls = 0;
+  assert.throws(() => writeFileInside(root, 'd/c.txt', 'new content', { write: failing }), /ENOSPC/);
+  assert.equal(fs.existsSync(path.join(root, 'd/c.txt')), false);
+  noTemps(root); noTemps(path.join(root, 'd'));
+});
+
+test('a zero-byte write is an error, not a spin', () => {
+  const { root } = sandbox();
+  assert.throws(() => writeFileInside(root, 'a.txt', 'abc', { write: () => 0 }), /no progress/);
+  assert.equal(fs.existsSync(path.join(root, 'a.txt')), false);
+  noTemps(root);
+});
+
+test('moveInside: a failure mid-copy leaves no final file and no temp, and keeps the source', () => {
+  const { base, root } = sandbox();
+  const src = path.join(base, 'dl.tmp');
+  fs.writeFileSync(src, 'abcdefghij');
+  let calls = 0;
+  const failing = (fd, buf, off, len) => { if (++calls === 2) throw new Error('EIO'); return fs.writeSync(fd, buf, off, Math.min(len, 3)); };
+  assert.throws(() => moveInside(src, root, 'p/paper.pdf', { write: failing }), /EIO/);
+  assert.equal(fs.existsSync(path.join(root, 'p/paper.pdf')), false);
+  noTemps(path.join(root, 'p'));
+  assert.equal(fs.readFileSync(src, 'utf8'), 'abcdefghij');
+});
+
+test('created directories are exactly 755 under umask 077; the file is 644', () => {
+  const { root } = sandbox();
+  const old = process.umask(0o077);
+  try { writeFileInside(root, 'a/b/c.txt', 'x'); } finally { process.umask(old); }
+  assert.equal(fs.statSync(path.join(root, 'a')).mode & 0o777, 0o755);
+  assert.equal(fs.statSync(path.join(root, 'a/b')).mode & 0o777, 0o755);
+  assert.equal(fs.statSync(path.join(root, 'a/b/c.txt')).mode & 0o777, 0o644);
+});
+
+test('a verified directory swapped for a symlink between two writes is refused', () => {
+  const { root, outside } = sandbox();
+  writeFileInside(root, 'x/one.txt', '1');
+  fs.renameSync(path.join(root, 'x'), path.join(root, 'x.moved'));
+  fs.symlinkSync(outside, path.join(root, 'x'));
+  assert.throws(() => writeFileInside(root, 'x/two.txt', '2'), EscapeError);
+  assert.deepEqual(listing(outside), []);
+});
+
+test('race: directory swapped for a link after it was opened -> write stays in the opened directory', () => {
+  const { root, outside } = sandbox();
+  const swap = () => {
+    fs.renameSync(path.join(root, 'x'), path.join(root, 'x.moved'));
+    fs.symlinkSync(outside, path.join(root, 'x'));
+  };
+  writeFileInside(root, 'x/a.txt', 'warm');
+  writeFileInside(root, 'x/b.txt', 'raced', { beforeCreate: swap });
+  assert.deepEqual(listing(outside), []);
+  assert.equal(fs.readFileSync(path.join(root, 'x.moved', 'b.txt'), 'utf8'), 'raced');
+  noTemps(path.join(root, 'x.moved'));
+});
+
+test('race: same swap during moveInside never lands at the link target', () => {
+  const { base, root, outside } = sandbox();
+  writeFileInside(root, 'x/a.txt', 'warm');
+  const src = path.join(base, 'dl.tmp');
+  fs.writeFileSync(src, '%PDF-');
+  moveInside(src, root, 'x/p.pdf', { beforeCreate: () => {
+    fs.renameSync(path.join(root, 'x'), path.join(root, 'x.moved'));
+    fs.symlinkSync(outside, path.join(root, 'x'));
+  } });
+  assert.deepEqual(listing(outside), []);
+  assert.equal(fs.readFileSync(path.join(root, 'x.moved', 'p.pdf'), 'utf8'), '%PDF-');
+});
+
+test('no descriptor is leaked on refusals', () => {
+  const { root, outside } = sandbox();
+  fs.symlinkSync(outside, path.join(root, 'link'));
+  const before = fs.readdirSync('/proc/self/fd').length;
+  for (let i = 0; i < 50; i++) {
+    assert.throws(() => writeFileInside(root, 'link/z.txt', 'no'), EscapeError);
+    assert.throws(() => writeFileInside(root, 'q/r.txt', 'x', { write: () => { throw new Error('x'); } }));
+  }
+  assert.equal(fs.readdirSync('/proc/self/fd').length, before);
+});

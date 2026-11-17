@@ -56,3 +56,21 @@ test('loadConfig does not mutate shared defaults between calls', () => {
   assert.deepEqual(b.loginHosts, ['login.openathens.net', 'go.openathens.net']);
   assert.equal(a.loginHosts.length, 3);
 });
+
+// ---- fix round 1 ----
+test('load errors never contain a configured value', () => {
+  for (const t of ['LIBRARY_PREFIX=https://secret-uni.example.ac.uk/r?token=abc\nBOGUS=1',
+                   'LIBRARY_PREFIX=http://secret-uni.example.ac.uk/r',
+                   'LOGIN_HOSTS=SECRET-UNI.example',
+                   'PER_DAY=secret-uni']) {
+    assert.throws(() => loadConfig(cfgFile(t)), (e) => !/secret-uni|token=abc/.test(e.message), t);
+  }
+});
+
+test('isLoginHost: case-insensitive, strict', () => {
+  const c = loadConfig(cfgFile(''));
+  for (const h of ['api-1234.duosecurity.com', 'API-1234.DUOSECURITY.COM', 'Go.OpenAthens.Net']) assert.equal(isLoginHost(c, h), true, h);
+  for (const h of ['evilduosecurity.com', 'duosecurity.com.evil.net', 'a..duosecurity.com', '-', 'x y.duosecurity.com', 'a.duosecurity.com\n'])
+    assert.equal(isLoginHost(c, h), false, h);
+  assert.equal(isLoginHost({ loginHosts: ['-'] }, '-'), false);
+});

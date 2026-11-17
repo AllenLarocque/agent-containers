@@ -122,3 +122,28 @@ test('caps are overridable', () => {
   p.record('a.com', false);
   assert.equal(p.check('a.com', false), 'skipped:host-cap');
 });
+
+// ---- fix round 1 ----
+test('a stored lastAny far in the future never stalls beyond the gap', () => {
+  const { statePath, make } = setup();
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  const future = T0 + 365 * DAY;
+  fs.writeFileSync(statePath, JSON.stringify({ date: '2026-11-16', total: 1, library: 0, hosts: { 'a.com': 1 },
+    lastAny: future, lastHost: { 'a.com': future } }));
+  const q = make();
+  assert.ok(q.waitMs('a.com') <= 60000);
+  assert.ok(q.waitMs('b.com') <= 25000);
+});
+
+test('clock stepping back across UTC midnight keeps the day\'s counts', () => {
+  const { p, clock } = setup();
+  clock.t = Date.UTC(2026, 10, 17, 0, 0, 10);
+  for (let i = 0; i < 30; i++) p.record('a.com', false);
+  clock.t = Date.UTC(2026, 10, 16, 23, 59, 50);
+  assert.equal(p.check('a.com', false), 'skipped:host-cap');
+  assert.ok(p.waitMs('a.com') <= 60000);
+  clock.t = Date.UTC(2026, 10, 17, 0, 1, 0);
+  assert.equal(p.check('a.com', false), 'skipped:host-cap');
+  clock.t = Date.UTC(2026, 10, 18, 0, 0, 1);
+  assert.equal(p.check('a.com', false), null);
+});

@@ -1,5 +1,6 @@
 // KEY=value config file. Strict: unknown keys, duplicates and malformed values are
-// errors, because these values decide where a session-holding browser goes.
+// errors, because these values decide where a session-holding browser goes. Error
+// messages never contain a value (LIBRARY_PREFIX names the owner's institution).
 import fs from 'node:fs';
 
 const HOST = /^[a-z0-9.-]{1,253}$/;
@@ -7,14 +8,14 @@ const DEFAULT_LOGIN_HOSTS = ['login.openathens.net', 'go.openathens.net'];
 const LOGIN_SUFFIXES = ['.duosecurity.com'];
 
 const urlOk = (v) => { try { const u = new URL(v); return u.protocol === 'https:' && !/\s/.test(v); } catch { return false; } };
-const num = (v) => { if (!/^[0-9]{1,9}$/.test(v)) throw new Error(`not a whole number: ${JSON.stringify(v)}`); return Number(v); };
+const num = (v) => { if (!/^[0-9]{1,9}$/.test(v)) throw new Error('not a whole number'); return Number(v); };
 
 const KEYS = {
   RESOLVER: (v, c) => { if (!urlOk(v) || !v.endsWith('/')) throw new Error('RESOLVER must be an https URL ending in /'); c.resolver = v; },
   LIBRARY_PREFIX: (v, c) => { if (!urlOk(v)) throw new Error('LIBRARY_PREFIX must be an https URL'); c.libraryPrefix = v; },
   LOGIN_HOSTS: (v, c) => {
     for (const h of v.split(',').map((s) => s.trim()).filter(Boolean)) {
-      if (!HOST.test(h)) throw new Error(`bad host in LOGIN_HOSTS: ${JSON.stringify(h)}`);
+      if (!HOST.test(h)) throw new Error('bad host in LOGIN_HOSTS');
       c.loginHosts.push(h);
     }
   },
@@ -56,5 +57,7 @@ export function loadConfig(path) {
 // Exact login-host names, or a name under a login suffix (.duosecurity.com).
 export function isLoginHost(cfg, host) {
   if (typeof host !== 'string') return false;
-  return cfg.loginHosts.includes(host) || LOGIN_SUFFIXES.some((s) => host.endsWith(s) && host.length > s.length);
+  const h = host.toLowerCase();
+  if (!HOST.test(h) || h.includes('..') || h === '-') return false;
+  return cfg.loginHosts.includes(h) || LOGIN_SUFFIXES.some((s) => h.endsWith(s) && h.length > s.length);
 }

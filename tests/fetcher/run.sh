@@ -6,8 +6,13 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 engine="$root/images/fetcher/engine"
-# Keep in step with "playwright" in images/fetcher/engine/package.json.
-image="mcr.microsoft.com/playwright:v1.65.1-noble"
+# The Playwright version has one source: the pinned line in package.json.
+pw="$(sed -n 's/^ *"playwright": *"\([0-9][0-9.]*\)".*/\1/p' "$engine/package.json")"
+if [ -z "$pw" ]; then
+  echo "run.sh: cannot read the pinned playwright version from $engine/package.json" >&2
+  exit 1
+fi
+image="mcr.microsoft.com/playwright:v${pw}-noble"
 
 common=(--rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$engine:/work" -w /work)
 
