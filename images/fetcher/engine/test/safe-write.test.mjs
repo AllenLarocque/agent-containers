@@ -234,3 +234,18 @@ test('no descriptor is leaked on refusals', () => {
   }
   assert.equal(fs.readdirSync('/proc/self/fd').length, before);
 });
+
+// ---- Task 2 follow-ups ----
+test('a cleanup failure never masks the original error', () => {
+  const { root } = sandbox();
+  // During the write, swap the temp name for a non-empty directory so rmSync(tmp) throws.
+  const swapTemp = () => {
+    const t = listing(root).find((n) => n.startsWith('.tmp-'));
+    fs.renameSync(path.join(root, t), path.join(root, 'moved-away'));
+    fs.mkdirSync(path.join(root, t));
+    fs.writeFileSync(path.join(root, t, 'f'), 'x');
+    throw new Error('ENOSPC original');
+  };
+  assert.throws(() => writeFileInside(root, 'a.txt', 'abc', { write: swapTemp }), /ENOSPC original/);
+  assert.equal(fs.existsSync(path.join(root, 'a.txt')), false);
+});

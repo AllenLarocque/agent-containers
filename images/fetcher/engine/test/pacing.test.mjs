@@ -147,3 +147,27 @@ test('clock stepping back across UTC midnight keeps the day\'s counts', () => {
   clock.t = Date.UTC(2026, 10, 18, 0, 0, 1);
   assert.equal(p.check('a.com', false), null);
 });
+
+// ---- Task 2 follow-ups ----
+test('a stored date that is not a real calendar date is corrupt: state resets', () => {
+  const { statePath, make } = setup();
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  for (const date of ['9999-99-99', '2026-02-30', '2026-13-01']) {
+    fs.writeFileSync(statePath, JSON.stringify({ date, total: 100, library: 20, hosts: { 'a.com': 30 },
+      lastAny: 0, lastHost: {} }));
+    const q = make();
+    assert.equal(q.check('a.com', true), null, date);
+  }
+});
+
+test('a stored date more than one day ahead is corrupt; one day ahead is kept', () => {
+  const { statePath, make } = setup();
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  const full = (date) => JSON.stringify({ date, total: 100, library: 0, hosts: {}, lastAny: 0, lastHost: {} });
+  fs.writeFileSync(statePath, full('2026-11-18'));
+  assert.equal(make().check('a.com', false), null);
+  fs.writeFileSync(statePath, full('2027-03-01'));
+  assert.equal(make().check('a.com', false), null);
+  fs.writeFileSync(statePath, full('2026-11-17'));
+  assert.equal(make().check('a.com', false), 'skipped:daily-cap');
+});

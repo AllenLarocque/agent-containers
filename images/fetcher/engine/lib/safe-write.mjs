@@ -16,6 +16,12 @@
 //      sitting at the final name; it never follows it.
 // Residual: none known inside the root. The root's own ancestors are resolved once at
 // the start by realpath; they are the owner's mount path, not attacker-writable.
+//
+// What this does NOT guarantee: the research container runs as the same uid and has
+// read-write access to the same folder, so it can replace or delete any file there at
+// any time, including right after we write it. The guarantee is only that the
+// FETCHER's own writes never land outside the root or through a link; it is not that
+// the bytes found later at a final name are the ones the fetcher wrote.
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -89,7 +95,9 @@ function place(root, relPath, fill, opts) {
     fs.renameSync(tmp, viaFd(dir, name));
     tmp = undefined;
   } catch (e) {
-    if (tmp) fs.rmSync(tmp, { force: true });
+    // Best effort: a cleanup failure (e.g. the temp name was swapped for a directory)
+    // must never replace the error that got us here.
+    if (tmp) { try { fs.rmSync(tmp, { force: true }); } catch { /* keep e */ } }
     throw e;
   } finally {
     for (const fd of held) fs.closeSync(fd);

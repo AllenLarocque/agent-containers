@@ -13,6 +13,12 @@ export const DEFAULT_CAPS = Object.freeze({
 const day = (ms) => new Date(ms).toISOString().slice(0, 10);
 const count = (v) => Number.isSafeInteger(v) && v >= 0;
 const time = (v) => Number.isFinite(v) && v >= 0;
+// A real calendar date (round-trips through Date) and at most one day ahead of today, so
+// a clock that once ran fast cannot leave a far-future date that caps us for months.
+const plausibleDate = (v, nowMs) =>
+  typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) &&
+  (() => { const d = new Date(`${v}T00:00:00Z`); return !Number.isNaN(d.getTime()) && day(d.getTime()) === v; })() &&
+  v <= day(nowMs + 86400000);
 
 export class Pacer {
   constructor({ statePath, now = Date.now, caps = {} }) {
@@ -31,7 +37,7 @@ export class Pacer {
     try {
       const j = JSON.parse(fs.readFileSync(this.statePath, 'utf8'));
       const isObj = (o) => o !== null && typeof o === 'object' && !Array.isArray(o);
-      if (!isObj(j) || !/^\d{4}-\d{2}-\d{2}$/.test(j.date) || !count(j.total) || !count(j.library) ||
+      if (!isObj(j) || !plausibleDate(j.date, this.now()) || !count(j.total) || !count(j.library) ||
           !time(j.lastAny) || !isObj(j.hosts) || !isObj(j.lastHost)) return this.#empty();
       const hosts = new Map(Object.entries(j.hosts));
       const lastHost = new Map(Object.entries(j.lastHost));
