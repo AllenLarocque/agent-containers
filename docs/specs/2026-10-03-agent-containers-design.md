@@ -362,6 +362,13 @@ revocable** secrets go there.
   host-side pre-commit hook, per §2.1);
 - the egress firewall limits where a leaked tier-A secret could go.
 
+## Amendment 2026-11-16: up may read the service-account item
+
+`agent-up up` (like `update` and `agent-new up` before it) reads the project's single item,
+`op://Personal/agent-<project> service account/credential`, on the owner's session when no
+`OP_SERVICE_ACCOUNT_TOKEN` is set, after checking the sign-in. It reads nothing else, and
+containers are unaffected. See `2026-11-16-op-signin-check-design.md`.
+
 ## 6. Agent identity and the merge gate
 
 **Decision (2026-10-03): agents propose, humans merge.**

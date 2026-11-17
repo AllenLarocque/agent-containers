@@ -16,6 +16,7 @@ usage:
   agent-up init <project-dir> [--name NAME] [--image base|gis|bio]   a builder project
   agent-up init --profile research [--image research|base|gis|bio]  the ONE shared research container (default: research)
   agent-up up <project>                  resolve secrets with `op run`, (re)create the container
+                                         (OP_SERVICE_ACCOUNT_TOKEN unset: reads the project's token from the Personal vault)
                                          (research: no secrets, no `op run`)
   agent-up config <project> [ARGS...]    print the rendered compose config (no secrets needed)
   agent-up shell <project>               zsh in the container as `agent`
@@ -516,6 +517,17 @@ check_project_env(){ # op:// references only; never echo a line (it could hold a
   bad="$(grep -nEv '^[[:space:]]*(#|$)' "$1" | grep -Ev '^[0-9]+:[A-Za-z_][A-Za-z0-9_]*=op://[^[:space:]]+$' | cut -d: -f1 | paste -sd, - || true)"
   [ -z "$bad" ] || die "$1 may hold only KEY=op://... references; offending line number(s): $bad (values not shown)"
 }
+op_ready(){ # the owner's 1Password session must be signed in (builder projects only); one sign-in attempt, at a terminal only
+  unset OP_SERVICE_ACCOUNT_TOKEN   # a project's token is never the owner's session
+  command -v op >/dev/null 2>&1 || die "1Password CLI (op) not found: install it (docs/runbooks/1password-project-vault.md)"
+  op whoami >/dev/null 2>&1 </dev/null && return 0
+  if [ -t 0 ]; then
+    printf 'agent-up: 1Password: not signed in. Signing in:\n' >&2
+    eval "$(op signin)" || true
+    op whoami >/dev/null 2>&1 </dev/null && return 0
+  fi
+  die '1Password: not signed in. Sign in first: eval "$(op signin)"'
+}
 warn(){ printf 'agent-up: WARNING: %s\n' "$*" >&2; }
 GD_TARGET=/run/secrets/google-drive-sa.json
 gd_candidate(){ # $1 config dir -> the key file as found (project, else shared; may be a symlink); nothing: off/none/research
@@ -853,14 +865,24 @@ cmd_up(){
     echo "agent-up: '$name' running (research: open public egress, no secrets). Shell: agent-up shell $name"
     echo "agent-up: research projects: $(exchange_projects "$(research_dir "$cfg")" 2>/dev/null | paste -sd' ' - || true)"
   else
-    [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] || die "OP_SERVICE_ACCOUNT_TOKEN is not set for this project (docs/runbooks/1password-project-vault.md)"
+    local tok=""   # the project's own token: command-scoped to the one `op run` below, never exported
+    if [ -z "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]; then
+      op_ready
+      tok="$(op read "op://Personal/agent-$name service account/credential" </dev/null 2>/dev/null)" && [ -n "$tok" ] \
+        || die "could not read op://Personal/agent-$name service account/credential (docs/runbooks/1password-project-vault.md)"
+    fi
     make_exchange "$cfg"
     prepare "$cfg"
     local v
     for v in require-cache-shared npm-cache-shared; do
       docker volume inspect "$v" >/dev/null 2>&1 || docker volume create "$v" >/dev/null
     done
-    op run --env-file "$cfg/project.env" -- "${COMPOSE[@]}" up -d --force-recreate
+    if [ -n "$tok" ]; then
+      OP_SERVICE_ACCOUNT_TOKEN="$tok" op run --env-file "$cfg/project.env" -- "${COMPOSE[@]}" up -d --force-recreate
+    else
+      op run --env-file "$cfg/project.env" -- "${COMPOSE[@]}" up -d --force-recreate
+    fi
+    tok=""   # done with it
     if research_on "$cfg"; then
       echo "agent-up: research exchange ON: $(research_dir "$cfg")/$name (briefs rw; reports + downloads read-only, at /research)"
       if [ -f "$CFG_ROOT/research/project.conf" ] && [ "$(research_dir "$CFG_ROOT/research")" != "$(research_dir "$cfg")" ]; then
@@ -1141,6 +1163,7 @@ cmd_update(){
     for n in "$@"; do cfg="$(cfg_dir "$n")"; wanted="$wanted$(basename "$cfg") "; done
     for n in "${all[@]}"; do [[ $wanted == *" $n "* ]] && names+=("$n"); done   # project_names order: the clone's own project last
   fi
+  for n in "${names[@]}"; do [ "$(profile "$CFG_ROOT/$n" 2>/dev/null)" = research ] || { op_ready; break; }; done   # research needs no 1Password session
   [ -f "$digests" ] || die "no digests.md at $digests"
   update_guard "$@"
   update_pending_pr

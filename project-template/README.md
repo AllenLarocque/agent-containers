@@ -580,16 +580,13 @@ NEW=spades_pe
    for v in claude codex rlib t3; do docker volume create "$v-$NEW" && docker run --rm --user 0 --entrypoint cp -v "$v-$OLD:/from:ro" -v "$v-$NEW:/to" "$IMG" -a /from/. /to/; done
    ```
 5. In 1Password, rename the Personal item `agent-<OLD> service account` to
-   `agent-<NEW> service account` (`agent-up update` looks it up by that title). Renaming the
+   `agent-<NEW> service account` (`agent-up up` and `agent-up update` look it up by that title). Renaming the
    project's vault is optional; if you do, change every `op://<old vault>/...` line in
    `~/.config/agent-containers/$NEW/project.env` to match.
 6. Start it, and with `RESEARCH=1` also the research container, so it mounts the renamed exchange
    folder:
    ```bash
-   unset OP_SERVICE_ACCOUNT_TOKEN
-   export OP_SERVICE_ACCOUNT_TOKEN="$(op read "op://Personal/agent-$NEW service account/credential")"
-   agent-up up $NEW
-   unset OP_SERVICE_ACCOUNT_TOKEN
+   agent-up up $NEW        # with no token set, it reads agent-$NEW's item itself
    agent-up up research
    ```
    Compose warns that the copied volumes "already exist but were not created by Docker Compose":
