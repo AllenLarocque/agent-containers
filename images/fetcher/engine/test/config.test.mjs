@@ -16,7 +16,8 @@ test('defaults', () => {
   assert.equal(c.resolver, 'https://doi.org/');
   assert.equal(c.libraryPrefix, '');
   assert.deepEqual(c.loginHosts, ['login.openathens.net', 'go.openathens.net']);
-  assert.deepEqual(c.caps, { gapMs: 25000, hostGapMs: 60000, perHost: 30, perDay: 100, libraryPerDay: 20 });
+  assert.deepEqual(c.caps, { gapMs: 25000, hostGapMs: 60000, perHost: 30, perDay: 100, libraryPerDay: 20, resolverPerDay: 300 });
+  assert.equal(c.maxPdfBytes, 104857600);
 });
 
 test('a missing file gives the defaults', () => {
@@ -30,7 +31,7 @@ test('values are read; comments and blank lines are ignored', () => {
     'LIBRARY_PER_DAY=5', 'RESOLVER=https://dx.doi.org/'].join('\n')));
   assert.equal(c.libraryPrefix, 'https://go.openathens.net/redirector/example.ac.uk?url=');
   assert.deepEqual(c.loginHosts, ['login.openathens.net', 'go.openathens.net', 'sso.example.ac.uk', 'idp.example.org']);
-  assert.deepEqual(c.caps, { gapMs: 1000, hostGapMs: 2000, perHost: 3, perDay: 4, libraryPerDay: 5 });
+  assert.deepEqual(c.caps, { gapMs: 1000, hostGapMs: 2000, perHost: 3, perDay: 4, libraryPerDay: 5, resolverPerDay: 300 });
   assert.equal(c.resolver, 'https://dx.doi.org/');
 });
 
@@ -80,4 +81,10 @@ test('timeouts: defaults 60 s / 9 s / 45 s, overridable', () => {
   const c = loadConfig(cfgFile('NAV_TIMEOUT_MS=3000\nSETTLE_MS=300\nDOWNLOAD_TIMEOUT_MS=4000\n'));
   assert.deepEqual(c.timeouts, { navMs: 3000, settleMs: 300, downloadMs: 4000 });
   assert.throws(() => loadConfig(cfgFile('SETTLE_MS=9s\n')), /line 1/);
+});
+
+test('RESOLVER_PER_DAY and MAX_PDF_BYTES are read', () => {
+  const c = loadConfig(cfgFile('RESOLVER_PER_DAY=7\nMAX_PDF_BYTES=1000\n'));
+  assert.equal(c.caps.resolverPerDay, 7);
+  assert.equal(c.maxPdfBytes, 1000);
 });

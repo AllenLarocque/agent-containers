@@ -34,7 +34,7 @@ export class EscapeError extends Error {
 }
 
 const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW, O_RDONLY, O_DIRECTORY } = fs.constants;
-const viaFd = (fd, name) => `/proc/self/fd/${fd}/${name}`;
+export const viaFd = (fd, name) => `/proc/self/fd/${fd}/${name}`;
 
 function parts(relPath) {
   if (typeof relPath !== 'string' || relPath === '' || relPath.includes('\0') || path.isAbsolute(relPath))
@@ -44,10 +44,14 @@ function parts(relPath) {
   return segs;
 }
 
-function openDirAt(parentFd, name, held) {
+// Opens <name> under a held directory descriptor, O_DIRECTORY|O_NOFOLLOW, pushing the new
+// descriptor onto held. create=false (readers) never makes the directory.
+export function openDirAt(parentFd, name, held, create = true) {
   const p = viaFd(parentFd, name);
   let created = false;
-  try { fs.mkdirSync(p, { mode: 0o755 }); created = true; } catch (e) { if (e.code !== 'EEXIST') throw e; }
+  if (create) {
+    try { fs.mkdirSync(p, { mode: 0o755 }); created = true; } catch (e) { if (e.code !== 'EEXIST') throw e; }
+  }
   let fd;
   try {
     fd = fs.openSync(p, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);

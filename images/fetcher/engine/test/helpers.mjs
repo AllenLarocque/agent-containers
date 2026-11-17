@@ -13,7 +13,8 @@ export function testCfg(fx, extra = {}) {
     resolver: fx.resolver,
     libraryPrefix: '',
     loginHosts: [H.L],
-    caps: { gapMs: 0, hostGapMs: 0, perHost: 30, perDay: 100, libraryPerDay: 20 },
+    caps: { gapMs: 0, hostGapMs: 0, perHost: 30, perDay: 100, libraryPerDay: 20, resolverPerDay: 300 },
+    maxPdfBytes: 4096,
     timeouts: { navMs: 3000, settleMs: 300, downloadMs: 3000 },
     ...extra,
   };

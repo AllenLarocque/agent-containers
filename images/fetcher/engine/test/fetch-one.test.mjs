@@ -3,11 +3,11 @@ import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { openBrowser, fetchOne } from '../lib/browser.mjs';
+import { openBrowser, fetchOne, resolveDoi } from '../lib/browser.mjs';
 import { runOnce, newRun } from '../fetcher.mjs';
 import { Pacer } from '../lib/pacing.mjs';
 import { folderName } from '../lib/doi.mjs';
-import { startFixtureServer, H } from './fixture-server.mjs';
+import { startFixtureServer, H, BIG } from './fixture-server.mjs';
 import { SANDBOX, testCfg, tempDirs, request, statusLines, allFiles } from './helpers.mjs';
 
 let fx, dirs, ctx, cfg;
@@ -124,4 +124,81 @@ test('paywall2 lands on a login host: needs-owner:login; the next paywalled DOI 
   // The library prefix, and the login host's name, never reach the status file or the log.
   const text = fs.readFileSync(path.join(d.papers, 'p', '_fetch', 'status', 'r.tsv'), 'utf8') + logs.join('\n');
   assert.ok(!text.includes(fx.libraryPrefix) && !text.includes('/lib') && !text.includes(H.Y) && !text.includes(H.L));
+});
+
+// ---------------- fix round 1 ----------------
+const settled = async (cond, ms = 3000) => {
+  for (const t0 = Date.now(); Date.now() - t0 < ms;) { if (cond()) return true; await new Promise((r) => setTimeout(r, 50)); }
+  return cond();
+};
+
+for (const k of ['big', 'bignolen']) {
+  test(`${k}: a PDF over maxPdfBytes is refused as not-a-pdf and deleted`, async () => {
+    assert.ok(BIG > cfg.maxPdfBytes);
+    const before = new Set(fs.readdirSync(dirs.downloads));
+    const r = await fetchOne(ctx, `10.5555/${k}`, { cfg });
+    assert.equal(r.status, 'not-available:not-a-pdf');
+    assert.equal(r.tmpPdf, undefined);
+    assert.ok(await settled(() => fs.readdirSync(dirs.downloads).every((n) => before.has(n))), 'download left behind');
+  });
+}
+
+test('big through the loop: nothing in the temp dir or the papers folder', async () => {
+  const { d, go } = loopEnv();
+  request(d.papers, 'p', 'r.txt', ['10.5555/big']);
+  await go();
+  assert.deepEqual(statusLines(d.papers, 'p', 'r.txt').map((l) => l[1]), ['not-available:not-a-pdf']);
+  assert.deepEqual(fs.readdirSync(dirs.downloads), []);
+  assert.deepEqual(allFiles(d.papers).filter((f) => !f.includes('/_fetch/')), []);
+});
+
+test('a download the landing page starts by itself is cancelled and deleted', async () => {
+  const before = new Set(fs.readdirSync(dirs.downloads));
+  const mark = fx.log.length;
+  const r = await fetchOne(ctx, '10.5555/autodl', { cfg });
+  assert.equal(r.status, 'not-available:no-pdf-link');
+  assert.ok(fx.log.slice(mark).some((e) => e.path === '/files/junk.bin'), 'fixture did not start its download');
+  assert.ok(await settled(() => fs.readdirSync(dirs.downloads).every((n) => before.has(n))), 'stray download left behind');
+});
+
+test('autodl through the loop leaves the temp dir empty', async () => {
+  const { d, go } = loopEnv();
+  request(d.papers, 'p', 'r.txt', ['10.5555/autodl']);
+  await go();
+  assert.deepEqual(fs.readdirSync(dirs.downloads), []);
+});
+
+test('in-fetch guard: a redirect onto a blocked host is classified but no PDF is requested', async () => {
+  const mark = fx.log.length;
+  const r = await fetchOne(ctx, '10.5555/via1', { cfg, blocked: new Set([H.X]) });
+  assert.equal(r.status, 'skipped:host-challenged');
+  assert.equal(r.host, H.X);
+  assert.equal(fx.log.slice(mark).filter((e) => e.path.startsWith('/pdf/')).length, 0);
+  tabBlank();
+});
+
+test('a page that moves itself to another host is not sent through the library route', async () => {
+  const { d, go } = loopEnv({ libraryPrefix: fx.libraryPrefix });
+  const before = fx.log.filter((e) => e.host === H.Y).length;
+  request(d.papers, 'p', 'r.txt', ['10.5555/jsmove']);
+  await go();
+  assert.ok(fx.hits('jsmove', H.V).length >= 1, 'fixture page did not move');
+  assert.deepEqual(statusLines(d.papers, 'p', 'r.txt').map((l) => [l[1], l[4]]), [['not-available:no-pdf-link', 'no']]);
+  assert.equal(fx.log.filter((e) => e.host === H.Y).length, before);
+});
+
+test('resolver Location handling: non-http and missing are http-error; relative is resolved', async () => {
+  assert.deepEqual(await resolveDoi(ctx, '10.5555/locjs', { cfg }), { status: 'not-available:http-error' });
+  assert.deepEqual(await resolveDoi(ctx, '10.5555/locnone', { cfg }), { status: 'not-available:http-error' });
+  assert.deepEqual(await resolveDoi(ctx, '10.5555/locrel', { cfg }), { url: `${fx.base(H.R)}/relative/locrel`, host: H.R });
+  assert.deepEqual(await resolveDoi(ctx, '10.5555/404', { cfg }), { status: 'not-available:doi-not-found' });
+});
+
+test('a declared Content-Length over the cap is refused before the body arrives (attachment)', async () => {
+  // slowpdf declares 10 MB and then stalls after a few bytes: only the declared length
+  // can refuse it; without that check it would end as a timeout.
+  const t0 = Date.now();
+  const r = await fetchOne(ctx, '10.5555/slowpdf', { cfg });
+  assert.equal(r.status, 'not-available:not-a-pdf');
+  assert.ok(Date.now() - t0 < cfg.timeouts.downloadMs, `took ${Date.now() - t0} ms`);
 });

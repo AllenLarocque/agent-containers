@@ -21,7 +21,8 @@ import { Pacer } from './lib/pacing.mjs';
 import { loadConfig } from './lib/config.mjs';
 import { hostOf } from './lib/classify.mjs';
 import { openBrowser, resolveDoi, fetchOne } from './lib/browser.mjs';
-import { scanRequests, readStatus, renderStatus, pending, plainDir, readSmall, startsWith, statusName } from './lib/queue.mjs';
+import { scanRequests, statusText, parseStatus, pendingIn, renderStatus, statusName } from './lib/queue.mjs';
+import { withDir, readSmall, startsWithAt } from './lib/fs-util.mjs';
 
 export const DEFAULTS = Object.freeze({
   papersRoot: '/papers',
@@ -42,12 +43,15 @@ export function newRun(date = day(Date.now())) {
   return { date, challenged: new Set(), libraryBlocked: false, results: new Map() };
 }
 
+// A new UTC day starts a new run (challenged hosts and attempts are forgotten).
+export const nextRun = (run, nowMs) => (run.date === day(nowMs) ? run : newRun(day(nowMs)));
+
 // Control hooks (the control directory is the owner's, not mounted to the research side):
 //   pause  - while present, no paper is started.
 //   retry  - read once and removed; lines "check <host>", "login" or "all".
 const paused = (controlDir) => fs.existsSync(path.join(controlDir, 'pause'));
 
-function applyRetry(controlDir, run) {
+export function applyRetry(controlDir, run) {
   const file = path.join(controlDir, 'retry');
   const text = readSmall(file, 4096);
   if (text === null) return;
@@ -76,17 +80,21 @@ function applyRetry(controlDir, run) {
 
 // A real PDF already in this project's folder for this DOI (no links followed).
 function alreadySaved(papersRoot, project, doi) {
-  if (!plainDir(papersRoot, [project, folderName(doi)])) return false;
-  return startsWith(path.join(papersRoot, project, folderName(doi), 'paper.pdf'), '%PDF-');
+  return withDir(papersRoot, [project, folderName(doi)], (fd) => startsWithAt(fd, 'paper.pdf', '%PDF-')) === true;
 }
 
 const challenge = (run, ...hosts) => { for (const h of hosts) if (h) run.challenged.add(h); };
 
 // One paper: pacing, the direct visit, and at most one library-routed visit.
 async function attempt(ctx, doi, { cfg, pacer, run }) {
-  // Daily cap first, so a capped day does not even ask the resolver.
-  const daily = pacer.check(hostOf(cfg.resolver), false);
-  if (daily === 'skipped:daily-cap') return { status: daily, host: '', library: 'no' };
+  // Every network request is paced. The resolver lookup has its own cap and gap
+  // (Pacer.checkLookup/lookupWaitMs/recordLookup) and does not count toward the daily
+  // total of publisher visits.
+  const resolver = hostOf(cfg.resolver);
+  const capped = pacer.checkLookup(resolver);
+  if (capped) return { status: capped, host: '', library: 'no' };
+  await sleep(pacer.lookupWaitMs(resolver));
+  pacer.recordLookup(resolver);
   const res = await resolveDoi(ctx, doi, { cfg });
   if (res.status) return { status: res.status, host: '', library: 'no' };
   const hop = res.host;
@@ -101,7 +109,11 @@ async function attempt(ctx, doi, { cfg, pacer, run }) {
   // the owner's institution.
   const host = r.host || hop;
   if (r.status === 'needs-owner:check') challenge(run, hop, host, r.checkHost);
-  if (!LIBRARY_RETRY.has(r.status) || !cfg.libraryPrefix || !hostOf(r.landingUrl ?? '')) {
+  // A redirect from this first hop landed on a challenged host: remember the hop too, so
+  // that host gets at most one extra load per distinct first hop.
+  if (r.status === 'skipped:host-challenged') challenge(run, hop);
+  // Library route only with an http(s) landing URL on the host the direct visit recorded.
+  if (!LIBRARY_RETRY.has(r.status) || !cfg.libraryPrefix || !r.landingUrl || hostOf(r.landingUrl) !== r.host) {
     return { ...base, host, status: r.status, tmpPdf: r.tmpPdf };
   }
   if (run.libraryBlocked) return { ...base, host, status: 'needs-owner:login' };
@@ -139,16 +151,17 @@ function writeStatus(papersRoot, req, map, date, label, log) {
 }
 
 // One pass over every pending DOI in every request file.
-export async function runOnce({ ctx, pacer, cfg, run, papersRoot, controlDir, log = console.log, now = Date.now }) {
+// downloadDir (optional) is emptied after each paper, so nothing a page started by itself
+// accumulates there.
+export async function runOnce({ ctx, pacer, cfg, run, papersRoot, controlDir, downloadDir, log = console.log, now = Date.now }) {
   applyRetry(controlDir, run);
   if (paused(controlDir)) return;
   for (const req of scanRequests(papersRoot)) {
     const date = day(now());
-    const statusDir = plainDir(papersRoot, [req.project, '_fetch', 'status']);
-    const map = readStatus(statusDir, req.name);
-    const current = statusDir ? readSmall(path.join(statusDir, statusName(req.name)), 1 << 20) : null;
+    const current = statusText(papersRoot, req.project, req.name);
+    const map = parseStatus(current);
     if (current !== renderStatus(req, map, date)) writeStatus(papersRoot, req, map, date, 'status-file', log);
-    for (const doi of pending(req, statusDir)) {
+    for (const doi of pendingIn(req, map)) {
       if (paused(controlDir)) return;
       const cached = run.results.get(doi);
       let r;
@@ -159,8 +172,13 @@ export async function runOnce({ ctx, pacer, cfg, run, papersRoot, controlDir, lo
       } else if (cached && !cached.refused && cached.status !== 'saved') {
         r = cached;                        // same paper in another request file: one attempt per run
       } else {
-        r = await attempt(ctx, doi, { cfg, pacer, run });
-        if (r.status === 'saved' && !store(papersRoot, req.project, doi, r, date, log)) {
+        try {
+          r = await attempt(ctx, doi, { cfg, pacer, run });
+          if (r.status === 'saved' && !store(papersRoot, req.project, doi, r, date, log)) r = null;
+        } finally {
+          if (downloadDir) emptyDir(downloadDir);
+        }
+        if (r === null) {
           run.results.set(doi, { refused: true, project: req.project });
           continue;
         }
@@ -188,11 +206,13 @@ export async function runLoop(opts = {}) {
   emptyDir(o.downloadDir);
   const ctx = await openBrowser({ profileDir: o.profileDir, downloadDir: o.downloadDir, sandbox: o.sandbox });
   const pacer = new Pacer({ statePath: path.join(o.stateDir, 'pacing.json'), caps: cfg.caps });
-  let run = newRun();
+  const now = o.now ?? Date.now;
+  let run = newRun(day(now()));
   try {
     for (;;) {
-      if (run.date !== day(Date.now())) run = newRun();
-      await runOnce({ ctx, pacer, cfg, run, papersRoot: o.papersRoot, controlDir: o.controlDir, log });
+      run = nextRun(run, now());
+      await runOnce({ ctx, pacer, cfg, run, papersRoot: o.papersRoot, controlDir: o.controlDir,
+                      downloadDir: o.downloadDir, log, now });
       if (o.once) break;
       await sleep(o.pollMs);
     }

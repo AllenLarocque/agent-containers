@@ -7,7 +7,7 @@ import path from 'node:path';
 import { writeFileInside } from './safe-write.mjs';
 
 export const DEFAULT_CAPS = Object.freeze({
-  gapMs: 25000, hostGapMs: 60000, perHost: 30, perDay: 100, libraryPerDay: 20,
+  gapMs: 25000, hostGapMs: 60000, perHost: 30, perDay: 100, libraryPerDay: 20, resolverPerDay: 300,
 });
 
 const day = (ms) => new Date(ms).toISOString().slice(0, 10);
@@ -62,7 +62,7 @@ export class Pacer {
   #save() {
     const s = this.state;
     const now = this.now();
-    const lastHost = Object.fromEntries([...s.lastHost].filter(([, t]) => now - t < this.caps.hostGapMs));
+    const lastHost = Object.fromEntries([...s.lastHost].filter(([, t]) => now - t < Math.max(this.caps.hostGapMs, this.caps.gapMs)));
     const out = { date: s.date, total: s.total, library: s.library, hosts: Object.fromEntries(s.hosts),
                   lastAny: s.lastAny, lastHost };
     const dir = path.dirname(this.statePath);
@@ -85,6 +85,30 @@ export class Pacer {
     const left = (last, gap) => (last === undefined ? 0 : Math.min(gap, Math.max(0, gap - (now - Math.min(last, now)))));
     return Math.max(left(this.state.lastAny || undefined, this.caps.gapMs),
                     left(this.state.lastHost.get(host), this.caps.hostGapMs));
+  }
+
+  // Resolver lookups (doi.org) are paced on their own terms: a per-day cap of their own
+  // (resolverPerDay, reported as the daily cap), at least gapMs between two lookups, and
+  // they do not count toward the overall daily total, which counts publisher visits.
+  // A lookup is pointless once the publisher daily total is reached, so that stops it too.
+  checkLookup(host) {
+    this.#rollover();
+    if ((this.state.hosts.get(host) ?? 0) >= this.caps.resolverPerDay) return 'skipped:daily-cap';
+    if (this.state.total >= this.caps.perDay) return 'skipped:daily-cap';
+    return null;
+  }
+
+  lookupWaitMs(host) {
+    const now = this.now();
+    const last = this.state.lastHost.get(host);
+    return last === undefined ? 0 : Math.min(this.caps.gapMs, Math.max(0, this.caps.gapMs - (now - Math.min(last, now))));
+  }
+
+  recordLookup(host) {
+    this.#rollover();
+    this.state.hosts.set(host, (this.state.hosts.get(host) ?? 0) + 1);
+    this.state.lastHost.set(host, this.now());
+    this.#save();
   }
 
   record(host, library) {

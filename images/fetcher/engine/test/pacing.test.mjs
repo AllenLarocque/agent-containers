@@ -171,3 +171,31 @@ test('a stored date more than one day ahead is corrupt; one day ahead is kept', 
   fs.writeFileSync(statePath, full('2026-11-17'));
   assert.equal(make().check('a.com', false), 'skipped:daily-cap');
 });
+
+// ---- fix round 1 (Task 2): resolver lookups ----
+test('lookups: own per-day cap, reported as the daily cap; publisher total unaffected', () => {
+  const { p } = setup({ caps: { resolverPerDay: 3, gapMs: 0 } });
+  for (let i = 0; i < 3; i++) { assert.equal(p.checkLookup('doi.org'), null); p.recordLookup('doi.org'); }
+  assert.equal(p.checkLookup('doi.org'), 'skipped:daily-cap');
+  assert.equal(p.check('a.com', false), null);
+  assert.equal(p.waitMs('a.com'), 0, 'a lookup does not delay the next publisher visit');
+});
+
+test('lookups: gapMs between two lookups, persisted; the publisher daily cap also stops lookups', () => {
+  const { p, clock, make } = setup({ caps: { gapMs: 1000, perDay: 2 } });
+  assert.equal(p.lookupWaitMs('doi.org'), 0);
+  p.recordLookup('doi.org');
+  assert.equal(p.lookupWaitMs('doi.org'), 1000);
+  clock.t += 400;
+  assert.equal(make().lookupWaitMs('doi.org'), 600);
+  p.record('a.com', false); p.record('b.com', false);
+  assert.equal(p.checkLookup('doi.org'), 'skipped:daily-cap');
+});
+
+test('lookups: the per-day count resets on the next UTC day', () => {
+  const { p, clock } = setup({ caps: { resolverPerDay: 1 } });
+  p.recordLookup('doi.org');
+  assert.equal(p.checkLookup('doi.org'), 'skipped:daily-cap');
+  clock.t = Date.UTC(2026, 10, 17, 0, 0, 1);
+  assert.equal(p.checkLookup('doi.org'), null);
+});
