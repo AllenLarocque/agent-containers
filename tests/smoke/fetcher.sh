@@ -123,7 +123,17 @@ sleep 20
 check "after 20 s the engine is still running (as the entry point's own process)" \
   bash -c 'kill -0 "$1" && grep -q "/opt/fetcher/fetcher.mjs" "/proc/$1/cmdline"' _ "$ep_pid"
 check "after 20 s Xvfb :99 is running, no TCP listener" bash -c 'pgrep -a -x Xvfb | grep -q ":99" && pgrep -a -x Xvfb | grep -q -- "-nolisten tcp"'
-check "after 20 s the engine's Chromium is sandboxed (kernel view: renderers in own user+PID ns, extra seccomp)" chromium_sandbox_state
+# A renderer may be between pages at any one instant: poll up to ~15 s for one before judging (exit 2 =
+# nothing to judge yet; 0 or 1 is a verdict and ends the wait at once).
+sandbox_when_renderer() { local i out rc
+  for i in $(seq 30); do
+    out=$(chromium_sandbox_state); rc=$?
+    [ "$rc" -ne 2 ] && break
+    sleep 0.5
+  done
+  echo "$out (after $((i / 2)) s of polling)"; return "$rc"
+}
+check "after 20 s the engine's Chromium is sandboxed (kernel view: renderers in own user+PID ns, extra seccomp)" sandbox_when_renderer
 # No agent program running: exact program names (a bare "t3" substring also matches random profile paths).
 check "after 20 s no t3, claude, codex or agent-init process" \
   bash -c '! pgrep -a -f "(^|[/ ])(t3|claude|codex|agent-init\.sh|agent-t3|agent-entrypoint)( |$)"'
