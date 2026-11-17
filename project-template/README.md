@@ -435,6 +435,15 @@ new one, refresh it with
 `cp project-template/config/fetcher-seccomp.json ~/.config/agent-containers/fetcher/` and `agent-up up fetcher`.
 `agent-up update` restarts the fetcher without asking: a restart re-queues the paper in flight, and
 the session survives in the volume.
+
+Each papers folder is also its own mount in the research container (`agent-up up research` creates
+it), so the research bot cannot rename it and plant a link that a later restart of the fetcher would
+follow. While a research container exists, `agent-up up fetcher` refuses unless that is in force for
+every papers folder: after this change, and whenever a new project folder appears, run
+`agent-up up research` first, then `agent-up up fetcher`. The fetcher's `compose.yaml` must equal the
+seed apart from the image digest (no extra ports or mounts); change the seed instead. No other
+container may mount the volume `fetcher-profile`, the container's volumes, or the fetcher's config
+folder: `up` checks the rendered config and Docker's own list of the volume's users.
 ## RStudio Server (opt-in)
 
 The open-source RStudio Server (AGPLv3, pinned in the image) can run in a project's container, so

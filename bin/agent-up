@@ -403,16 +403,16 @@ general_dir(){ # $1 research root: create <root>/_general (research not tied to 
     echo "agent-up: created $1/_general"
   fi
 }
-exchange_projects(){ # $1 research root -> the complete project subfolders, one per line
-  local d p
+exchange_projects(){ # $1 research root, $2 who asks (for the skip messages; default research) -> the complete project subfolders, one per line
+  local d p who="${2:-research}"
   for d in "$1"/*/; do
     d="${d%/}"; p="${d##*/}"
     [ "$p" != _general ] || continue   # not a project: its own mount (general_dir)
     [ -d "$d" ] && [ ! -L "$d" ] || continue
-    if ! valid_name "$p"; then echo "agent-up: research: skipped '$d' (not a project name)" >&2; continue; fi
+    if ! valid_name "$p"; then echo "agent-up: $who: skipped '$d' (not a project name)" >&2; continue; fi
     if [ ! -d "$d/briefs" ] || [ ! -d "$d/reports" ] || [ ! -d "$d/downloads" ] \
        || [ -L "$d/briefs" ] || [ -L "$d/reports" ] || [ -L "$d/downloads" ]; then
-      echo "agent-up: research: skipped '$d' (needs real briefs/, reports/ and downloads/ folders)" >&2; continue
+      echo "agent-up: $who: skipped '$d' (needs real briefs/, reports/ and downloads/ folders)" >&2; continue
     fi
     printf '%s\n' "$p"
   done
@@ -428,6 +428,7 @@ make_exchange(){ # up only: the research root and this config's project subfolde
       [ "$(research_dir "$(dirname "$other")")" = "$rd" ] || continue
       exchange_dirs "$rd" "$(basename "$(dirname "$other")")"
     done
+    papers_make "$rd" research   # each papers folder becomes its own mount in the research container (write_research)
   elif research_on "$1"; then
     rd="$(research_dir "$1")"; mkdir -p "$rd"
     exchange_dirs "$rd" "$(basename "$1")"
@@ -509,6 +510,7 @@ fetcher_mention(){ # $1 compose.yaml (comments ignored) -> the first line that n
   while IFS= read -r line; do
     line="${line%%#*}"
     case "$line" in *fetcher-profile*) printf 'volume|%s' "$line"; return 0 ;; esac
+    case "$line" in *volumes_from*|*fetcher-agent-1*) printf 'from|%s' "$line"; return 0 ;; esac   # another container's volumes (e.g. container:fetcher-agent-1)
     for c in "$CFG_ROOT/fetcher" "$cr" "agent-containers/fetcher"; do   # (the last catches ~/... and ${HOME}/... spellings)
       [ -n "$c" ] || continue
       case "$line" in *"$c"|*"$c"/*|*"$c"[\"\':[:space:]]*) printf 'config|%s' "$line"; return 0 ;; esac
@@ -520,6 +522,7 @@ check_fetcher_private(){ # $1 config dir (not the fetcher): its compose may not 
   case "$(fetcher_mention "$1/compose.yaml")" in
     volume\|*) die "$1/compose.yaml names the volume fetcher-profile: only the fetcher may mount its browser profile (it holds the library session). Remove it." ;;
     config\|*) die "$1/compose.yaml names the fetcher's config dir ($CFG_ROOT/fetcher): no other container may mount it. Remove it." ;;
+    from\|*) die "$1/compose.yaml uses volumes_from or names fetcher-agent-1: no container may borrow another's volumes (the fetcher's holds the library session). Remove it." ;;
   esac
 }
 real_dir(){ [ -d "$1" ] && [ ! -L "$1" ]; }
@@ -528,24 +531,85 @@ fetcher_projects(){ # $1 research root -> the exchange's projects the fetcher se
   while IFS= read -r p; do
     [ -n "$p" ] || continue
     if [ "${#p}" -le 80 ]; then printf '%s\n' "$p"; else echo "agent-up: fetcher: skipped '$p' (over 80 characters: the fetcher ignores it)" >&2; fi
-  done < <(exchange_projects "$1")
+  done < <(exchange_projects "$1" fetcher)
 }
-papers_dir(){ # $1 a papers folder: create it (mode 755) unless present; never a symlink, never through one (callers check the parents)
-  [ ! -L "$1" ] || die "$1 is a symlink: the fetcher mounts papers folders only as real folders (replace the link with a folder)"
-  if [ ! -d "$1" ]; then
-    [ ! -e "$1" ] || die "$1 is not a folder"
-    mkdir -m 755 "$1" || die "could not create $1"
-    echo "agent-up: created $1"
-  fi
+papers_ok(){ # $1 a papers folder: absent or a real folder, never a symlink (creates nothing)
+  [ ! -L "$1" ] || die "$1 is a symlink: papers folders are mounted only as real folders (replace the link with a folder)"
+  [ ! -e "$1" ] || [ -d "$1" ] || die "$1 is not a folder"
 }
-make_papers(){ # up only, fetcher: <root>/_general/papers and every exchange project's downloads/papers
-  local rd p d; rd="$(research_dir "$1")"; mkdir -p "$rd"
-  general_dir "$rd"
-  papers_dir "$rd/_general/papers"
+papers_check(){ # $1 research root, $2 who asks: every papers folder agent-up would create or mount is fine. Creates nothing.
+  local p d
+  [ ! -L "$1/_general" ] || die "$1/_general is a symlink: it must be a real folder"
+  [ ! -e "$1/_general" ] || [ -d "$1/_general" ] || die "$1/_general is not a folder"
+  papers_ok "$1/_general/papers"
   while IFS= read -r p; do
-    for d in "$rd/$p" "$rd/$p/downloads"; do [ ! -L "$d" ] || die "$d is a symlink: the research exchange folders must be real folders"; done
-    papers_dir "$rd/$p/downloads/papers"
-  done < <(fetcher_projects "$rd")
+    for d in "$1/$p" "$1/$p/downloads"; do [ ! -L "$d" ] || die "$d is a symlink: the research exchange folders must be real folders"; done
+    papers_ok "$1/$p/downloads/papers"
+  done < <(exchange_projects "$1" "$2")
+}
+papers_make(){ # $1 research root, $2 who asks (research|fetcher): check ALL first, then create _general/papers and each project's
+  # downloads/papers (mode 755). Shared by both profiles: in the research container each is its own mount (it cannot be renamed
+  # or replaced from inside), and the fetcher mounts exactly these.
+  local p f
+  papers_check "$1" "$2"
+  general_dir "$1"
+  while IFS= read -r f; do
+    papers_ok "$f"
+    if [ ! -d "$f" ]; then mkdir -m 755 "$f" || die "could not create $f"; echo "agent-up: created $f"; fi
+  done < <(printf '%s\n' "$1/_general/papers"; exchange_projects "$1" "$2" 2>/dev/null | while IFS= read -r p; do printf '%s\n' "$1/$p/downloads/papers"; done)
+}
+fetcher_papers(){ # $1 fetcher config dir -> every papers folder the fetcher binds (resolved root), one per line: _general first
+  local rd p; rd="$(research_dir "$1")"; rd="$(cd "$rd" && pwd -P)"
+  printf '%s\n' "$rd/_general/papers"
+  fetcher_projects "$rd" 2>/dev/null | while IFS= read -r p; do printf '%s\n' "$rd/$p/downloads/papers"; done
+}
+check_papers_protected(){ # $1 fetcher config dir: if a research container exists, each papers folder the fetcher binds must be its OWN
+  # mount there (same host source), so the research container cannot rename it and plant a link that a later restart of the
+  # fetcher would follow. No research container: nobody can plant one.
+  local c=research-agent-1 names mounts f miss=""
+  names="$(docker ps -a --filter "name=^${c}\$" --format '{{.Names}}' </dev/null 2>/dev/null)" || die "could not ask Docker whether a research container exists"
+  grep -qx "$c" <<<"$names" || return 0
+  mounts="$(docker inspect -f '{{range .Mounts}}{{if eq .Type "bind"}}{{println .Source}}{{end}}{{end}}' "$c" </dev/null 2>/dev/null)" \
+    || die "could not read the mounts of the research container ($c)"
+  while IFS= read -r f; do
+    grep -qxF "$f" <<<"$mounts" || miss="$miss $f"
+  done < <(fetcher_papers "$1")
+  [ -z "$miss" ] || die "the research container was started before paper folders were protected (or before a project existed): not its own mount there:$miss. Run agent-up up research first, then agent-up up fetcher (both must use the same RESEARCH_DIR)."
+}
+check_fetcher_volume_users(){ # $1 config dir: while a fetcher config exists, no container but fetcher-agent-1 may mount the volume fetcher-profile
+  local users bad
+  [ "$(profile "$1")" = fetcher ] || [ -f "$CFG_ROOT/fetcher/project.conf" ] || return 0
+  users="$(docker ps -a --filter volume=fetcher-profile --format '{{.Names}}' </dev/null 2>/dev/null)" || die "could not ask Docker which containers use the volume fetcher-profile"
+  bad="$(grep -vx -e fetcher-agent-1 -e '' <<<"$users" | paste -sd, - || true)"
+  [ -z "$bad" ] || die "container(s) $bad mount the volume fetcher-profile (the fetcher's library session): only fetcher-agent-1 may. Fix their compose files, then remove them: docker rm $bad"
+}
+real_path(){ # $1 path -> resolved (pwd -P) when it or its folder exists; else as given
+  if [ -d "$1" ]; then (cd "$1" && pwd -P)
+  elif [ -d "$(dirname "$1")" ]; then printf '%s/%s' "$(cd "$(dirname "$1")" && pwd -P)" "$(basename "$1")"
+  else printf '%s' "$1"; fi
+}
+check_rendered(){ # $1 config dir (not the fetcher), after prepare: what compose will REALLY run (interpolation, every file) may not
+  # bind (or device-mount) a path that equals, contains or sits inside the fetcher's config dir, name the volume fetcher-profile,
+  # or borrow the fetcher container's volumes
+  local out line v fc
+  [ "$(profile "$1")" != fetcher ] || return 0
+  out="$(env -u OP_SERVICE_ACCOUNT_TOKEN "${COMPOSE[@]}" config </dev/null 2>/dev/null)" || die "could not render $1's compose config (see: agent-up config $(basename "$1"))"
+  fc="$(cd "$CFG_ROOT" && pwd -P)/fetcher"
+  while IFS= read -r line; do
+    if [[ $line =~ ^[[:space:]]+(source|device):[[:space:]]*\"?(/[^\"]*)\"?[[:space:]]*$ ]]; then
+      v="$(real_path "${BASH_REMATCH[2]}")"
+      ! overlaps "$v" "$fc" || die "$1: compose would mount $v, which overlaps the fetcher's config dir ($fc): no other container may see it. Remove that mount."
+    elif [[ $line =~ ^[[:space:]]+name:[[:space:]]*\"?fetcher-profile\"?[[:space:]]*$ ]]; then
+      die "$1: compose would use the volume fetcher-profile: only the fetcher may mount its browser profile. Remove it."
+    elif [[ $line == *fetcher-agent-1* ]]; then
+      die "$1: compose would borrow the volumes of fetcher-agent-1. Remove it."
+    fi
+  done <<<"$out"
+}
+check_fetcher_compose(){ # $1 fetcher config dir: its compose.yaml is the seed apart from the image digest (no extra port, mount or setting)
+  local seed="$SEEDS/config/compose.fetcher.yaml"
+  cmp -s <(sed -E "s/$IMG_LINE_RE/\1\2@sha256:DIGEST\4/" "$1/compose.yaml") <(sed -E "s/$IMG_LINE_RE/\1\2@sha256:DIGEST\4/" "$seed") \
+    || die "$1/compose.yaml differs from the seed ($seed) other than the image digest: the fetcher runs exactly the seed (no extra ports, mounts or settings). To change it, change the seed in the clone (a pull request), then copy it over (cp $seed $1/compose.yaml) and pin it again: agent-up update fetcher"
 }
 write_fetcher(){ # the fetcher's overlay, engine config, firewall switch and compose env. Never refuses (stop/down render with it):
   # an invalid value is left out, and only real (non-link) papers folders are mounted.
@@ -891,12 +955,16 @@ write_research(){ # the research profile's switch + instructions + exchange; a b
       if [ -d "$rd" ]; then
         if [ -d "$rd/_general" ] && [ ! -L "$rd/_general" ]; then
           bind_yaml "$rd/_general" /research/_general rw
+          # its papers folder as its OWN mount (after the parent): it cannot be renamed or replaced from inside, so the
+          # research container can never re-point what the fetcher mounts (agent-up up fetcher checks this is in force)
+          if real_dir "$rd/_general/papers"; then bind_yaml "$rd/_general/papers" /research/_general/papers rw; fi
         fi
         while IFS= read -r p; do
           [ -n "$p" ] || continue
           bind_yaml "$rd/$p/briefs" "/research/$p/briefs" ro
           bind_yaml "$rd/$p/reports" "/research/$p/reports" rw
           bind_yaml "$rd/$p/downloads" "/research/$p/downloads" rw
+          if real_dir "$rd/$p/downloads/papers"; then bind_yaml "$rd/$p/downloads/papers" "/research/$p/downloads/papers" rw; fi   # its own mount (see _general)
         done < <(exchange_projects "$rd")
       fi
     elif research_on "$1"; then
@@ -1045,10 +1113,14 @@ up_fetcher(){ # $1 config dir: no secrets, no 1Password, no T3
   check_image_profile "$1"
   check_contact "$1"
   check_fetcher "$1"
+  check_fetcher_compose "$1"
   check_digest "$1/compose.yaml" "$name"
   rd="$(research_dir "$1")"; mkdir -p "$rd"
   check_research_overlaps "$1"   # BEFORE any papers folder is created
-  make_papers "$1"
+  papers_check "$rd" fetcher
+  check_fetcher_volume_users "$1"
+  check_papers_protected "$1"
+  papers_make "$rd" fetcher      # only now, after every check: a refused up creates no folder
   prepare "$1"
   env -u OP_SERVICE_ACCOUNT_TOKEN "${COMPOSE[@]}" up -d --force-recreate
   echo "agent-up: '$name' running (paper fetcher: open public egress, no agent, no secrets, papers folders only)"
@@ -1066,6 +1138,7 @@ cmd_up(){
   if [ "$(profile "$cfg")" = fetcher ]; then up_fetcher "$cfg"; return 0; fi
   check_image_profile "$cfg"
   check_fetcher_private "$cfg"
+  check_fetcher_volume_users "$cfg"
   check_contact "$cfg"
   check_t3_port "$cfg"
   check_t3_connect "$cfg"
@@ -1083,6 +1156,7 @@ cmd_up(){
   if [ "$(profile "$cfg")" = research ]; then
     make_exchange "$cfg"
     prepare "$cfg"
+    check_rendered "$cfg"
     # No secrets at all: no `op run`, and not even the owner's service-account token in compose's environment.
     env -u OP_SERVICE_ACCOUNT_TOKEN "${COMPOSE[@]}" up -d --force-recreate
     echo "agent-up: '$name' running (research: open public egress, no secrets). Shell: agent-up shell $name"
@@ -1096,6 +1170,7 @@ cmd_up(){
     fi
     make_exchange "$cfg"
     prepare "$cfg"
+    check_rendered "$cfg"
     local v
     for v in require-cache-shared npm-cache-shared; do
       docker volume inspect "$v" >/dev/null 2>&1 || docker volume create "$v" >/dev/null
