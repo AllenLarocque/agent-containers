@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Control the running fetcher from outside (`docker exec <fetcher> fetcherctl ...`). It only writes the
+# control files the engine reads in /run/fetcher (fetcher.mjs, "Control hooks"); arguments are validated
+# and nothing from them reaches a shell or a path.
+#   fetcherctl pause                 no new paper is started while paused
+#   fetcherctl resume                end the pause
+#   fetcherctl retry all             forget this run's challenged hosts, login block and attempts
+#   fetcherctl retry login           retry the papers waiting on the library login
+#   fetcherctl retry check <host>    retry the papers waiting on a bot check at <host>
+#   fetcherctl status                paused or not, and whether a retry is waiting to be read
+set -euo pipefail
+dir=/run/fetcher
+usage() { echo "usage: fetcherctl pause | resume | retry all | retry login | retry check <host> | status" >&2; exit 2; }
+host_ok() { [[ $1 =~ ^[a-z0-9.-]{1,253}$ && $1 != *..* && $1 != .* && $1 != -* ]]; }
+# Append one line to the retry file the engine reads once and removes (no link followed: the dir is the
+# fetcher's own, and a symlink planted there is refused).
+retry() { [ ! -L "$dir/retry" ] || { echo "fetcherctl: $dir/retry is a symlink; refusing" >&2; exit 1; }
+  printf '%s\n' "$1" >> "$dir/retry"; }
+
+case "${1:-} ${2:-}" in
+  "pause ")   [ $# -eq 1 ] || usage; : > "$dir/pause"; echo "paused" ;;
+  "resume ")  [ $# -eq 1 ] || usage; rm -f "$dir/pause"; echo "resumed" ;;
+  "retry all"|"retry login") [ $# -eq 2 ] || usage; retry "$2"; echo "retry $2 requested" ;;
+  "retry check")
+    [ $# -eq 3 ] || usage
+    host_ok "$3" || { echo "fetcherctl: not a host name" >&2; exit 2; }
+    retry "check $3"; echo "retry check $3 requested" ;;
+  "status ")  [ $# -eq 1 ] || usage
+    if [ -e "$dir/pause" ]; then echo "paused: yes"; else echo "paused: no"; fi
+    if [ -e "$dir/retry" ]; then echo "retry waiting: yes"; else echo "retry waiting: no"; fi ;;
+  *) usage ;;
+esac
