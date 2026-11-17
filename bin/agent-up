@@ -574,6 +574,8 @@ check_papers_protected(){ # $1 fetcher config dir: if a research container exist
   while IFS= read -r f; do
     grep -qxF "$f" <<<"$mounts" || miss="$miss $f"
   done < <(fetcher_papers "$1")
+  [ -z "$miss" ] || [ ! -f "$CFG_ROOT/research/project.conf" ] || [ "$(canon_path "$(research_dir "$CFG_ROOT/research")")" = "$(canon_path "$(research_dir "$1")")" ] \
+    || die "the research container uses RESEARCH_DIR=$(research_dir "$CFG_ROOT/research") but the fetcher's config ($1/project.conf) has RESEARCH_DIR=$(research_dir "$1"): the two must match. Set RESEARCH_DIR in $1/project.conf to the research container's, then agent-up up fetcher."
   [ -z "$miss" ] || die "the research container was started before paper folders were protected (or before a project existed): not its own mount there:$miss. Run agent-up up research first, then agent-up up fetcher (both must use the same RESEARCH_DIR)."
 }
 check_fetcher_volume_users(){ # $1 config dir: while a fetcher config exists, no container but fetcher-agent-1 may mount the volume fetcher-profile
@@ -588,17 +590,24 @@ real_path(){ # $1 path -> resolved (pwd -P) when it or its folder exists; else a
   elif [ -d "$(dirname "$1")" ]; then printf '%s/%s' "$(cd "$(dirname "$1")" && pwd -P)" "$(basename "$1")"
   else printf '%s' "$1"; fi
 }
+canon_path(){ readlink -f -- "$1" 2>/dev/null || real_path "$1"; }   # $1 path -> every symlink and .. resolved (as far as it exists)
 check_rendered(){ # $1 config dir (not the fetcher), after prepare: what compose will REALLY run (interpolation, every file) may not
-  # bind (or device-mount) a path that equals, contains or sits inside the fetcher's config dir, name the volume fetcher-profile,
-  # or borrow the fetcher container's volumes
+  # bind (or device-mount) a path, use a secret/config file or an env_file that equals, contains or sits inside the fetcher's config
+  # dir, name the volume fetcher-profile, or borrow the fetcher container's volumes. Rendered with --no-env-resolution so env_file
+  # stays visible (as `- path: /abs`) instead of being folded into environment. A path line it cannot parse is refused, not skipped.
   local out line v fc
   [ "$(profile "$1")" != fetcher ] || return 0
-  out="$(env -u OP_SERVICE_ACCOUNT_TOKEN "${COMPOSE[@]}" config </dev/null 2>/dev/null)" || die "could not render $1's compose config (see: agent-up config $(basename "$1"))"
+  out="$(env -u OP_SERVICE_ACCOUNT_TOKEN "${COMPOSE[@]}" config --no-env-resolution </dev/null 2>/dev/null)" || die "could not render $1's compose config (see: agent-up config $(basename "$1"))"
   fc="$(cd "$CFG_ROOT" && pwd -P)/fetcher"
   while IFS= read -r line; do
-    if [[ $line =~ ^[[:space:]]+(source|device):[[:space:]]*\"?(/[^\"]*)\"?[[:space:]]*$ ]]; then
-      v="$(real_path "${BASH_REMATCH[2]}")"
-      ! overlaps "$v" "$fc" || die "$1: compose would mount $v, which overlaps the fetcher's config dir ($fc): no other container may see it. Remove that mount."
+    if [[ $line =~ ^[[:space:]]+(-[[:space:]]+)?(source|device|file|path):[[:space:]]*(.*)$ ]]; then
+      v="${BASH_REMATCH[3]}"; v="${v%"${v##*[![:space:]]}"}"
+      if [[ $v =~ ^\"(/[^\"\\]*)\"$ ]] || [[ $v =~ ^(/[^\"\'\\]*)$ ]]; then
+        v="$(canon_path "${BASH_REMATCH[1]}")"
+        ! overlaps "$v" "$fc" || die "$1: compose would mount or read $v, which overlaps the fetcher's config dir ($fc): no other container may see it. Remove that mount, secret, config or env_file."
+      elif [[ ! $v =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then   # a plain name (a volume, secret or config) is not a path
+        die "$1: compose would use a path that could not be checked against the fetcher's config dir: $line. Rename it (no quotes or backslashes) or remove it."
+      fi
     elif [[ $line =~ ^[[:space:]]+name:[[:space:]]*\"?fetcher-profile\"?[[:space:]]*$ ]]; then
       die "$1: compose would use the volume fetcher-profile: only the fetcher may mount its browser profile. Remove it."
     elif [[ $line == *fetcher-agent-1* ]]; then

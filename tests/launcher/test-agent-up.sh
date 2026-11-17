@@ -84,7 +84,7 @@ case "$*" in
     sd="$(dirname "$DLOG")"; cat "$sd/psa.fvol" 2>/dev/null || true ;;
   "inspect -f {{range .Mounts}}"*)                                   # a container's bind sources: $sd/mounts.<c>
     sd="$(dirname "$DLOG")"; cat "$sd/mounts.${*: -1}" 2>/dev/null || true ;;
-  "compose "*" config")                                              # what compose renders for a project: $sd/rendered.<p>, else nothing
+  "compose "*" config"|"compose "*" config --no-env-resolution")      # what compose renders for a project: $sd/rendered.<p>, else nothing
     sd="$(dirname "$DLOG")"; pn="$*"; pn="${pn#*-p }"; pn="${pn%% *}"; cat "$sd/rendered.$pn" 2>/dev/null || true ;;
   "compose "*" up -d"*)   # a test can make one project's `up` fail, or move its protocol marker
     sd="$(dirname "$DLOG")"; pn="$*"; pn="${pn#*-p }"; pn="${pn%% *}"
@@ -1737,6 +1737,15 @@ refuses "up fetcher refuses a project added after the research container started
 check "  ...started nothing, created no papers folder for it" bash -c '! grep -q " up -d" "$1" && [ ! -e "$2/epsilon/downloads/papers" ]' _ "$DLOG" "$FRD"
 fpapers epsilon | tail -n 1 >> "$T/mounts.research-agent-1"
 check "  ...starts once the research container mounts it too" fau up fetcher
+# the research container's config names another RESEARCH_DIR: say exactly that (not "run agent-up up research")
+cp "$FR/research/project.conf" "$T/frconf.bak"; mkdir -p "$T/fres-other"
+sed -i "s|^RESEARCH_DIR=.*|RESEARCH_DIR=$T/fres-other|" "$FR/research/project.conf"
+printf '%s\n' "$T/fres-other/_general" > "$T/mounts.research-agent-1.other"; cp "$T/mounts.research-agent-1" "$T/mounts.keep"; cp "$T/mounts.research-agent-1.other" "$T/mounts.research-agent-1"
+fmsg="$(fau up fetcher 2>&1)" && rc=0 || rc=$?
+check "up fetcher refuses when the research container uses another RESEARCH_DIR, and says the two must match" \
+  bash -c '[ "$1" -ne 0 ] && grep -qF "the research container uses RESEARCH_DIR=$2/fres-other but the fetcher" <<<"$3" && grep -qF "the two must match" <<<"$3" && ! grep -qF "agent-up up research first" <<<"$3"' _ "$rc" "$T" "$fmsg"
+cp "$T/frconf.bak" "$FR/research/project.conf"; cp "$T/mounts.keep" "$T/mounts.research-agent-1"
+check "  ...starts again once they match" fau up fetcher
 rm -f "$T/psa.research"; printf '%s\n' "$FRDR/_general" > "$T/mounts.research-agent-1"
 check "up fetcher starts when there is no research container at all" fau up fetcher
 rm -f "$T/mounts.research-agent-1"
@@ -1854,10 +1863,24 @@ for bad in "        source: $FRR" "        source: \"$FRR/fetcher/.generated\"" 
   printf 'services:\n  agent:\n    volumes:\n%s\n' "$bad" > "$T/rendered.fb"
   refuses "up refuses a builder whose RENDERED compose has: ${bad#"${bad%%[! ]*}"}" 'compose would (mount .*overlaps the fetcher|use the volume fetcher-profile|borrow the volumes of fetcher-agent-1)' fau up fb
 done
-check "  ...(those reached the rendered check: compose config was called)" grep -qE "^ARGS: compose .* -p fb config$" "$DLOG"
+check "  ...(those reached the rendered check: compose config was called, env files left unresolved)" grep -qE "^ARGS: compose .* -p fb config --no-env-resolution$" "$DLOG"
+# a path line the check cannot parse is refused, not skipped; secrets/configs files and env_file are checked too (symlinks and .. resolved)
+mkdir -p "$T/fdots/sub"; ln -sfn "$FRR/fetcher/project.conf" "$T/fconf-link"
+for bad in "        source: /tmp/a\"b" "        source: '/tmp/x'" "      device: :/exports" "        source: \"/tmp/a\\\\b\""; do
+  printf 'services:\n  agent:\n    volumes:\n%s\n' "$bad" > "$T/rendered.fb"
+  refuses "up refuses a builder whose RENDERED compose has an unparseable path: ${bad#"${bad%%[! ]*}"}" 'path that could not be checked.*project|fb: compose would use a path that could not be checked' fau up fb
+done
+for bad in "secrets:\n  s:\n    name: fb_s\n    file: $FRR/fetcher/.generated/fetcher.conf" "configs:\n  c:\n    name: fb_c\n    file: $T/fconf-link" \
+           "services:\n  agent:\n    env_file:\n      - path: $FRR/fetcher/.generated/fetcher.conf\n        required: true" \
+           "services:\n  agent:\n    env_file:\n      - path: $T/fdots/sub/../../fcfg/fetcher/project.conf"; do
+  printf "$bad\n" > "$T/rendered.fb"
+  refuses "up refuses a builder whose RENDERED compose reads a fetcher config file: $(printf "$bad" | tail -n 1 | sed 's/^ *//')" 'compose would mount or read .*overlaps the fetcher' fau up fb
+done
+printf 'services:\n  agent:\n    secrets:\n      - source: s1\n    env_file:\n      - path: %s/e.env\nsecrets:\n  s1:\n    file: %s/s.txt\n' "$T/fproj" "$T/fproj" > "$T/rendered.fb"
+check "up of a builder with a secret file and env_file away from the fetcher succeeds" fau up fb
 printf 'services:\n  agent:\n    volumes:\n      - type: bind\n        source: %s\n' "$T/fproj" > "$T/rendered.fb"; : > "$DLOG"
 check "up of a builder whose rendered binds keep away from the fetcher succeeds" fau up fb
-check "  ...the render was not given the service-account token" bash -c 'grep -A2 -E "^ARGS: compose .* -p fb config$" "$1" | grep -qx "OPTOK: <unset>"' _ "$DLOG"
+check "  ...the render was not given the service-account token" bash -c 'grep -A2 -E "^ARGS: compose .* -p fb config --no-env-resolution$" "$1" | grep -qx "OPTOK: <unset>"' _ "$DLOG"
 rm -f "$T/rendered.fb"
 cp "$FR/research/compose.yaml" "$T/frc.bak"
 sed -i 's|^\(    volumes:\)$|\1\n      - ~/.config/agent-containers/fetcher/.generated:/opt/x:ro|' "$FR/research/compose.yaml"
