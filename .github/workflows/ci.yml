@@ -92,13 +92,13 @@ jobs:
             exit "$rc"
           }
           echo "::notice title=build-publish seconds::$(( $(date +%s) - start ))"
-      - name: Verify digests.txt (four lines, in order, each a sha256 digest)
+      - name: Verify digests.txt (five lines, in order, each a sha256 digest)
         if: steps.mode.outputs.mode == 'full'
         run: |
           cat /tmp/digests.txt
-          [ "$(wc -l < /tmp/digests.txt)" = 4 ]
+          [ "$(wc -l < /tmp/digests.txt)" = 5 ]
           i=0
-          for x in base gis bio research; do
+          for x in base gis bio research fetcher; do
             i=$((i + 1))
             sed -n "${i}p" /tmp/digests.txt | grep -Pq "^spades-$x sha256:[0-9a-f]{64}\$"
           done
@@ -529,7 +529,7 @@ jobs:
         if: always()
         run: |
           shellcheck --version
-                    shellcheck -S warning images/base/*.sh tests/*/*.sh scripts/*.sh images/research/paper-tools/*.sh bin/agent-up bin/agent-new
+                    shellcheck -S warning images/base/*.sh tests/*/*.sh scripts/*.sh images/research/paper-tools/*.sh images/fetcher/*.sh images/fetcher/fetcherctl bin/agent-up bin/agent-new
       - name: CI classifier unit test (which change sets may skip the image build)
         if: always()
         run: bash tests/ci/test-classify.sh
@@ -548,6 +548,11 @@ jobs:
       - name: update-candidates unit test (pinned vs eligible upstream versions)
         if: always()
         run: bash tests/ci/test-update-candidates.sh
+      # Docker on the runner: pulls the pinned Playwright image, installs the engine's dependencies with the
+      # network on, then runs the tests with --network none (fixture server on the container's loopback).
+      - name: fetcher engine tests (pinned Playwright image; tests offline)
+        if: always()
+        run: bash tests/fetcher/run.sh
       - name: actionlint
         if: always()
         run: |

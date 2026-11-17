@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Free runner disk (the four images + buildx cache exceed the runner's free space)
+      - name: Free runner disk (the five images + buildx cache exceed the runner's free space)
         run: |
           # Preinstalled SDKs we never use (~30 GB). Without this, pulling spades-bio back from the
           # registry for its smoke test hit "no space left on device" (2026-10-07, PR #5).
@@ -46,7 +46,7 @@ jobs:
         run: |
           set -euo pipefail
           scripts/build-publish.sh build ghcr.io/allenlarocque "$TAG" digests.txt
-          for x in base gis bio research; do
+          for x in base gis bio research fetcher; do
             d=$(awk -v n="spades-$x" '$1 == n {print $2}' digests.txt)
             [[ $d =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no valid digest for spades-$x in digests.txt ('$d')"; exit 1; }
             echo "$x=$d" >> "$GITHUB_OUTPUT"
@@ -71,5 +71,10 @@ jobs:
         with:
           subject-name: ghcr.io/allenlarocque/spades-research
           subject-digest: ${{ steps.build.outputs.research }}
-      - name: Promote latest (only after all four attestations)
+      - name: Attest spades-fetcher
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/allenlarocque/spades-fetcher
+          subject-digest: ${{ steps.build.outputs.fetcher }}
+      - name: Promote latest (only after all five attestations)
         run: scripts/build-publish.sh promote ghcr.io/allenlarocque digests.txt
