@@ -24,6 +24,9 @@ const KEYS = {
   PER_HOST: (v, c) => { c.caps.perHost = num(v); },
   PER_DAY: (v, c) => { c.caps.perDay = num(v); },
   LIBRARY_PER_DAY: (v, c) => { c.caps.libraryPerDay = num(v); },
+  NAV_TIMEOUT_MS: (v, c) => { c.timeouts.navMs = num(v); },
+  SETTLE_MS: (v, c) => { c.timeouts.settleMs = num(v); },
+  DOWNLOAD_TIMEOUT_MS: (v, c) => { c.timeouts.downloadMs = num(v); },
 };
 
 export function loadConfig(path) {
@@ -32,6 +35,7 @@ export function loadConfig(path) {
     libraryPrefix: '',
     loginHosts: [...DEFAULT_LOGIN_HOSTS],
     caps: { gapMs: 25000, hostGapMs: 60000, perHost: 30, perDay: 100, libraryPerDay: 20 },
+    timeouts: { navMs: 60000, settleMs: 9000, downloadMs: 45000 },
   };
   let text;
   try {

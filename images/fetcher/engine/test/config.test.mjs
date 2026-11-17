@@ -74,3 +74,10 @@ test('isLoginHost: case-insensitive, strict', () => {
     assert.equal(isLoginHost(c, h), false, h);
   assert.equal(isLoginHost({ loginHosts: ['-'] }, '-'), false);
 });
+
+test('timeouts: defaults 60 s / 9 s / 45 s, overridable', () => {
+  assert.deepEqual(loadConfig(cfgFile('')).timeouts, { navMs: 60000, settleMs: 9000, downloadMs: 45000 });
+  const c = loadConfig(cfgFile('NAV_TIMEOUT_MS=3000\nSETTLE_MS=300\nDOWNLOAD_TIMEOUT_MS=4000\n'));
+  assert.deepEqual(c.timeouts, { navMs: 3000, settleMs: 300, downloadMs: 4000 });
+  assert.throws(() => loadConfig(cfgFile('SETTLE_MS=9s\n')), /line 1/);
+});
