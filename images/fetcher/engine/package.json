@@ -1,0 +1,10 @@
+{
+  "name": "spades-fetcher-engine",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Paper fetcher engine. The playwright version is the single source for the image and the test container.",
+  "dependencies": {
+    "playwright": "1.65.1"
+  }
+}
