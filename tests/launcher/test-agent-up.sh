@@ -167,7 +167,7 @@ noleft(){ local f; for f in "$CFGROOT"/.init.*; do [ -e "$f" ] && return 1; done
 refuses "refusal: missing dir (again)" 'project directory not found' au init "$T/nope"
 refuses "refusal: research with a project dir (again)" 'takes no project directory' au init "$P" --profile research --name zz
 refuses "refusal: a builder named research" "'research' is reserved" au init "$P" --name research
-refuses "refusal: an unknown profile" 'builder or research' au init "$P" --profile foo --name zz
+refuses "refusal: an unknown profile" 'builder, research or fetcher' au init "$P" --profile foo --name zz
 refuses "refusal: unknown image (again)" 'base, gis or bio' au init "$P" --image foo --name zz
 refuses "refusal: a builder with --image research" 'research container only' au init "$P" --image research --name zz
 refuses "--image foo still refused" '--image must be' au init "$P" --image foo --name zz
@@ -1593,6 +1593,234 @@ check "project_names: ssh:// origin form matches too" \
   test "$(auc busy --all 2>&1 | grep '^==' | tr '\n' ' ')" = "== ab == ac == pa == pb == pc == research == aa "
 rm -f "$T/RUNNING.pc-agent-1"; AMBIENT=()
 
+# ---- fetcher profile: the ONE shared paper fetcher (docs/specs/2026-11-16-paper-fetcher-design.md, "B")
+# Its own config root ($FR) and research root ($FRD), so the sections above and below see nothing of it.
+FR="$T/fcfg"; FRD="$T/fres"; FCFG="$FR/fetcher"; mkdir -p "$FRD"
+FAMB=()
+fau(){ local AMBIENT=(AGENT_CONTAINERS_CONFIG="$FR" "${FAMB[@]}"); au "$@" </dev/null; }
+faureal(){ local AMBIENT=(AGENT_CONTAINERS_CONFIG="$FR" "${FAMB[@]}"); ( cd "$T" && aureal "$@" ); }
+PFX='https://go.openathens.net/redirector/uni-secret.ac.uk?url='
+refuses "init --profile fetcher refuses a project directory" 'takes no project directory' fau init "$P" --profile fetcher
+refuses "init --profile fetcher refuses another name" "always named 'fetcher'" fau init --profile fetcher --name foo
+refuses "init --profile fetcher refuses another image" 'must be fetcher' fau init --profile fetcher --image gis
+refuses "init: a builder named fetcher is refused" "'fetcher' is reserved" fau init "$P" --name fetcher
+refuses "init: a builder with --image fetcher is refused" 'fetcher container only' fau init "$P" --image fetcher --name zz
+refuses "init: the research container with --image fetcher is refused" 'research, base, gis or bio' fau init --profile research --image fetcher
+check "init: a research container in the fetcher's config root (RESEARCH_DIR set to its own root)" fau init --profile research
+sed -i "s|^RESEARCH_DIR=.*|RESEARCH_DIR=$FRD|" "$FR/research/project.conf"
+finit="$(fau init --profile fetcher 2>&1)" && rc=0 || rc=$?
+check "init --profile fetcher (no project dir)" test "$rc" -eq 0
+check "  ...the Next text: pin it with agent-up update fetcher; no 1Password" \
+  bash -c 'grep -qF "pin the image: agent-up update fetcher" <<<"$1" && ! grep -qiE "vault agent-|service account|op://" <<<"$1"' _ "$finit"
+check "  ...config dir 'fetcher', mode 700" test "$(stat -c %a "$FCFG")" = 700
+for f in compose.yaml project.conf fetcher-seccomp.json; do check "  ...$f mode 600" test "$(stat -c %a "$FCFG/$f")" = 600; done
+check "  ...exactly those three files (no project.env, no allowlist)" test "$(ls -A "$FCFG" | sort | tr '\n' ' ')" = "compose.yaml fetcher-seccomp.json project.conf "
+check "  ...fetcher-seccomp.json is the shipped template" cmp -s "$FCFG/fetcher-seccomp.json" "$ROOT/project-template/config/fetcher-seccomp.json"
+check "  ...project.conf: PROJECT/PROFILE=fetcher, RESEARCH_DIR as the research config has it, viewer and library route off" \
+  bash -c 'grep -qx PROJECT=fetcher "$1" && grep -qx PROFILE=fetcher "$1" && grep -qx "RESEARCH_DIR=$2" "$1" && grep -qx "FETCH_VIEW_PORT=" "$1" && grep -qx "LIBRARY_LINK_PREFIX=" "$1"' _ "$FCFG/project.conf" "$FRD"
+check "  ...project.conf: caps only as comments; no T3, RStudio, FTP or contact settings" \
+  bash -c 'grep -qx "#FETCH_PER_HOST=30" "$1" && grep -qx "#FETCH_PER_DAY=100" "$1" && grep -qx "#FETCH_LIBRARY_PER_DAY=20" "$1" && ! grep -Eq "^#?(T3_PORT|T3_CONNECT|RSTUDIO|FTP_HOSTS|RESEARCH_CONTACT_EMAIL|GOOGLE_DRIVE)=" "$1"' _ "$FCFG/project.conf"
+check "  ...compose: the fetcher seed (spades-fetcher placeholder, init, no ports, no agent volumes)" \
+  bash -c 'grep -qx "    image: ghcr.io/allenlarocque/spades-fetcher@sha256:REPLACE_WITH_DIGEST" "$1" && grep -qE "^    init: true" "$1" && ! sed "s/#.*//" "$1" | grep -Eq "ports:|T3_PORT|claude|codex|t3:|/workspace|research"' _ "$FCFG/compose.yaml"
+check "  ...the seed names Chromium's seccomp profile's source and date" \
+  bash -c 'grep -qF "https://github.com/moby/profiles/blob/seccomp/v0.3.0/seccomp/default.json" "$1" && grep -qF "https://github.com/microsoft/playwright/blob/v1.65.1/utils/docker/seccomp_profile.json" "$1" && grep -qF "2026-11-16" "$1"' _ "$ROOT/project-template/config/compose.fetcher.yaml"
+refuses "init --profile fetcher never overwrites" 'already exists' fau init --profile fetcher
+refuses "up fetcher refuses the placeholder digest" 'not pinned to a real digest' fau up fetcher
+sed -i -E "s|^( *image: *).*|\\1ghcr.io/allenlarocque/spades-fetcher@sha256:$H64|" "$FCFG/compose.yaml"
+# three projects in the exchange: alpha already has a papers folder, beta and gamma not yet; plus a non-project and the research bot's notes
+for p in alpha beta gamma; do mkdir -p "$FRD/$p/briefs" "$FRD/$p/reports" "$FRD/$p/downloads"; done
+mkdir -p "$FRD/alpha/downloads/papers/_fetch/requests" "$FRD/_general" "$FRD/Not_A_Project/downloads"; echo notes > "$FRD/_general/notes.md"
+: > "$DLOG"; : > "$OPLOG"
+FC="compose --env-file $FCFG/.generated/compose.env -f $FCFG/compose.yaml -f $FCFG/.generated/fetcher.yaml -f $FCFG/.generated/hostname.yaml -f $FCFG/.generated/restart.yaml --project-directory $FCFG -p fetcher"
+fout="$(fau up fetcher 2>&1)" && rc=0 || rc=$?
+check "up fetcher succeeds with NO 1Password (no op call at all)" bash -c '[ "$1" -eq 0 ] && [ ! -s "$2" ]' _ "$rc" "$OPLOG"
+check "  ...runs docker compose directly with the fetcher overlays only (no T3, RStudio, FTP, Drive or research overlay)" grep -qxF "ARGS: $FC up -d --force-recreate" "$DLOG"
+check "  ...compose gets no service-account token" bash -c 'grep -A2 -F "ARGS: $2 up -d" "$1" | grep -qx "OPTOK: <unset>"' _ "$DLOG" "$FC"
+check "  ...the compose env file holds only PROJECT=fetcher" test "$(cat "$FCFG/.generated/compose.env")" = "PROJECT=fetcher"
+for p in beta gamma; do
+  check "  ...created $p/downloads/papers (mode 755)" test "$(stat -c %a "$FRD/$p/downloads/papers")" = 755
+done
+check "  ...created _general/papers (mode 755)" test "$(stat -c %a "$FRD/_general/papers")" = 755
+check "  ....generated mode 700" test "$(stat -c %a "$FCFG/.generated")" = 700
+FY="$FCFG/.generated/fetcher.yaml"
+FRDR="$(cd "$FRD" && pwd -P)"
+srcs(){ sed -n 's/^        source: "\(.*\)"$/\1/p' "$1" | sort | tr '\n' ' '; }
+check "  ...binds: exactly the papers folders of alpha, beta, gamma and _general, plus the two generated files" \
+  test "$(srcs "$FY")" = "$(printf '%s\n' ./.generated/fetcher.conf ./.generated/profile "$FRDR/_general/papers" "$FRDR/alpha/downloads/papers" "$FRDR/beta/downloads/papers" "$FRDR/gamma/downloads/papers" | sort | tr '\n' ' ')"
+check "  ...targets: /papers/<project> and /papers/_general" \
+  bash -c 'for p in alpha beta gamma; do grep -A1 "source: \"$2/$p/downloads/papers\"" "$1" | grep -qx "        target: \"/papers/$p\"" || exit 1; done; grep -A1 "source: \"$2/_general/papers\"" "$1" | grep -qx "        target: \"/papers/_general\""' _ "$FY" "$FRDR"
+check "  ...no bind of briefs, reports, a whole downloads, the whole _general or the research root" \
+  bash -c '! grep -E "source: \"[^\"]*(briefs|reports|/downloads|/_general|$2)\"$" "$1"' _ "$FY" "$FRDR"
+check "  ...papers binds are read-write; the generated files read-only" \
+  bash -c '! grep -A2 "/papers\"$" "$1" | grep -q read_only && for t in /etc/firewall/profile /etc/fetcher/config; do grep -A1 "target: \"$t\"" "$1" | grep -q "read_only: true" || exit 1; done' _ "$FY"
+check "  ...firewall switch says PROFILE=research" test "$(cat "$FCFG/.generated/profile")" = PROFILE=research
+check "  ...browser profile volume fetcher-profile at /home/agent/.fetcher" \
+  bash -c 'grep -qE "^      - fetcher-profile:/home/agent/\.fetcher( |$)" "$1" && grep -A1 -x "  fetcher-profile:" "$1" | grep -qx "    name: fetcher-profile"' _ "$FY"
+check "  ...seccomp profile by absolute path from the config dir; NET_ADMIN + NET_RAW" \
+  bash -c 'grep -qF "    security_opt: [\"seccomp=$2/fetcher-seccomp.json\"]   #" "$1" && grep -qE "^    cap_add: \[NET_ADMIN, NET_RAW\]( |$)" "$1"' _ "$FY" "$(cd "$FCFG" && pwd -P)"
+check "  ...fetcher.conf mode 600, no library prefix, no caps (defaults)" \
+  bash -c '[ "$(stat -c %a "$1")" = 600 ] && ! grep -Ev "^(#|$)" "$1"' _ "$FCFG/.generated/fetcher.conf"
+check "  ...lists the papers folders it mounts" grep -qF "papers folders: _general alpha beta gamma" <<<"$fout"
+check "  ...no T3, pairing or Tailscale lines" bash -c '! grep -Eqi "T3 Code|pair|tailscale" <<<"$1"' _ "$fout"
+# a new project folder is picked up at the next up
+mkdir -p "$FRD/delta/briefs" "$FRD/delta/reports" "$FRD/delta/downloads"
+fau up fetcher >/dev/null 2>&1 || true
+check "a new project folder appears in the binds at the next up" grep -qx "        target: \"/papers/delta\"" "$FY"
+check "  ...its papers folder was created" test -d "$FRD/delta/downloads/papers"
+# symbolic links: never mounted, never created through
+rm -rf "$FRD/delta/downloads/papers"; ln -s ../briefs "$FRD/delta/downloads/papers"
+refuses "up fetcher refuses a papers folder that is a symlink" 'delta/downloads/papers is a symlink' fau up fetcher
+fau stop fetcher >/dev/null 2>&1 || true
+check "  ...stop renders without it (no bind through the link)" bash -c '! grep -q "/papers/delta" "$1"' _ "$FY"
+rm -f "$FRD/delta/downloads/papers"
+mv "$FRD/_general/papers" "$T/gp.bak"; ln -s "$FRD/alpha/briefs" "$FRD/_general/papers"
+refuses "up fetcher refuses a symlinked _general/papers" '_general/papers is a symlink' fau up fetcher
+rm -f "$FRD/_general/papers"; mv "$T/gp.bak" "$FRD/_general/papers"
+mv "$FRD/_general" "$T/g.bak"; ln -s "$FRD/alpha" "$FRD/_general"
+refuses "up fetcher refuses a symlinked _general" '_general is a symlink' fau up fetcher
+rm -f "$FRD/_general"; mv "$T/g.bak" "$FRD/_general"
+check "up fetcher works again" fau up fetcher
+# LIBRARY_LINK_PREFIX: empty or exactly the OpenAthens redirector prefix; never printed
+cp "$FCFG/project.conf" "$T/fconf.bak"
+for bad in 'http://go.openathens.net/redirector/uni-secret.ac.uk?url=' 'https://evil.example/redirector/uni-secret.ac.uk?url=' \
+           'https://go.openathens.net/redirector/uni-secret.ac.uk?url=junk' 'https://go.openathens.net.evil/redirector/uni-secret.ac.uk?url=' \
+           'https://go.openathens.net/redirector/Uni-Secret.ac.uk?url=' 'https://go.openathens.net/redirector/uni-secret.ac.uk?url= ' \
+           '"https://go.openathens.net/redirector/uni-secret.ac.uk?url="'; do
+  sed -i "s|^LIBRARY_LINK_PREFIX=.*|LIBRARY_LINK_PREFIX=$bad|" "$FCFG/project.conf"
+  refuses "up fetcher refuses LIBRARY_LINK_PREFIX='$bad'" 'LIBRARY_LINK_PREFIX in .*value not shown' fau up fetcher
+  refuses "config fetcher refuses it too" 'LIBRARY_LINK_PREFIX' fau config fetcher
+  msg="$(fau up fetcher 2>&1 || true)"; msg2="$(fau config fetcher 2>&1 || true)"
+  check "  ...neither message echoes the value" bash -c '! grep -qi "uni-secret" <<<"$1$2"' _ "$msg" "$msg2"
+done
+sed -i "s|^LIBRARY_LINK_PREFIX=.*|LIBRARY_LINK_PREFIX=$PFX|" "$FCFG/project.conf"
+fout="$(fau up fetcher 2>&1)" && rc=0 || rc=$?
+check "up fetcher accepts the OpenAthens redirector prefix" test "$rc" -eq 0
+check "  ...fetcher.conf (mode 600) carries it under the engine's key LIBRARY_PREFIX" \
+  bash -c '[ "$(stat -c %a "$1")" = 600 ] && grep -qxF "LIBRARY_PREFIX=$2" "$1"' _ "$FCFG/.generated/fetcher.conf" "$PFX"
+check "  ...up output does not print it (says 'set')" bash -c '! grep -q uni-secret <<<"$1" && grep -q "library route: set" <<<"$1"' _ "$fout"
+check "  ...written nowhere else: only project.conf and .generated/fetcher.conf hold it" \
+  test "$(grep -rl uni-secret "$FR" "$FRD" | sort | tr '\n' ' ')" = "$FCFG/.generated/fetcher.conf $FCFG/project.conf "
+check "  ...not in the docker log (arguments or environment)" bash -c '! grep -q uni-secret "$1"' _ "$DLOG"
+stout="$(fau status fetcher 2>&1)" || true
+check "status fetcher: says the library route is set, never the prefix" bash -c 'grep -q "library route: set" <<<"$1" && ! grep -q uni-secret <<<"$1"' _ "$stout"
+check "status fetcher: no agent CLI or T3 lines" bash -c '! grep -Eq "Claude Code|Codex|MISSING" <<<"$1"' _ "$stout"
+check "status fetcher: the papers folders on the host" grep -qF "$FRD/alpha/downloads/papers" <<<"$stout"
+cp "$T/fconf.bak" "$FCFG/project.conf"
+stout="$(fau status fetcher 2>&1)" || true
+check "status fetcher: unset prefix says unset" grep -q "library route: unset" <<<"$stout"
+# caps: positive whole numbers, mapped to the engine's key names
+for kv in FETCH_PER_HOST=0 FETCH_PER_DAY=abc FETCH_LIBRARY_PER_DAY=-1 FETCH_PER_HOST=01 FETCH_PER_DAY=1234567890; do
+  cp "$T/fconf.bak" "$FCFG/project.conf"; echo "$kv" >> "$FCFG/project.conf"
+  refuses "up fetcher refuses $kv" "${kv%%=*}.*positive whole number" fau up fetcher
+done
+cp "$T/fconf.bak" "$FCFG/project.conf"; printf 'FETCH_PER_HOST=12\nFETCH_PER_DAY=50\nFETCH_LIBRARY_PER_DAY=5\n' >> "$FCFG/project.conf"
+check "up fetcher accepts cap overrides" fau up fetcher
+check "  ...fetcher.conf: PER_HOST, PER_DAY, LIBRARY_PER_DAY (the engine's keys), no library prefix" \
+  test "$(grep -Ev '^(#|$)' "$FCFG/.generated/fetcher.conf" | tr '\n' ' ')" = "PER_HOST=12 PER_DAY=50 LIBRARY_PER_DAY=5 "
+# FETCH_VIEW_PORT: validated now, not used yet
+mkdir -p "$T/fproj"; fau init "$T/fproj" --name fb >/dev/null 2>&1
+FBT3="$(sed -n "s/^T3_PORT=//p" "$FR/fb/project.conf")"
+for v in 80 abc 70000 "$FBT3" "$(sed -n 's/^RSTUDIO_PORT=//p' "$FR/fb/project.conf")"; do
+  cp "$T/fconf.bak" "$FCFG/project.conf"; sed -i "s|^FETCH_VIEW_PORT=.*|FETCH_VIEW_PORT=$v|" "$FCFG/project.conf"
+  refuses "up fetcher refuses FETCH_VIEW_PORT=$v" "FETCH_VIEW_PORT" fau up fetcher
+done
+cp "$T/fconf.bak" "$FCFG/project.conf"; sed -i "s|^FETCH_VIEW_PORT=.*|FETCH_VIEW_PORT=6080|" "$FCFG/project.conf"
+check "up fetcher accepts a free FETCH_VIEW_PORT" fau up fetcher
+check "  ...but publishes nothing yet (no ports in any fetcher file)" bash -c '! cat "$1/compose.yaml" "$1/.generated/fetcher.yaml" | sed "s/#.*//" | grep -q "ports"' _ "$FCFG"
+cp "$T/fconf.bak" "$FCFG/project.conf"
+# no secrets and no other profile's settings
+echo 'GH_TOKEN=op://x/y/z' > "$FCFG/project.env"
+refuses "up fetcher refuses ANY key in project.env" 'holds no secrets.*line number' fau up fetcher
+rm -f "$FCFG/project.env"
+for kv in T3_CONNECT=1 RSTUDIO=1 FTP_HOSTS=ftp.example.org T3_PORT=3999 RESEARCH=1; do
+  cp "$T/fconf.bak" "$FCFG/project.conf"; echo "$kv" >> "$FCFG/project.conf"
+  refuses "up fetcher refuses $kv (not a fetcher setting)" "${kv%%=*} in .*not used by the fetcher" fau up fetcher
+done
+cp "$T/fconf.bak" "$FCFG/project.conf"; echo 'RESEARCH_CONTACT_EMAIL=papers@relay.example' >> "$FCFG/project.conf"
+refuses "up fetcher refuses RESEARCH_CONTACT_EMAIL" 'for the research container only' fau up fetcher
+cp "$T/fconf.bak" "$FCFG/project.conf"
+# the seccomp profile: present and identical to the template this launcher ships
+mv "$FCFG/fetcher-seccomp.json" "$T/fsec.bak"
+refuses "up fetcher refuses a missing fetcher-seccomp.json (says how to refresh)" 'fetcher-seccomp.json.*missing.*cp .*project-template/config/fetcher-seccomp.json' fau up fetcher
+refuses "config fetcher refuses it too" 'fetcher-seccomp.json' fau config fetcher
+check "  ...stop still works" fau stop fetcher
+check "  ...down still works" fau down fetcher
+cp "$T/fsec.bak" "$FCFG/fetcher-seccomp.json"; echo ' ' >> "$FCFG/fetcher-seccomp.json"
+refuses "up fetcher refuses an edited or stale fetcher-seccomp.json (says how to refresh)" 'differs from .*cp ' fau up fetcher
+mv "$T/fsec.bak" "$FCFG/fetcher-seccomp.json"
+# images: spades-fetcher only here, and only here
+sed -i -E "s|^( *image: *).*|\\1ghcr.io/allenlarocque/spades-gis@sha256:$H64|" "$FCFG/compose.yaml"
+refuses "up fetcher refuses another image" 'must use spades-fetcher' fau up fetcher
+sed -i -E "s|^( *image: *).*|\\1ghcr.io/allenlarocque/spades-fetcher@sha256:$H64|" "$FCFG/compose.yaml"
+sed -i -E "s|^( *image: *).*|\\1ghcr.io/allenlarocque/spades-fetcher@sha256:$H64|" "$FR/fb/compose.yaml"
+refuses "up refuses a builder pinned to spades-fetcher" 'spades-fetcher is for the fetcher container only' fau up fb
+sed -i -E "s|^( *image: *).*|\\1ghcr.io/allenlarocque/spades-fetcher@sha256:$H64|" "$FR/research/compose.yaml"
+refuses "up refuses the research container pinned to spades-fetcher" 'spades-fetcher is for the fetcher container only' fau up research
+sed -i -E "s|^( *image: *).*|\\1ghcr.io/allenlarocque/spades-research@sha256:$H64|" "$FR/research/compose.yaml"
+sed -i -E "s|^( *image: *).*|\\1ghcr.io/allenlarocque/spades-gis@sha256:$H64|" "$FR/fb/compose.yaml"
+# no other config may mount the browser profile volume or the fetcher's config dir
+cp "$FR/fb/compose.yaml" "$T/fbc.bak"
+sed -i 's|^\(    volumes:\)$|\1\n      - fetcher-profile:/home/agent/stolen|' "$FR/fb/compose.yaml"
+check "  (the builder's compose now names fetcher-profile)" grep -q "fetcher-profile:/home/agent/stolen" "$FR/fb/compose.yaml"
+refuses "up refuses a builder whose compose mounts fetcher-profile" 'fetcher-profile.*only the fetcher' fau up fb
+refuses "config refuses it too" 'fetcher-profile' fau config fb
+cp "$T/fbc.bak" "$FR/fb/compose.yaml"
+sed -i "s|^\(    volumes:\)$|\1\n      - $FR/fetcher:/opt/x:ro|" "$FR/fb/compose.yaml"
+refuses "up refuses a builder whose compose mounts the fetcher's config dir" "fetcher's config" fau up fb
+cp "$T/fbc.bak" "$FR/fb/compose.yaml"
+cp "$FR/research/compose.yaml" "$T/frc.bak"
+sed -i 's|^\(    volumes:\)$|\1\n      - ~/.config/agent-containers/fetcher/.generated:/opt/x:ro|' "$FR/research/compose.yaml"
+refuses "up refuses the research container mounting the fetcher's config dir (~ form)" "fetcher's config" fau up research
+cp "$T/frc.bak" "$FR/research/compose.yaml"
+echo "# fetcher-profile is the fetcher's browser profile" >> "$FR/research/compose.yaml"
+check "  ...a comment naming fetcher-profile is not a mount" fau config research
+cp "$T/frc.bak" "$FR/research/compose.yaml"
+# the research root is the fetcher's to write: it may not overlap what an agent must not reach
+cp "$T/fconf.bak" "$FCFG/project.conf"; sed -i "s|^RESEARCH_DIR=.*|RESEARCH_DIR=$T/fproj/sub|" "$FCFG/project.conf"; mkdir -p "$T/fproj/sub"
+refuses "up fetcher refuses a RESEARCH_DIR inside a builder's project folder" 'overlaps PROJECT_DIR of project fb' fau up fetcher
+sed -i "s|^RESEARCH_DIR=.*|RESEARCH_DIR=relative|" "$FCFG/project.conf"
+refuses "up fetcher refuses a relative RESEARCH_DIR" 'absolute' fau up fetcher
+cp "$T/fconf.bak" "$FCFG/project.conf"
+# other commands
+check "stop fetcher without 1Password" fau stop fetcher
+check "down fetcher without 1Password" fau down fetcher
+check "shell fetcher" fau shell fetcher
+check "  ...opens /papers" grep -qxF "ARGS: exec -it -u agent -w /papers fetcher-agent-1 zsh" "$DLOG"
+refuses "pair fetcher: no T3" 'no T3' fau pair fetcher
+refuses "rstudio fetcher: no RStudio" 'no RStudio' fau rstudio fetcher
+check "  ...and none of it read a token" bash -c '! grep -q "^OP: read" "$1"' _ "$OPLOG"
+# rendering with the REAL docker compose
+if docker compose version >/dev/null 2>&1; then
+  sed -i "s|^LIBRARY_LINK_PREFIX=.*|LIBRARY_LINK_PREFIX=$PFX|" "$FCFG/project.conf"
+  fau up fetcher >/dev/null 2>&1 || true
+  FJ="$(faureal config fetcher --format json)"
+  check "rendered fetcher: project 'fetcher', image spades-fetcher by digest, init, restart unless-stopped, hostname fetcher" \
+    jq -e '.name == "fetcher" and (.services.agent.image|test("/spades-fetcher@sha256:[0-9a-f]{64}$")) and .services.agent.init == true and .services.agent.restart == "unless-stopped" and .services.agent.hostname == "fetcher"' <<<"$FJ"
+  check "rendered fetcher: volumes = the 4 papers folders + _general (rw), profile + config (ro), the profile volume; nothing else" \
+    bash -c 'diff <(jq -r ".services.agent.volumes[] | \"\(.type) \(.source) \(.target) \(.read_only // false)\"" <<<"$1" | sort) <(printf "%s\n" "bind $2/_general/papers /papers/_general false" "bind $2/alpha/downloads/papers /papers/alpha false" "bind $2/beta/downloads/papers /papers/beta false" "bind $2/gamma/downloads/papers /papers/gamma false" "bind $2/delta/downloads/papers /papers/delta false" "bind $3/.generated/profile /etc/firewall/profile true" "bind $3/.generated/fetcher.conf /etc/fetcher/config true" "volume fetcher-profile /home/agent/.fetcher false" | sort)' _ "$FJ" "$FRDR" "$FCFG"
+  check "rendered fetcher: the only named volume is fetcher-profile (not external, not per-project)" \
+    jq -e '[.volumes[] | {name, external: (.external // false)}] == [{"name":"fetcher-profile","external":false}]' <<<"$FJ"
+  check "rendered fetcher: seccomp profile from the config dir; NET_ADMIN + NET_RAW; no capability dropped" \
+    bash -c 'jq -e --arg s "seccomp=$2/fetcher-seccomp.json" ".services.agent.security_opt == [\$s] and ((.services.agent.cap_add|sort) == [\"NET_ADMIN\",\"NET_RAW\"]) and (.services.agent.cap_drop == null)" <<<"$1"' _ "$FJ" "$(cd "$FCFG" && pwd -P)"
+  check "rendered fetcher: no ports published (not even the base image's 3773/8787)" jq -e '(.services.agent.ports // []) == [] and (.services.agent.expose // []) == []' <<<"$FJ"
+  check "rendered fetcher: no environment at all (no secrets, no Claude settings, no T3)" jq -e '(.services.agent.environment // {}) == {}' <<<"$FJ"
+  check "rendered fetcher: its own default network" jq -e '(.services.agent.networks | keys) == ["default"] and (.services.agent.network_mode == null)' <<<"$FJ"
+  check "rendered fetcher: runs the fetcher entry point as uid 1000" jq -e '.services.agent.command == ["/usr/local/bin/fetcher-entrypoint"] and .services.agent.user == "1000:1000"' <<<"$FJ"
+  check "rendered fetcher: no claude, codex, t3, GH_TOKEN or 1Password anywhere" bash -c '! grep -Eqi "claude|codex|t3|GH_TOKEN|op://|OP_SERVICE" <<<"$1"' _ "$FJ"
+  check "rendered fetcher: the library prefix is not in the rendered config" bash -c '! grep -q uni-secret <<<"$1"' _ "$FJ"
+  fcenv="$(faureal config fetcher --environment 2>&1 || true)"
+  check "config fetcher --environment does not print the prefix either" bash -c '! grep -q uni-secret <<<"$1"' _ "$fcenv"
+  FAMB=(LIBRARY_LINK_PREFIX=ambient-leak FETCH_PER_DAY=7)
+  FJA="$(faureal config fetcher --format json 2>&1 || true)"
+  FAMB=()
+  check "rendered fetcher: ambient LIBRARY_LINK_PREFIX / FETCH_PER_DAY change nothing" \
+    bash -c '! grep -q ambient-leak <<<"$1" && ! grep -q ambient-leak "$2" && ! grep -q "PER_DAY=7" "$2"' _ "$FJA" "$FCFG/.generated/fetcher.conf"
+  cp "$T/fconf.bak" "$FCFG/project.conf"
+else
+  echo "SKIP: fetcher render checks (docker compose not available here; CI runs them)"
+fi
+cp "$T/fconf.bak" "$FCFG/project.conf"
+
 # ---- update: agent-up update --all | <project>... (owner-run; moves projects to the image publish attested from main, via scripts/verify-image.sh)
 # The launcher under test runs from a throwaway clone ($UC, on main) whose origin is a local bare repo ($UO), so verify-image.sh's
 # `git fetch origin main` stays offline; stub gh and curl (tests/launcher/stubs) stand in for GitHub and ghcr.io.
@@ -1908,6 +2136,34 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 ureset alpha beta; uset research "$BIMG" "$OLD1"
 refuses "update: no arguments prints usage" 'usage:' au update
+
+# the fetcher: pinned through the same verification (image_digest, the stubbed registry gains spades-fetcher); a running one is
+# restarted without a busy scan (no agent or R runs there; a restart re-queues the paper in flight), without 1Password, and gets
+# no T3 version lines or re-pairing
+FETD=$(printf 'f%.0s' $(seq 64)); FIMG=ghcr.io/allenlarocque/spades-fetcher
+au init --profile fetcher >/dev/null
+echo "spades-fetcher latest sha256:$FETD" >> "$T/reg"
+printf 'spades-fetcher sha256:%s %s %s %s 77 1\n' "$FETD" "$FIMG" "$FETD" "$USHA" >> "$T/attest"
+ureset alpha; : > "$T/curl.log"; : > "$T/gh.log"
+uout="$(au update fetcher </dev/null 2>&1)" && rc=0 || rc=$?
+check "update fetcher: the placeholder is pinned through image_digest (one registry lookup + one attestation verify for spades-fetcher)" \
+  bash -c '[ "$1" -eq 0 ] && grep -qxF "agent-up: fetcher: updated, not started (start with: agent-up up fetcher)" <<<"$2" && grep -qx "    image: $3@sha256:$4" "$5" && [ "$(grep -c "^spades-fetcher latest$" "$6") $(grep -c "attestation verify oci://ghcr.io/allenlarocque/spades-fetcher@" "$7")" = "1 1" ]' _ "$rc" "$uout" "$FIMG" "$FETD" "$(ucfg fetcher)" "$T/curl.log" "$T/gh.log"
+check "  ...no 1Password at all (no whoami, signin or read)" bash -c '! grep -qE "^OP: (whoami|signin|read)" "$1"' _ "$OPLOG"
+uset fetcher "$FIMG" "$OLD1"; : > "$DLOG"; : > "$OPLOG"; rm -f "$UR/images.seen" "$T/pair.count"
+uout="$(au update fetcher </dev/null 2>&1)" && rc=0 || rc=$?
+check "update fetcher (running, older digest): pinned and restarted -> 'updated', exit 0" \
+  bash -c '[ "$1" -eq 0 ] && grep -qxF "agent-up: fetcher: updated" <<<"$2" && grep -qx "    image: $3@sha256:$4" "$5" && [ "$6" -eq 1 ]' _ "$rc" "$uout" "$FIMG" "$FETD" "$(ucfg fetcher)" "$(uup fetcher)"
+check "  ...no busy scan inside it (no ps), no prompt" bash -c '! grep -q "^ARGS: exec fetcher-agent-1 ps" "$1" && ! grep -qF "[s]kip" <<<"$2"' _ "$DLOG" "$uout"
+check "  ...no 1Password, and its up got no token" \
+  bash -c '! grep -qE "^OP: (whoami|signin|read)" "$1" && grep -A2 -E "^ARGS: compose .* -p fetcher up -d" "$2" | grep -qx "OPTOK: <unset>"' _ "$OPLOG" "$DLOG"
+check "  ...no agent CLI versions, no re-pairing (row: updated - -)" \
+  bash -c 'grep -Eq "^fetcher +updated +- +-$" <<<"$1" && [ ! -e "$2" ] && grep -qxF "No re-pairing needed." <<<"$1"' _ "$uout" "$T/pair.count"
+ureset alpha beta; uset research "$BIMG" "$OLD1"; uidle research; uset fetcher "$FIMG" "$OLD1"
+uout="$(au update --all </dev/null 2>&1)" && rc=0 || rc=$?
+check "update --all includes the fetcher (restarted with the others)" \
+  bash -c '[ "$1" -eq 0 ] && grep -qxF "agent-up: fetcher: updated" <<<"$2" && [ "$3" -eq 1 ]' _ "$rc" "$uout" "$(uup fetcher)"
+rm -rf "$UR/fetcher"; cp "$T/attest.good" "$T/attest"; ureset alpha beta; uset research "$BIMG" "$OLD1"
+
 
 # ---- 1Password sign-in check: update checks `op whoami` first (builder projects only), signs in at a terminal
 auline(){ printf '%q ' env -u OP_SERVICE_ACCOUNT_TOKEN HOME="$H" OPLOG="$OPLOG" DLOG="$DLOG" PATH="$T/dstub:$T/bin:$PATH" "${AMBIENT[@]}" "$AU" "$@"; }

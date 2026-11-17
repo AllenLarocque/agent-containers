@@ -1,0 +1,28 @@
+# agent-containers: the SHARED PAPER FETCHER's compose file (PROFILE=fetcher; docs/specs/2026-11-16-paper-fetcher-design.md,
+# "B. A fetcher container"). `agent-up init --profile fetcher` copies it to ~/.config/agent-containers/fetcher/compose.yaml,
+# and fetcher-seccomp.json next to it. Owner-edited; started only by `agent-up up fetcher`.
+# There is NO agent here: no Claude/Codex/T3 volumes, no T3 port, no project folder, no secrets, no environment, and no
+# published port (the base image's EXPOSE 3773 8787 publishes nothing without a ports: entry; keep it that way).
+# The generated .generated/fetcher.yaml adds: the firewall's capabilities and its read-only switch (PROFILE=research: open
+# public egress, private and link-local ranges denied), Chromium's seccomp profile (absolute path into the config dir),
+# the read-only engine config (/etc/fetcher/config), the browser profile volume fetcher-profile (the library session;
+# nothing else may mount it), and the papers folders: RESEARCH_DIR/<project>/downloads/papers -> /papers/<project> and
+# RESEARCH_DIR/_general/papers -> /papers/_general, read-write. Nothing else from the research folder.
+#
+# fetcher-seccomp.json keeps Chromium's own sandbox ON (it needs user namespaces, which Docker's default profile blocks).
+# It is moby/profiles seccomp/v0.3.0 default.json (Docker's default; tag dated 2026-11-02,
+# https://github.com/moby/profiles/blob/seccomp/v0.3.0/seccomp/default.json) with ONE rule added first, allowing clone,
+# setns and unshare: the rule Playwright's documented Chromium profile adds
+# (https://github.com/microsoft/playwright/blob/v1.65.1/utils/docker/seccomp_profile.json, last changed 2021-01-03).
+# Taken 2026-11-16. Do not drop capabilities (--cap-drop ALL breaks the sandbox) and never pass --no-sandbox.
+# `agent-up up` refuses a copy that differs from project-template/config/fetcher-seccomp.json in this clone.
+name: ${PROJECT:?set PROJECT in project.conf}
+services:
+  agent:
+    image: ghcr.io/allenlarocque/spades-fetcher@sha256:REPLACE_WITH_DIGEST
+    user: "1000:1000"
+    working_dir: /home/agent
+    init: true                             # the engine (node) is the main process: init reaps orphans
+    mem_limit: 4g                          # one headed Chromium, one paper at a time
+    # Firewall first (research mode, from the read-only switch), then Xvfb, then the fetch engine. Never an agent.
+    command: ["/usr/local/bin/fetcher-entrypoint"]

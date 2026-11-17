@@ -7,6 +7,7 @@ This folder is **not copied into your project by hand.** `bin/agent-up init` use
 | `config/compose.yaml`, `config/project.env`, `config/allowlist` (+ `config/allowlist.bio-example` for `--image bio`) | `~/.config/agent-containers/<project>/` | you, the owner. **Never mounted** into the container, except `allowlist` (read-only) and, with `T3_CONNECT=1` or `publish` / `RSTUDIO=1` / `FTP_HOSTS`, the generated switches, RStudio password and FTP host list (read-only) |
 | `repo/.github/CODEOWNERS`, `repo/.github/workflows/gitleaks.yml`, `repo/.gitignore` | the project folder (only where absent) | you; commit them |
 | `config/compose.research.yaml` | `~/.config/agent-containers/research/compose.yaml` (`init --profile research`) | you |
+| `config/compose.fetcher.yaml`, `config/fetcher-seccomp.json` | `~/.config/agent-containers/fetcher/` (`init --profile fetcher`) | you (`compose.yaml`); the seccomp profile only by copying it again from here |
 | `instructions/research.md`, `instructions/builder-research.md` | `<config>/.generated/agent-instructions.md` at every `agent-up` run, mounted **read-only** as Claude's managed `CLAUDE.md` and Codex's `AGENTS.md` (research container; builders with `RESEARCH=1`) | change them here (PR) |
 
 **Why outside the project:** the project folder is the agent's read-write workspace. Anything
@@ -22,6 +23,7 @@ Host: Linux or WSL2 (GNU coreutils).
 |---|---|
 | `bin/agent-up init <project-dir> [--image gis\|bio\|base]` | creates `~/.config/agent-containers/<project>/` and adds the repo files to the project |
 | `bin/agent-up init --profile research` | creates the shared research container's config (`research`) and `~/agent-research/` (see "Research container") |
+| `bin/agent-up init --profile fetcher` | creates the shared paper fetcher's config (`fetcher`; see "Paper fetcher") |
 | `bin/agent-up up <project>` | checks the digest, the mounts and `project.env`, then `op run ... docker compose ... up -d --force-recreate` |
 | `bin/agent-up config <project>` | prints the rendered compose config: exactly what will run (no secrets needed) |
 | `bin/agent-up shell <project>` | `zsh` in the container as `agent` |
@@ -405,6 +407,34 @@ container that reaches it could bypass the machine user and the merge gate), and
 (`RESEARCH` absent = 0). To opt in, add `RESEARCH=1` (and, only if you moved it, `RESEARCH_DIR=...`)
 to its `project.conf`. The research container needs an image published after
 this change (`agent-up update <project>` pins it) (an older image ignores the switch and stays on the builder allowlist).
+
+## Paper fetcher
+
+One **shared** container, `fetcher`, fetches the papers the research bot asks for with a real,
+sandboxed Chromium (docs/specs/2026-11-16-paper-fetcher-design.md). No agent, no secrets, no
+1Password. Same open public egress as the research container (its firewall profile). It mounts only
+the papers folders, read-write: `~/agent-research/<project>/downloads/papers` at `/papers/<project>`
+and `~/agent-research/_general/papers` at `/papers/_general` (never `briefs/`, `reports/` or the rest
+of `_general`). Its browser profile (the library session) is the volume `fetcher-profile`, which no
+other config may mount.
+
+```bash
+agent-up init --profile fetcher           # ~/.config/agent-containers/fetcher/ (RESEARCH_DIR from the research config)
+agent-up update fetcher                   # pins the verified spades-fetcher digest
+agent-up up fetcher                       # creates missing papers folders; run again when a new project folder appears
+agent-up status fetcher                   # library route set/unset, caps, papers folder sizes
+```
+
+In `~/.config/agent-containers/fetcher/project.conf`: `LIBRARY_LINK_PREFIX` (empty, or exactly
+`https://go.openathens.net/redirector/<institution>?url=`; agent-up never prints it, it shows
+`set`/`unset`), `FETCH_PER_HOST` / `FETCH_PER_DAY` / `FETCH_LIBRARY_PER_DAY` (positive whole
+numbers; unset = 30 / 100 / 20), `FETCH_VIEW_PORT` (checked, not served yet). A papers folder that
+is a symbolic link is refused. `fetcher-seccomp.json` keeps Chromium's sandbox on; `up` refuses a
+copy that differs from `project-template/config/fetcher-seccomp.json` in this clone: after pulling a
+new one, refresh it with
+`cp project-template/config/fetcher-seccomp.json ~/.config/agent-containers/fetcher/` and `agent-up up fetcher`.
+`agent-up update` restarts the fetcher without asking: a restart re-queues the paper in flight, and
+the session survives in the volume.
 ## RStudio Server (opt-in)
 
 The open-source RStudio Server (AGPLv3, pinned in the image) can run in a project's container, so
