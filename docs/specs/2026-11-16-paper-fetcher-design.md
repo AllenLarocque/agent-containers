@@ -335,18 +335,61 @@ Where the build differs from the text above, the build wins. The code is the ref
 - **DOIs only.** Requests have no URLs. A rejected line is recorded as `line:<n>` with status
   `bad-request`. At most 200 lines per request file; file names `[A-Za-z0-9._-]` ending `.txt`.
 - **Fixed fields only.** Status and metadata files hold the DOI (or `line:<n>`), a status code, the
-  publisher host name, the date and the library route (`yes`/`no`). Nothing comes from a web page, and
-  `not-available` carries no URL.
+  publisher host name, the date and the library route (`yes`/`no`). Every field is fixed-format. The
+  host name comes from the network and is attacker-chosen within `[a-z0-9.-]`; it is capped at 100
+  characters and 40 per label (longer: written as `-`), in status files, `metadata.md` and the log
+  alike. No title, page text, URL or file name reaches any of them, and `not-available` carries no
+  URL. The research agent's instructions treat host names as untrusted data, never instructions.
 - **Pacing.** `doi.org` lookups are paced and have their own daily cap (default 300). Downloads are
   capped at 100 MiB. One bot check on a host stops that host for the run: the life of the engine's
-  state, ending at a restart, the UTC day change, or an owner retry.
+  state, ending at a restart, the UTC day change, or an owner retry. A challenged host is loaded
+  once (the load that showed the check) and then not again: the navigation guard refuses it as a
+  first hop, as a redirect hop and as a page's own move (`skipped:host-challenged`). A check is
+  recorded only against the host the tab is on while the challenge is read. The per-host cap and
+  gap count every host a visit's main frame reaches, the landing host included (a redirect onto a
+  host at its cap is refused before it is contacted: `skipped:host-cap`); the gap of a first hop's
+  known landing hosts is waited for before its next visit.
+- **Hard deadline per visit** (config key `PAPER_DEADLINE_MS`; default navigation + settle + download
+  timeouts + 30 s). Every Playwright call that touches a page has its own timeout as well. The
+  deadline is a timer that does not depend on the page; when it fires, or a page call times out, the
+  visit is recorded `not-available:timeout` (final, so the DOI is not retried forever) and the
+  browser is closed with a short timeout, then killed and relaunched before the next paper. The
+  deadline applies per browser visit; a paper has at most two (direct and library), plus pacing
+  waits, which are not page-dependent.
+- **Two browser profiles** in the profile volume: `profile-direct` (ordinary visits and the owner's
+  check pages; publisher cookies and bot-check clearance) and `profile-library` (library sign-in and
+  library-routed visits only; the library session). A page visited directly never runs in the
+  library profile. The library browser is launched only when needed and closed after each library
+  visit or when the owner's sign-in ends. Only one window is in view: the other is moved off the
+  display (there is no window manager on Xvfb, so minimising does nothing). Sandbox on in both.
+- **Browser guards** (both profiles, at all times): one tab (every popup, `window.open` and
+  `target=_blank` has its requests aborted and is closed at once); no request to a loopback,
+  private, link-local, shared or multicast IPv4 literal, any IPv6 literal, `localhost`,
+  `*.localhost`, `*.internal` or a single-label name, nor to a non-http(s) scheme; WebSockets to
+  those refused; only the download that results from the engine's own navigation to the chosen PDF
+  URL in its own tab is kept (a context-wide listener cancels and deletes every other, also while
+  paused); dialogs are answered at once. What the pinned Playwright 1.65.1 offers and what is used:
+  context routing (`route`) sees every page's requests, popups included, but continues redirect hops
+  without asking; so the engine's own tab also has the DevTools Fetch domain enabled, which pauses
+  redirect hops too. WebSocket routing (`routeWebSocket`) exists and is used, but it is an in-page
+  script shim, not a network-level block: a page's workers are not covered. DNS rebinding to
+  loopback is not caught by name. The tests let the loopback fixture server through with a
+  test-only `testOnlyAllow` option that only a caller's options can set: not the command line, the
+  config file or the environment.
 - **Library route.** It is used only when the landing page is still on the publisher the DOI
   resolved to.
 - **Papers folders are nested mounts in the research container.** The research container cannot
   rename or replace them. Otherwise it could replace `papers` with a link to any host folder, and the
   fetcher's next automatic restart would mount that. `agent-up up fetcher` refuses until a running
   research container has those mounts: run `agent-up up research` before the first start and after
-  adding a project.
+  adding a project. `agent-up up research` stops a running research container BEFORE it checks,
+  creates and renders the papers folders (the old container, started before the nested mounts or
+  before a new project existed, could otherwise swap a folder for a link before Docker mounts it),
+  then starts it again. After starting, both `up research` and `up fetcher` verify each papers
+  mount: its own bind with exactly the host source, the host path still a real folder, and the
+  folder seen inside at the target the same directory (device and inode from `stat` on the host and
+  `docker exec … stat` inside; on this host's Docker Desktop for WSL 2 they match across a bind
+  mount). Any failure stops the container again and `up` fails.
 - **The fetcher's `compose.yaml`** must equal the shipped seed apart from the image digest. The
   viewer port and password come from generated files.
 - **Seccomp.** The profile is Docker's default plus one rule allowing `clone`, `setns` and
@@ -360,10 +403,26 @@ Where the build differs from the text above, the build wins. The code is the ref
   runs no T3), not noVNC's usual 6080. The 8-character password is in
   `<fetcher config>/.generated/view-password`. Clipboard sharing is off: the owner types the library
   password. The browser's address bar is visible.
-- **Owner pages.** `agent-up fetch login` keeps the page up only if it landed on a configured login
-  host; otherwise it blanks the tab and says so. If the owner is already signed in it says so and
-  points to `agent-up fetch retry login`. `agent-up fetch check <host>` keeps the page only if it
-  landed on that host.
+- **Owner pages are host-locked while paused.** `agent-up fetch check <host>` opens in the direct
+  browser and keeps the page only if it landed on `<host>`; from then on the main frame may only be on
+  `<host>`, and if it leaves the tab is blanked (`left-host`). `agent-up fetch login` opens in the
+  library browser, and from its first navigation the main frame may only be on a configured login
+  host (`isLoginHost`: OpenAthens, Duo, `LOGIN_HOSTS`) or the library prefix's host; the moment it
+  goes anywhere else (sign-in finished, or anything else) the navigation is refused, the tab blanked,
+  the login-page state ended, and the outcome `signed-in-or-left` recorded for `fetch status`; the
+  owner then runs `agent-up fetch retry login`. The owner never looks at a non-login page in login
+  mode. The library prefix is followed by the paper's landing URL only if that URL's host equals the
+  publisher host the engine itself recorded for the paper. An owner page that stops answering is
+  killed with its browser (`page-timeout`). The reply texts and the runbook say a check page never
+  needs the library password and to type it only on a page whose address bar shows the library's
+  sign-in host. (This replaces the earlier one-time landing check.)
+- **Requests: bounded and fair.** At most 50 request files per project per pass (lexicographic; the
+  rest untouched and counted as `ignored` in `fetch status`), at most 500 projects, at most 5000
+  directory entries read per folder and 16 MiB of request files per pass. Work is taken round-robin
+  across projects, one DOI per project in turn. An unchanged request file (identity, size and
+  modification time from `fstat` on the held descriptor) is not read or parsed again.
+- **Entry point.** `fetcher-entrypoint` and `fetcher-view` set a fixed root-owned `PATH` and start
+  every program by absolute path (the inherited `PATH` begins with an agent-owned npm folder).
 - **Updates.** `agent-up update` restarts the fetcher without the busy question; the session survives
   in the `fetcher-profile` volume.
 - **Launcher.** Every project's `up` now needs a Docker Compose that supports
