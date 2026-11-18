@@ -246,6 +246,18 @@ contact_email_passed() {  # Unpaywall gets RESEARCH_CONTACT_EMAIL when set; unse
   RESEARCH_CONTACT_EMAIL=papers+research@relay.example list_tools "$pc/r" "$pc/e.err" >/dev/null || { tail -n 20 "$pc/e.err"; return 1; }
   if grep -q UNPAYWALL "$pc/e.err"; then echo "set: the server still says the Unpaywall email is missing"; return 1; fi
 }
+core_key_passed() {  # CORE_API_KEY reaches the server under its own name; the value is never written into the Claude config
+  local k=Ab12Cd34Ef56Gh78 f
+  (unset CORE_API_KEY; list_tools "$pc/r" "$pc/cu.err") >/dev/null || { tail -n 20 "$pc/cu.err"; return 1; }
+  grep -qi "CORE API key" "$pc/cu.err" || { echo "unset: no CORE key warning on stderr"; return 1; }
+  CORE_API_KEY=$k list_tools "$pc/r" "$pc/ce.err" >/dev/null || { tail -n 20 "$pc/ce.err"; return 1; }
+  if grep -qi "CORE API key" "$pc/ce.err"; then echo "set: the server still says the CORE key is missing"; return 1; fi
+  CORE_API_KEY=$k configure "$pc/research" "$pc/r" || return 1   # configured WITH the key in the environment
+  for f in "$pc/r/.claude.json" "$pc/r/settings.json"; do
+    if grep -qF "$k" "$f"; then echo "the key value is in $f"; return 1; fi
+  done
+  grep -qF '$CORE_API_KEY' "$pc/r/.claude.json" || { echo "no \$CORE_API_KEY reference in .claude.json"; return 1; }
+}
 paper_search_not_builder() {  # no profile file, PROFILE=builder, and research -> builder on the same volume
   configure "$pc/absent" "$pc/b1" || return 1
   configure "$pc/builder" "$pc/b2" || return 1
@@ -285,6 +297,7 @@ check "every tool that mentions Sci-Hub is denied"                  scihub_tools
 check "managed settings: root-owned, deny every Sci-Hub tool, same list" managed_settings_deny
 check "nothing enables Sci-Hub"                                     scihub_not_enabled
 check "RESEARCH_CONTACT_EMAIL reaches Unpaywall; unset still starts" contact_email_passed
+check "CORE_API_KEY reaches the server; its value is in no Claude config file" core_key_passed
 check "paper-search NOT registered for builders"                    paper_search_not_builder
 check "unreadable .claude.json: kept, settings still written"       broken_claude_json_kept
 [ "$fail" -eq 0 ] && echo "SMOKE research-offline: ALL PASSED" || { echo "SMOKE research-offline: FAILURES"; exit 1; }

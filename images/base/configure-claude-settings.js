@@ -86,13 +86,14 @@ console.log(`Wrote statusLine + skipDangerousModePermissionPrompt + defaultMode=
 // --scope user` writes; written here because agent-init may run before claude is installed). Its start
 // command: a scratch working folder, so a call without save_path (default ./downloads) never writes
 // into the session's folder; a clean environment, so the server gets only the contact email (Unpaywall,
-// OpenAlex; empty = unset) and no token, key or ~/.config/paper-search-mcp/.env. Variables are written
+// OpenAlex; empty = unset) and the CORE key (empty = unset; only the $CORE_API_KEY reference is written here, never its value) and no token, other key or ~/.config/paper-search-mcp/.env. Variables are written
 // $NAME, never ${NAME}: Claude treats ${NAME} in MCP args as its own expansion syntax, which could put
 // the value into the shell text. A failure here warns and leaves the file alone: the container still
 // starts, without the server.
 const paperSearchStart = 'mkdir -p "$HOME/.cache/paper-search" && cd "$HOME/.cache/paper-search" && '
   + 'exec env -i HOME="$HOME" PATH="$PATH" PAPER_SEARCH_MCP_ENV_FILE=/dev/null '
   + 'PAPER_SEARCH_MCP_UNPAYWALL_EMAIL="$RESEARCH_CONTACT_EMAIL" PAPER_SEARCH_MCP_OPENALEX_EMAIL="$RESEARCH_CONTACT_EMAIL" '
+  + 'PAPER_SEARCH_MCP_CORE_API_KEY="$CORE_API_KEY" '
   + PAPER_SEARCH;
 try {
   const claudeJsonPath = path.join(claudeDir, '.claude.json');

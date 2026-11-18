@@ -59,6 +59,7 @@ cat > "$T/dstub/docker" <<'STUB'
 { echo "ARGS: $*"
   echo "ENV: COMPOSE_FILE=${COMPOSE_FILE-<unset>} COMPOSE_PROFILES=${COMPOSE_PROFILES-<unset>} PROJECT_DIR=${PROJECT_DIR-<unset>} SPADES_AI_DIR=${SPADES_AI_DIR-<unset>} GH_TOKEN=${GH_TOKEN-<unset>}"
   echo "OPTOK: ${OP_SERVICE_ACCOUNT_TOKEN-<unset>}"
+  [ -z "${CORE_API_KEY+x}" ] || echo "CORE: $CORE_API_KEY"   # only when set, so call-order checks see no extra line
 } >> "$DLOG"
 # the config root agent-up uses (for the generated overlays the stub reads: what Docker would mount)
 croot="${AGENT_CONTAINERS_CONFIG:-$HOME/.config/agent-containers}"
@@ -819,6 +820,54 @@ cp "$CFG/project.conf" "$T/pconf-ce.bak"
 echo 'RESEARCH_CONTACT_EMAIL=papers+research@relay.example' >> "$CFG/project.conf"
 refuses "up refuses RESEARCH_CONTACT_EMAIL on a builder" 'for the research container only' au up "$NAME"
 refuses "config refuses RESEARCH_CONTACT_EMAIL on a builder" 'for the research container only' au config "$NAME"
+cp "$T/pconf-ce.bak" "$CFG/project.conf"
+
+# CORE_API_KEY: a secret for the research container only; never printed, never on disk outside project.conf
+CK=Ab12Cd34Ef56Gh78
+check "init seeds a commented CORE_API_KEY line" grep -qx '#CORE_API_KEY=' "$RCFG/project.conf"
+check "  ...with a comment above it" bash -c 'grep -B1 -x "#CORE_API_KEY=" "$1" | head -n 1 | grep -q "CORE"' _ "$RCFG/project.conf"
+au config research >/dev/null 2>&1 || true
+check "CORE unset: the research overlay has no CORE_API_KEY" bash -c '! grep -q CORE_API_KEY "$1"' _ "$RCFG/.generated/research.yaml"
+check "  ...config says unset" bash -c 'grep -qx "agent-up: CORE_API_KEY: unset" <<<"$1"' _ "$(au config research 2>&1)"
+check "  ...status says unset" bash -c 'grep -qx "CORE_API_KEY: unset" <<<"$1"' _ "$(au status research 2>&1)"
+: > "$DLOG"; au up research >/dev/null 2>&1 || true
+check "  ...up gives compose no CORE_API_KEY" bash -c '! grep -q "^CORE: " "$1"' _ "$DLOG"
+echo "CORE_API_KEY=$CK" >> "$RCFG/project.conf"
+check "config research accepts a valid CORE_API_KEY" au config research
+check "  ...the overlay passes the name only, under environment:" bash -c 'grep -B3 "CORE_API_KEY" "$1" | grep -qx "    environment:" && grep -qx "      CORE_API_KEY:" "$1"' _ "$RCFG/.generated/research.yaml"
+check "  ...the value is nowhere under .generated" bash -c '! grep -rqF -- "$2" "$1"' _ "$RCFG/.generated" "$CK"
+check "  ...config output does not contain it, and says set" bash -c '! grep -qF -- "$2" <<<"$1" && grep -qx "agent-up: CORE_API_KEY: set" <<<"$1"' _ "$(au config research 2>&1)" "$CK"
+check "  ...status output does not contain it, and says set" bash -c '! grep -qF -- "$2" <<<"$1" && grep -qx "CORE_API_KEY: set" <<<"$1"' _ "$(au status research 2>&1)" "$CK"
+: > "$DLOG"; msg="$(au up research 2>&1 || true)"
+check "  ...up gives the compose up call the value in its environment" grep -qxF "CORE: $CK" "$DLOG"
+check "  ...but no other docker call" bash -c '[ "$(grep -cF "$2" "$1")" -eq 1 ]' _ "$DLOG" "$CK"
+check "  ...and up does not print it" bash -c '! grep -qF -- "$2" <<<"$1"' _ "$msg" "$CK"
+cp "$T/rconf-ce.bak" "$RCFG/project.conf"
+for bad in abc 'key with space' 'a"b$c' "$(printf 'a%.0s' $(seq 65))" 'abcdefghijklmnop-' '15charsabcdefgh'; do
+  echo "CORE_API_KEY=$bad" >> "$RCFG/project.conf"
+  refuses "up research refuses CORE_API_KEY (${#bad} chars)" 'CORE_API_KEY.*not 16-64 letters and digits' au up research
+  refuses "config research refuses CORE_API_KEY (${#bad} chars)" 'CORE_API_KEY.*not 16-64 letters and digits' au config research
+  msg=$(au up research 2>&1 || true)
+  check "  ...without echoing the value" bash -c '! grep -qF -- "$2" <<<"$1"' _ "$msg" "$bad"
+  cp "$T/rconf-ce.bak" "$RCFG/project.conf"
+done
+echo 'CORE_API_KEY=a b' >> "$RCFG/project.conf"
+check "stop research works with an invalid CORE_API_KEY" au stop research
+check "  ...and the name is omitted from the overlay" bash -c '! grep -q CORE_API_KEY "$1"' _ "$RCFG/.generated/research.yaml"
+cp "$T/rconf-ce.bak" "$RCFG/project.conf"
+echo "CORE_API_KEY=$CK" >> "$RCFG/project.conf"
+AMBIENT=(CORE_API_KEY=leakleakleakleak1)
+au config research >/dev/null 2>&1 || true
+check "an ambient CORE_API_KEY never reaches the overlay" bash -c '! grep -rq "leakleakleakleak1" "$1"' _ "$RCFG/.generated"
+: > "$DLOG"; au up research >/dev/null 2>&1 || true
+check "  ...nor compose: the project.conf value is what up passes" bash -c '! grep -q "leakleakleakleak1" "$1" && grep -qxF "CORE: $2" "$1"' _ "$DLOG" "$CK"
+AMBIENT=()
+cp "$T/rconf-ce.bak" "$RCFG/project.conf"
+echo "CORE_API_KEY=$CK" >> "$CFG/project.conf"
+refuses "up refuses CORE_API_KEY on a builder" 'for the research container only' au up "$NAME"
+refuses "config refuses CORE_API_KEY on a builder" 'for the research container only' au config "$NAME"
+msg=$(au up "$NAME" 2>&1 || true)
+check "  ...without echoing the value" bash -c '! grep -qF -- "$2" <<<"$1"' _ "$msg" "$CK"
 cp "$T/pconf-ce.bak" "$CFG/project.conf"
 au config research >/dev/null 2>&1 || true
 
@@ -1957,6 +2006,8 @@ for kv in T3_CONNECT=1 RSTUDIO=1 FTP_HOSTS=ftp.example.org T3_PORT=3999 RESEARCH
 done
 cp "$T/fconf.bak" "$FCFG/project.conf"; echo 'RESEARCH_CONTACT_EMAIL=papers@relay.example' >> "$FCFG/project.conf"
 refuses "up fetcher refuses RESEARCH_CONTACT_EMAIL" 'for the research container only' fau up fetcher
+cp "$T/fconf.bak" "$FCFG/project.conf"; echo 'CORE_API_KEY=Ab12Cd34Ef56Gh78' >> "$FCFG/project.conf"
+refuses "up fetcher refuses CORE_API_KEY" 'for the research container only' fau up fetcher
 cp "$T/fconf.bak" "$FCFG/project.conf"
 # the seccomp profile: present and identical to the template this launcher ships
 mv "$FCFG/fetcher-seccomp.json" "$T/fsec.bak"
