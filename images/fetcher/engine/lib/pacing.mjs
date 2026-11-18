@@ -78,6 +78,22 @@ export class Pacer {
     return null;
   }
 
+  // The per-host cap alone, for a host a visit reaches after its first hop (a redirect or the
+  // page's own move): 'skipped:host-cap' or null.
+  hostCap(host) {
+    this.#rollover();
+    return (this.state.hosts.get(host) ?? 0) >= this.caps.perHost ? 'skipped:host-cap' : null;
+  }
+
+  // Count a host reached after the first hop: the per-host count and gap, not the daily total
+  // (the visit was counted once, on its first hop, by record()).
+  recordHost(host) {
+    this.#rollover();
+    this.state.hosts.set(host, (this.state.hosts.get(host) ?? 0) + 1);
+    this.state.lastHost.set(host, this.now());
+    this.#save();
+  }
+
   waitMs(host) {
     const now = this.now();
     // A stored time in the future (bad clock, bad file) counts as now, and no wait ever

@@ -29,6 +29,9 @@ const KEYS = {
   NAV_TIMEOUT_MS: (v, c) => { c.timeouts.navMs = num(v); },
   SETTLE_MS: (v, c) => { c.timeouts.settleMs = num(v); },
   DOWNLOAD_TIMEOUT_MS: (v, c) => { c.timeouts.downloadMs = num(v); },
+  // The hard limit on one browser visit, whatever the page does (default: NAV_TIMEOUT_MS +
+  // SETTLE_MS + DOWNLOAD_TIMEOUT_MS + 30 s; browser.mjs deadlineMs).
+  PAPER_DEADLINE_MS: (v, c) => { c.paperDeadlineMs = num(v); },
 };
 
 export function loadConfig(path) {

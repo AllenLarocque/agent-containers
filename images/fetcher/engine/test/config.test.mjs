@@ -88,3 +88,14 @@ test('RESOLVER_PER_DAY and MAX_PDF_BYTES are read', () => {
   assert.equal(c.caps.resolverPerDay, 7);
   assert.equal(c.maxPdfBytes, 1000);
 });
+
+test('PAPER_DEADLINE_MS is read; there is no key that lets loopback through or turns a guard off', () => {
+  const f = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'cfg-')), 'c');
+  fs.writeFileSync(f, 'PAPER_DEADLINE_MS=5000\n');
+  assert.equal(loadConfig(f).paperDeadlineMs, 5000);
+  assert.equal(loadConfig(path.join(path.dirname(f), 'none')).paperDeadlineMs, undefined);
+  for (const k of ['TEST_ONLY_ALLOW', 'ALLOW', 'SANDBOX', 'testOnlyAllow']) {
+    fs.writeFileSync(f, `${k}=127.0.0.1:3773\n`);
+    assert.throws(() => loadConfig(f), /unknown or malformed key/, k);
+  }
+});

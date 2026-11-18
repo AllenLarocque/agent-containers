@@ -4,7 +4,7 @@
 // trusted if they re-render byte for byte.
 import { parseDoi } from './doi.mjs';
 import { statusLine } from './records.mjs';
-import { withDir, listAt, readSmall, readSmallAt } from './fs-util.mjs';
+import { withDir, listAt, readSmall, readSmallAt, readChangedAt } from './fs-util.mjs';
 import path from 'node:path';
 
 export const REQUEST_NAME = /^[A-Za-z0-9._-]{1,80}\.txt$/;
@@ -30,19 +30,49 @@ function parseRequest(text) {
   return { dois, bad };
 }
 
-export function scanRequests(papersRoot) {
+// Bounds on one pass: projects considered, request files per project (lexicographic by name;
+// the rest are left untouched and counted as ignored by fetcherctl status), directory entries
+// read per folder, and request bytes read per pass.
+export const SCAN = Object.freeze({ projects: 500, filesPerProject: 50, listMax: 5000, totalBytes: 16 * 1024 * 1024 });
+
+// The project folders under the papers root, bounded and sorted.
+export const projectNames = (papersRoot, limits = SCAN) =>
+  (withDir(papersRoot, [], (fd) => listAt(fd, limits.listMax)) ?? []).filter((p) => PROJECT.test(p)).sort().slice(0, limits.projects);
+
+// A held _fetch/requests folder -> {names: the request files considered, ignored: how many more}.
+export function requestNames(dirFd, limits = SCAN) {
+  const all = listAt(dirFd, limits.listMax).filter((n) => REQUEST_NAME.test(n)).sort();
+  return { names: all.slice(0, limits.filesPerProject), ignored: Math.max(0, all.length - limits.filesPerProject) };
+}
+
+// Every request file considered this pass -> [{project, name, dois, bad}]. cache (a Map kept by
+// the caller between passes): a file whose identity, size and modification time are unchanged is
+// not read or parsed again.
+export function scanRequests(papersRoot, { cache = null, limits = SCAN } = {}) {
   const out = [];
-  const projects = withDir(papersRoot, [], listAt) ?? [];
-  for (const project of projects.sort()) {
-    if (!PROJECT.test(project)) continue;
+  const seen = new Set();
+  let bytes = 0;
+  for (const project of projectNames(papersRoot, limits)) {
+    if (bytes > limits.totalBytes) break;
     withDir(papersRoot, [project, '_fetch', 'requests'], (fd) => {
-      for (const name of listAt(fd).sort()) {
-        if (!REQUEST_NAME.test(name)) continue;
-        const text = readSmallAt(fd, name, MAX_REQUEST_BYTES);
-        if (text !== null) out.push({ project, name, ...parseRequest(text) });
+      for (const name of requestNames(fd, limits).names) {
+        const key = `${project}/${name}`;
+        const prev = cache?.get(key);
+        const got = readChangedAt(fd, name, MAX_REQUEST_BYTES, prev);
+        if (got === null) continue;
+        if (got !== prev) {
+          bytes += got.text.length;
+          if (bytes > limits.totalBytes) break;
+          got.parsed = parseRequest(got.text);
+          delete got.text;
+        }
+        seen.add(key);
+        cache?.set(key, got);
+        out.push({ project, name, dois: got.parsed.dois, bad: got.parsed.bad });
       }
     });
   }
+  if (cache) for (const k of [...cache.keys()]) if (!seen.has(k)) cache.delete(k);
   return out;
 }
 

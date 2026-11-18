@@ -199,3 +199,15 @@ test('lookups: the per-day count resets on the next UTC day', () => {
   clock.t = Date.UTC(2026, 10, 17, 0, 0, 1);
   assert.equal(p.checkLookup('doi.org'), null);
 });
+
+test('hostCap/recordHost: a landing host counts toward its own per-host cap and gap, not the daily total', () => {
+  const { p, make } = setup({ caps: { perHost: 2 } });
+  assert.equal(p.hostCap('land.org'), null);
+  p.recordHost('land.org');
+  p.recordHost('land.org');
+  assert.equal(p.hostCap('land.org'), 'skipped:host-cap');
+  assert.equal(p.check('land.org', false), 'skipped:host-cap');
+  assert.equal(p.state.total, 0);
+  assert.ok(p.waitMs('land.org') > 0);
+  assert.equal(make().hostCap('land.org'), 'skipped:host-cap', 'persisted');
+});

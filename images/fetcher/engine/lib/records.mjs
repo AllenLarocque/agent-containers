@@ -40,12 +40,19 @@ function checkRef(v, status) {
   }
   return checkDoi(v);
 }
-// An empty host (no landing page was reached) is written as "-".
+// Host names come from the network, so they are attacker-chosen text within [a-z0-9.-]. They are
+// also capped: at most MAX_HOST characters in all and MAX_LABEL per label; a longer one is written
+// as the placeholder "-", like an empty host (no landing page was reached).
+export const MAX_HOST = 100;
+export const MAX_LABEL = 40;
+const shortHost = (v) => v.length <= MAX_HOST && v.split('.').every((l) => l.length <= MAX_LABEL);
 function checkHost(v) {
   if (v === '') return '-';
   if (typeof v !== 'string' || !HOST.test(v)) fail('host', v);
-  return v;
+  return shortHost(v) ? v : '-';
 }
+// The same rule for log lines: a valid, short host or "-".
+export const hostField = (v) => (typeof v === 'string' && HOST.test(v) && shortHost(v) ? v : '-');
 function checkDate(v) {
   if (typeof v !== 'string' || !DATE.test(v)) fail('date', v);
   const d = new Date(`${v}T00:00:00Z`);

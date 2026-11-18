@@ -28,7 +28,21 @@ export function withDir(root, segs, fn) {
   }
 }
 
-export const listAt = (dirFd) => fs.readdirSync(`/proc/self/fd/${dirFd}`);
+// The names in a held directory: at most max of them (in the directory's own order), so a folder
+// with millions of entries costs no more than max.
+export function listAt(dirFd, max = 100000) {
+  const out = [];
+  let d;
+  try {
+    d = fs.opendirSync(`/proc/self/fd/${dirFd}`);
+    for (let e; out.length < max && (e = d.readSync()) !== null;) out.push(e.name);
+  } catch {
+    /* unreadable: what was read so far */
+  } finally {
+    if (d) { try { d.closeSync(); } catch { /* closed */ } }
+  }
+  return out;
+}
 
 // A small regular file, not through a link at its final name; null otherwise.
 export function readSmall(file, max) {
@@ -48,6 +62,28 @@ export function readSmall(file, max) {
 }
 
 export const readSmallAt = (dirFd, name, max) => (plainName(name) ? readSmall(viaFd(dirFd, name), max) : null);
+
+// Like readSmallAt, but given what an earlier call returned for the same name, the file is read
+// again only if its identity, size or modification time (fstat on the open descriptor) changed.
+// -> {sig, text} (prev itself when unchanged) | null
+export function readChangedAt(dirFd, name, max, prev) {
+  if (!plainName(name)) return null;
+  let fd;
+  try {
+    fd = fs.openSync(viaFd(dirFd, name), O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+    const st = fs.fstatSync(fd, { bigint: true });
+    if (!st.isFile() || st.size > BigInt(max)) return null;
+    const sig = `${st.dev}:${st.ino}:${st.size}:${st.mtimeNs / 1000000n}`;   // mtime to the millisecond
+    if (prev && prev.sig === sig) return prev;
+    const buf = Buffer.alloc(Number(st.size));
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    return { sig, text: buf.subarray(0, n).toString('utf8') };
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
 
 // True if file is a regular file (not a link at its final name) starting with prefix.
 export function startsWith(file, prefix) {

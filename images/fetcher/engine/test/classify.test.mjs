@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isCheck, isLoginHost, pickPdfUrl, directPdfUrl, hostOf } from '../lib/classify.mjs';
+import { isCheck, isLoginHost, pickPdfUrl, directPdfUrl, hostOf, forbiddenHostname, forbiddenUrl } from '../lib/classify.mjs';
 
 const cfg = { loginHosts: ['login.openathens.net', 'go.openathens.net'] };
 
@@ -62,4 +62,29 @@ test('hostOf: lower-case host name without port; empty for anything else', () =>
   assert.equal(hostOf('about:blank'), '');
   assert.equal(hostOf('not a url'), '');
   assert.equal(hostOf('http://[::1]/'), '');
+});
+
+test('a long ordinary article containing "access denied" is not a check; a short page or the title is', () => {
+  const article = 'Methods. We interviewed 412 patients about their experience of the clinic. '.repeat(40) +
+    'Several reported that access denied to specialist care led to delays. ' + 'Discussion. '.repeat(50);
+  assert.ok(article.length > 1500);
+  assert.equal(isCheck({ title: 'Barriers to specialist care: a cohort study', text: article }), false);
+  assert.equal(isCheck({ title: 'Barriers to specialist care', text: 'Access denied. You do not have permission.' }), true);
+  assert.equal(isCheck({ title: 'Access Denied', text: article }), true);
+});
+
+test('forbidden hosts: loopback, private, link-local, IPv6 literals, localhost, .internal, single labels', () => {
+  for (const h of ['127.0.0.1', '127.9.9.9', '10.1.2.3', '172.16.0.1', '172.31.255.255', '192.168.65.254', '169.254.169.254',
+                   '100.64.0.1', '0.0.0.0', '224.0.0.1', '255.255.255.255', '[::1]', '[fe80::1]', '[::ffff:7f00:1]', 'localhost',
+                   'a.localhost', 'host.docker.internal', 'metadata', '', 'LOCALHOST'])
+    assert.equal(forbiddenHostname(h), true, h);
+  for (const h of ['doi.org', 'onlinelibrary.wiley.com', '8.8.8.8', '172.32.0.1', '192.169.0.1', '100.128.0.1'])
+    assert.equal(forbiddenHostname(h), false, h);
+  // the URL parser's canonical forms are what is tested
+  for (const u of ['http://2130706433/', 'http://0x7f.1/', 'http://127.1/', 'ws://localhost:3773/', 'wss://[::1]:3773/',
+                   'file:///etc/passwd', 'ftp://doi.org/', 'javascript:alert(1)', 'not a url'])
+    assert.equal(forbiddenUrl(u), true, u);
+  assert.equal(forbiddenUrl('https://doi.org/10.5555/x'), false);
+  assert.equal(forbiddenUrl('http://127.0.0.2:4000/x', new Set(['127.0.0.2:4000'])), false);
+  assert.equal(forbiddenUrl('http://127.0.0.2:4001/x', new Set(['127.0.0.2:4000'])), true);
 });

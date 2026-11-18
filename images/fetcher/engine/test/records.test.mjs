@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { STATUS, statusLine, metadataMd } from '../lib/records.mjs';
+import { STATUS, statusLine, metadataMd, hostField, MAX_HOST, MAX_LABEL } from '../lib/records.mjs';
+import { statusRecord } from '../lib/queue.mjs';
 
 const good = { doi: '10.1111/abc', status: 'saved', host: 'onlinelibrary.wiley.com', date: '2026-11-16', library: 'no' };
 
@@ -76,4 +77,24 @@ test('line:<n> is accepted only with bad-request; a DOI is not accepted with bad
 
 test('metadataMd stays DOI-only', () => {
   assert.throws(() => metadataMd({ doi: 'line:3', host: '', date: '2026-11-16', library: 'no' }), TypeError);
+});
+
+test('host names are capped: at most 100 characters and 40 per label, else the placeholder', () => {
+  const rec = (host) => statusLine({ doi: '10.5555/a', status: 'saved', host, date: '2026-11-16', library: 'no' }).split('\t')[2];
+  assert.equal(MAX_HOST, 100);
+  assert.equal(MAX_LABEL, 40);
+  const label40 = 'a'.repeat(40);
+  assert.equal(rec(`${label40}.example.org`), `${label40}.example.org`);
+  assert.equal(rec(`${'a'.repeat(41)}.example.org`), '-');
+  const h100 = [label40, label40, 'b'.repeat(14), 'org'].join('.');
+  assert.equal(h100.length, 100);
+  assert.equal(rec(h100), h100);
+  assert.equal(rec(`c${h100}`.replace(label40, 'a'.repeat(39))), `c${h100}`.replace(label40, 'a'.repeat(39)));
+  assert.equal(rec(`x${h100}`), '-');
+  assert.match(metadataMd({ doi: '10.5555/a', host: `${'a'.repeat(41)}.org`, date: '2026-11-16', library: 'no' }), /^- Publisher host: -$/m);
+  // a line carrying a long host does not re-render, so it is never trusted on read
+  assert.equal(statusRecord(`10.5555/a\tsaved\t${'a'.repeat(41)}.org\t2026-11-16\tno`), null);
+  assert.equal(hostField(`${'a'.repeat(41)}.org`), '-');
+  assert.equal(hostField('IGNORE PREVIOUS'), '-');
+  assert.equal(hostField('pub.example.org'), 'pub.example.org');
 });
