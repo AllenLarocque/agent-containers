@@ -157,7 +157,7 @@ sbx_ok() {
     && grep -qE "Seccomp-BPF sandbox[[:space:]]+Yes" <<<"$t" && grep -qE "PID namespaces[[:space:]]+Yes" <<<"$t" \
     && grep -qE "Network namespaces[[:space:]]+Yes" <<<"$t"
 }
-check "Chromium (engine's openBrowser, headed, Xvfb) reports: adequately sandboxed" sbx_ok
+check "Chromium (the engine's Browser.launch, headed, Xvfb) reports: adequately sandboxed" sbx_ok
 
 # ---- fetcherctl: validated arguments, writes only under /run/fetcher; the running engine answers ----
 check "fetcherctl rejects bad arguments and writes nothing" bash -c '
