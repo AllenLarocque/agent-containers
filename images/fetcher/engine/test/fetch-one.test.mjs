@@ -316,3 +316,20 @@ test('a direct visit and a library-routed visit use different profiles: neither 
   }
   assert.equal(browsers.libraryOpen, false);
 });
+
+test('through the loop, a direct visit runs in the direct profile: its cookie lands there, the library browser is never opened', async () => {
+  const { d, go } = loopEnv({ libraryPrefix: fx.libraryPrefix });
+  request(d.papers, 'p', 'r.txt', ['10.5555/ckloop']);
+  let opened = false;
+  const orig = browsers.library.bind(browsers);
+  browsers.library = async () => { opened = true; return orig(); };
+  try {
+    await go();
+  } finally {
+    delete browsers.library;
+  }
+  assert.deepEqual(statusLines(d.papers, 'p', 'r.txt').map((l) => [l[1], l[4]]), [['saved', 'no']]);
+  assert.equal(opened, false, 'the library browser was opened for a direct paper');
+  assert.equal(browsers.libraryOpen, false);
+  assert.ok((await ctx.ctx.cookies()).some((c) => c.name === 'ckloop'), 'cookie not in the direct profile');
+});
