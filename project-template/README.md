@@ -346,6 +346,10 @@ the discovery services that ask for it, never in reports, and in a form only whe
 chat (it asks you which address to use before it enters one on a form). If it is unset, the agent skips
 Unpaywall and says so in its report. Builders refuse the setting.
 
+**Discovery sources (optional, once at setup).** The research agent searches many open sources with
+the `paper-search` tools. Two of them need something from you. Both are optional; without them the
+other sources work as before. See [docs/runbooks/new-project.md](../docs/runbooks/new-project.md#discovery-sources-for-the-research-agent).
+
 **What persists in the research container.** `agent-up up research` recreates the container
 (`--force-recreate`), so only these survive:
 

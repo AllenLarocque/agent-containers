@@ -27,3 +27,19 @@ Installed versions are listed in `/opt/paper-tools/MANIFEST`. Do not install any
 
 ## Tables
 No tables tool yet (Docling arrives in stage 2b). Use the built-in PDF reader for tables.
+
+## Finding papers: the `paper-search` MCP server (Claude Code only)
+- What it is for: searching many legal sources at once (`search_papers`, or one source such as
+  `search_arxiv`, `search_openalex`, `search_crossref`, `search_core`, `search_europepmc`), citation
+  links (`get_citing_papers`, `get_referenced_papers`), and open-access PDFs (`download_<source>`).
+- Sci-Hub is off: its tools (`download_scihub`, and `download_with_fallback`, which can fall back to
+  Sci-Hub) are denied. Do not try to reach Sci-Hub or any other shadow library another way.
+- Instead of `download_with_fallback`: use the source's own `download_<source>` tool, or
+  `search_unpaywall` (by DOI) for an open-access `pdf_url`, then download that.
+- Downloads: always pass `save_path` as the paper's own folder,
+  `/research/<project>/downloads/papers/<one folder per paper>/` (or `/research/_general/papers/...`),
+  then write its `metadata.md` there as for any other paper. Without `save_path` the file lands in a
+  scratch folder, not in the papers store.
+- Unpaywall and OpenAlex get `$RESEARCH_CONTACT_EMAIL` when it is set; unset, Unpaywall is skipped.
+- Google Scholar often refuses automated queries; move on to the other sources when it does.
+- If no `paper-search` tools are listed, the server did not start: search the services by hand and say so.

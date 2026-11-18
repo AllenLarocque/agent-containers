@@ -1,2 +1,5 @@
 # stage 2a (owner-approved 2026-10-21); apt unpinned (the weekly rebuild takes security patches), PyPI pinned `name==x.y.z`
 ocrmypdf==17.13.0  # OCR of scanned papers (Tesseract); brings img2pdf
+# Paper discovery MCP server (registered for Claude in the research container only; its Sci-Hub tools are
+# denied, see images/base/configure-claude-settings.js). No releases: pinned to a commit on main, 2026-10-02.
+paper-search-mcp @ git+https://github.com/openags/paper-search-mcp@cab1b5cc276a0cd004a0044003926a6440088049

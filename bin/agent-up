@@ -200,6 +200,8 @@ T3_PORT=$(next_t3_port)
 T3_CONNECT=0
 # Contact address for Unpaywall/OpenAlex/Crossref (they ask who is calling). Use a forwarding alias you can switch off, never your real address. Not a secret; unset = the bot skips Unpaywall.
 #RESEARCH_CONTACT_EMAIL=
+# Optional CORE API key (higher rate limits for CORE paper search): 16-64 letters and digits. A secret: agent-up never prints it. Unset = CORE search runs without a key.
+#CORE_API_KEY=
 CONFEOF
   chmod 600 "$tmp/compose.yaml" "$tmp/project.conf"
   chmod 700 "$tmp"
@@ -343,6 +345,21 @@ check_contact(){ # $1 config dir: research only; a builder never gets the settin
   elif [ -n "$(contact_email "$1")" ]; then
     die "RESEARCH_CONTACT_EMAIL is for the research container only"
   fi
+}
+core_key(){ conf_get "$1/project.conf" CORE_API_KEY; }   # $1 config dir: the value as written (empty = unset)
+core_ok(){ # $1 config dir: unset, or 16-64 letters and digits
+  local v LC_ALL=C; v="$(core_key "$1")"
+  [ -z "$v" ] || [[ "$v" =~ ^[A-Za-z0-9]{16,64}$ ]]
+}
+check_core_key(){ # $1 config dir: research only; a builder or the fetcher never gets it. Never echoes the value.
+  if [ "$(profile "$1")" = research ]; then
+    core_ok "$1" || die "CORE_API_KEY in $1/project.conf: not 16-64 letters and digits"
+  elif [ -n "$(core_key "$1")" ]; then
+    die "CORE_API_KEY is for the research container only"
+  fi
+}
+core_state(){ # $1 config dir -> set | unset | invalid (never the value)
+  if [ -z "$(core_key "$1")" ]; then echo unset; elif core_ok "$1"; then echo set; else echo invalid; fi
 }
 check_t3_port(){ # only up and pair need it: stop/down must work on a config that predates T3
   local port; port="$(conf_get "$1/project.conf" T3_PORT)"
@@ -1045,6 +1062,9 @@ write_research(){ # the research profile's switch + instructions + exchange; a b
       if [ -n "$(contact_email "$1")" ] && contact_ok "$1"; then   # invalid (stop/down) = omitted
         echo "      RESEARCH_CONTACT_EMAIL: $(yaml_str "$(contact_email "$1")")"
       fi
+      if [ "$(core_state "$1")" = set ]; then   # the NAME only: the value comes from agent-up's environment at `up`, never disk
+        echo "      CORE_API_KEY:"
+      fi
       echo "    volumes:"
       echo "      # read by the root firewall at start (open public egress); the agent cannot change it"
       bind_yaml ./.generated/profile /etc/firewall/profile ro
@@ -1196,22 +1216,50 @@ write_restart(){ # always: come back when Docker starts (e.g. after a reboot), u
     echo "    restart: unless-stopped"
   } > "$1/.generated/restart.yaml"
 }
+write_compose_env(){ # research: compose's interpolation variables = project.conf without any line naming CORE_API_KEY
+  # (in every form compose's env-file parser reads, including a quoted value continued over several lines). The key
+  # reaches compose only from agent-up's environment: the value at `up`, a placeholder at `config`. Never refuses.
+  [ "$(profile "$1")" = research ] || return 0
+  local out="$1/.generated/compose.env"
+  mkdir -p "$1/.generated"; chmod 700 "$1/.generated"
+  ( umask 077
+    awk -v sq="'" '
+      function closes(t, q) { if (q == sq) return index(t, q) > 0; gsub(/\\\\/, "", t); gsub(/\\"/, "", t); return index(t, q) > 0 }
+      { l[NR] = $0 }
+      END {
+        for (i = 1; i <= NR; i++) {
+          s = l[i]; sub(/\r$/, "", s); k = index(s, "CORE_API_KEY")
+          if (k == 0) { print l[i]; continue }
+          v = substr(s, k + 12)   # the line is left out; a quoted value that opens here and closes later goes too
+          if (match(v, /^[ \t]*[=:][ \t]*/)) {
+            v = substr(v, RLENGTH + 1); q = substr(v, 1, 1)
+            if ((q == "\"" || q == sq) && !closes(substr(v, 2), q)) {
+              for (j = i + 1; j <= NR; j++) if (closes(l[j], q)) break
+              if (j <= NR) i = j
+            }
+          }
+        }
+      }' "$1/project.conf" > "$out.tmp" && mv "$out.tmp" "$out" ) || die "could not write $out"
+  chmod 600 "$out"
+}
 compose_cmd(){ # sets COMPOSE for config dir $1
   if [ "$(profile "$1")" = fetcher ]; then   # its own overlays only; interpolation from .generated/compose.env, never project.conf
     COMPOSE=(docker compose --env-file "$1/.generated/compose.env" -f "$1/compose.yaml" -f "$1/.generated/fetcher.yaml" -f "$1/.generated/hostname.yaml" -f "$1/.generated/restart.yaml"
              --project-directory "$1" -p "$(basename "$1")")
     return 0
   fi
-  COMPOSE=(docker compose --env-file "$1/project.conf" -f "$1/compose.yaml" -f "$1/.generated/env-passthrough.yaml"
+  local envf="$1/project.conf"; [ "$(profile "$1")" != research ] || envf="$1/.generated/compose.env"   # write_compose_env
+  COMPOSE=(docker compose --env-file "$envf" -f "$1/compose.yaml" -f "$1/.generated/env-passthrough.yaml"
            -f "$1/.generated/t3-connect.yaml" -f "$1/.generated/research.yaml" -f "$1/.generated/rstudio.yaml" -f "$1/.generated/ftp.yaml" -f "$1/.generated/google-drive.yaml" -f "$1/.generated/hostname.yaml" -f "$1/.generated/restart.yaml"
            --project-directory "$1" -p "$(basename "$1")")
 }
-prepare(){ check_files "$1"; if [ "$(profile "$1")" = fetcher ]; then write_fetcher "$1"; write_hostname "$1"; write_restart "$1"; compose_cmd "$1"; return 0; fi; write_passthrough "$1"; write_t3_connect "$1"; write_research "$1"; write_rstudio "$1"; write_ftp "$1"; write_google_drive "$1"; write_hostname "$1"; write_restart "$1"; compose_cmd "$1"; }
+prepare(){ check_files "$1"; if [ "$(profile "$1")" = fetcher ]; then write_fetcher "$1"; write_hostname "$1"; write_restart "$1"; compose_cmd "$1"; return 0; fi; write_passthrough "$1"; write_t3_connect "$1"; write_research "$1"; write_rstudio "$1"; write_ftp "$1"; write_google_drive "$1"; write_hostname "$1"; write_restart "$1"; write_compose_env "$1"; compose_cmd "$1"; }
 
 up_fetcher(){ # $1 config dir: no secrets, no 1Password, no T3
   local name rd; name="$(basename "$1")"
   check_image_profile "$1"
   check_contact "$1"
+  check_core_key "$1"
   check_fetcher "$1"
   check_fetcher_compose "$1"
   check_digest "$1/compose.yaml" "$name"
@@ -1241,6 +1289,7 @@ cmd_up(){
   check_fetcher_private "$cfg"
   check_fetcher_volume_users "$cfg"
   check_contact "$cfg"
+  check_core_key "$cfg"
   check_t3_port "$cfg"
   check_t3_connect "$cfg"
   check_ts_port "$cfg"
@@ -1260,7 +1309,9 @@ cmd_up(){
     prepare "$cfg"
     check_rendered "$cfg"
     # No secrets at all: no `op run`, and not even the owner's service-account token in compose's environment.
-    env -u OP_SERVICE_ACCOUNT_TOKEN "${COMPOSE[@]}" up -d --force-recreate
+    # The CORE key (if any) reaches compose only here, in this one command's environment.
+    ( ck="$(core_key "$cfg")"; [ -z "$ck" ] || export CORE_API_KEY="$ck"   # exported, not on any command line
+      env -u OP_SERVICE_ACCOUNT_TOKEN "${COMPOSE[@]}" up -d --force-recreate )
     verify_papers_mounted "$name-agent-1" "$name" < <(research_papers_pairs "$cfg")
     echo "agent-up: '$name' running (research: open public egress, no secrets). Shell: agent-up shell $name"
     echo "agent-up: research projects: $(exchange_projects "$(research_dir "$cfg")" 2>/dev/null | paste -sd' ' - || true)"
@@ -1321,6 +1372,7 @@ cmd_config(){
   check_files "$cfg"
   check_image_profile "$cfg"
   check_contact "$cfg"
+  check_core_key "$cfg"
   if [ "$(profile "$cfg")" = fetcher ]; then   # no project.env keys to hide: compose never sees project.conf either
     check_fetcher "$cfg"; prepare "$cfg"; "${COMPOSE[@]}" config "$@"; return 0
   fi
@@ -1336,7 +1388,10 @@ cmd_config(){
   # Never print the owner's ambient value of a passthrough key: it is only meaningful under `op run`.
   local k
   [ ! -f "$cfg/project.env" ] || while IFS= read -r k; do [ -z "$k" ] || unset "$k"; done < <(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$cfg/project.env")
+  # The CORE key: compose's env file never holds it (write_compose_env); here it renders as a placeholder, never the value.
+  if [ "$(profile "$cfg")" = research ] && [ "$(core_state "$cfg")" = set ]; then export CORE_API_KEY='(set; not shown)'; fi
   "${COMPOSE[@]}" config "$@"
+  [ "$(profile "$cfg")" != research ] || echo "agent-up: CORE_API_KEY: $(core_state "$cfg")" >&2   # set/unset/invalid, never the value; stderr keeps --format json clean
 }
 cmd_shell(){
   [ $# -eq 1 ] || usage
@@ -1730,6 +1785,7 @@ cmd_status(){
   docker exec -u agent "$(basename "$(cfg_dir "$1")")-agent-1" agent-t3 projects 2>/dev/null </dev/null || true
   local cfg rd d; cfg="$(cfg_dir "$1")"
   if [ "$(profile "$cfg")" = research ]; then
+    echo "CORE_API_KEY: $(core_state "$cfg")"
     rd="$(research_dir "$cfg")"
     echo "Research downloads (on the host, $rd):"
     for d in "$rd"/*/downloads; do
@@ -1743,7 +1799,7 @@ cmd_status(){
 # must not override it (a shell variable beats --env-file in compose).
 unset COMPOSE_FILE COMPOSE_PROFILES COMPOSE_PATH_SEPARATOR COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES \
       PROJECT PROJECT_DIR PROFILE IMAGE SPADES_AI_DIR AGENT_MEMORY_DIR T3_PORT T3_CONNECT RESEARCH RESEARCH_DIR \
-      RSTUDIO RSTUDIO_PORT TAILSCALE_HTTPS_PORT TAILSCALE_HOST FTP_HOSTS GOOGLE_DRIVE RESEARCH_CONTACT_EMAIL \
+      RSTUDIO RSTUDIO_PORT TAILSCALE_HTTPS_PORT TAILSCALE_HOST FTP_HOSTS GOOGLE_DRIVE RESEARCH_CONTACT_EMAIL CORE_API_KEY \
       FETCH_VIEW_PORT LIBRARY_LINK_PREFIX FETCH_PER_HOST FETCH_PER_DAY FETCH_LIBRARY_PER_DAY
 
 [ $# -ge 1 ] || usage
