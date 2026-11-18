@@ -1,0 +1,2 @@
+# Fake CORE key used by the launcher tests (not a credential).
+cd3e4498471442fff4722766a5d6fe00edb0bb16:tests/launcher/test-agent-up.sh:generic-api-key:2009
