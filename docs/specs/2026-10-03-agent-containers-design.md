@@ -751,8 +751,9 @@ amendments); owner procedure: `docs/runbooks/paper-fetcher.md`.
 
 ## Amendment 2026-11-16: the research container may hold a CORE discovery key
 
-The research container may receive one optional value, `CORE_API_KEY`, a free key for the CORE
+The research container may receive one optional value, `CORE_API_KEY`, a key for the CORE
 open-access search service. It is not in 1Password because nothing sits behind it except a rate limit,
 and it follows the `RESEARCH_CONTACT_EMAIL` pattern: a line in the research `project.conf`, passed
-as an environment variable, never printed by `agent-up`. It is the single exception to "no
-credentials" in the research container.
+as an environment variable at `up`, never printed by `agent-up` (`config` and `status` show only
+whether it is set). It is the single exception to the rule that the research container holds no
+credentials.

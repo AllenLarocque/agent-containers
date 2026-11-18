@@ -205,8 +205,8 @@ paper_search_registered_research() {  # the registered server starts offline and
 }
 # Keyed on behaviour, not on one name (Review Focus 1): EVERY served tool whose definition (name,
 # description or parameters) mentions Sci-Hub must be denied to Claude by name, in <settings file>.
-# These checks read the settings only: whether Claude refuses a denied MCP call under bypassPermissions
-# needs a signed-in session, so it is checked with the owner after merge (plan acceptance list).
+# These checks read the settings only.
+# A live session's refusal of these tools is checked at owner acceptance (needs a signed-in session).
 denies_scihub_tools() {  # denies_scihub_tools <settings file>
   local t found=0
   while IFS= read -r t; do
