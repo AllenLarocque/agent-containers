@@ -578,20 +578,57 @@ fetcher_papers(){ # $1 fetcher config dir -> every papers folder the fetcher bin
   printf '%s\n' "$rd/_general/papers"
   fetcher_projects "$rd" 2>/dev/null | while IFS= read -r p; do printf '%s\n' "$rd/$p/downloads/papers"; done
 }
+bind_sources(){ env -u OP_SERVICE_ACCOUNT_TOKEN docker inspect -f '{{range .Mounts}}{{if eq .Type "bind"}}{{println .Source}}{{end}}{{end}}' "$1" </dev/null 2>/dev/null; }   # $1 container -> its bind mounts' host sources, one per line
+has_bind(){ grep -qxF -- "$2" <<<"$1"; }   # $1 bind_sources output, $2 host path: is it a bind source, exactly?
 check_papers_protected(){ # $1 fetcher config dir: if a research container exists, each papers folder the fetcher binds must be its OWN
   # mount there (same host source), so the research container cannot rename it and plant a link that a later restart of the
   # fetcher would follow. No research container: nobody can plant one.
   local c=research-agent-1 names mounts f miss=""
   names="$(docker ps -a --filter "name=^${c}\$" --format '{{.Names}}' </dev/null 2>/dev/null)" || die "could not ask Docker whether a research container exists"
   grep -qx "$c" <<<"$names" || return 0
-  mounts="$(docker inspect -f '{{range .Mounts}}{{if eq .Type "bind"}}{{println .Source}}{{end}}{{end}}' "$c" </dev/null 2>/dev/null)" \
-    || die "could not read the mounts of the research container ($c)"
+  mounts="$(bind_sources "$c")" || die "could not read the mounts of the research container ($c)"
   while IFS= read -r f; do
-    grep -qxF "$f" <<<"$mounts" || miss="$miss $f"
+    has_bind "$mounts" "$f" || miss="$miss $f"
   done < <(fetcher_papers "$1")
   [ -z "$miss" ] || [ ! -f "$CFG_ROOT/research/project.conf" ] || [ "$(canon_path "$(research_dir "$CFG_ROOT/research")")" = "$(canon_path "$(research_dir "$1")")" ] \
     || die "the research container uses RESEARCH_DIR=$(research_dir "$CFG_ROOT/research") but the fetcher's config ($1/project.conf) has RESEARCH_DIR=$(research_dir "$1"): the two must match. Set RESEARCH_DIR in $1/project.conf to the research container's, then agent-up up fetcher."
   [ -z "$miss" ] || die "the research container was started before paper folders were protected (or before a project existed): not its own mount there:$miss. Run agent-up up research first, then agent-up up fetcher (both must use the same RESEARCH_DIR)."
+}
+research_papers_pairs(){ # $1 research config dir -> "host folder|container target" for every papers folder up research mounts (write_research)
+  local rd p; rd="$(research_dir "$1")"; rd="$(cd "$rd" && pwd -P)"
+  printf '%s|%s\n' "$rd/_general/papers" /research/_general/papers
+  exchange_projects "$rd" 2>/dev/null | while IFS= read -r p; do printf '%s|%s\n' "$rd/$p/downloads/papers" "/research/$p/downloads/papers"; done
+}
+fetcher_papers_pairs(){ # $1 fetcher config dir -> "host folder|container target" for every papers folder up fetcher mounts (write_fetcher)
+  local rd p; rd="$(research_dir "$1")"; rd="$(cd "$rd" && pwd -P)"
+  printf '%s|%s\n' "$rd/_general/papers" /papers/_general
+  fetcher_projects "$rd" 2>/dev/null | while IFS= read -r p; do printf '%s|%s\n' "$rd/$p/downloads/papers" "/papers/$p"; done
+}
+verify_papers_mounted(){ # $1 container (just started), $2 what to run again, stdin: "host folder|container target" lines. For each papers
+  # folder: the container has it as its OWN bind with exactly that host source, the host path is still a real folder (no symlink), and
+  # the folder the container sees at the target IS that folder (device and inode match: a bind mount keeps both). This catches a folder
+  # swapped between agent-up's checks and Docker's mount. Any failure: the container is stopped again and up fails.
+  local c="$1" again="$2" mounts pair src tgt h i bad=""
+  mounts="$(bind_sources "$c")" || bad="; its mounts cannot be read"
+  while IFS= read -r pair; do
+    [ -n "$pair" ] || continue
+    src="${pair%%|*}"; tgt="${pair#*|}"
+    if ! real_dir "$src"; then bad="$bad; $src is no longer a real folder"; continue; fi
+    if ! has_bind "$mounts" "$src"; then bad="$bad; $src is not its own mount"; continue; fi
+    h="$(stat -c '%d:%i' -- "$src" 2>/dev/null)" || h=""
+    i="$(env -u OP_SERVICE_ACCOUNT_TOKEN docker exec "$c" /usr/bin/stat -c '%d:%i' -- "$tgt" </dev/null 2>/dev/null)" || i=""
+    [ -n "$h" ] && [ "$h" = "$i" ] || bad="$bad; $tgt inside is not $src (device:inode ${h:-?} on the host, ${i:-unreadable} inside)"
+  done
+  [ -n "$bad" ] || return 0
+  env -u OP_SERVICE_ACCOUNT_TOKEN docker stop "$c" >/dev/null </dev/null 2>&1 || true
+  die "stopped $c again: what it mounted is not what agent-up checked:${bad#;}. Make each papers folder a real folder (no link), then: agent-up up $again"
+}
+stop_research_first(){ # $1 research config dir: up research stops a running research container BEFORE its papers folders are checked,
+  # created and rendered, so nothing it runs can swap a folder for a link before Docker mounts it. (It is recreated right after.)
+  local c; c="$(basename "$1")-agent-1"
+  [ "$(env -u OP_SERVICE_ACCOUNT_TOKEN docker inspect -f '{{.State.Running}}' "$c" </dev/null 2>/dev/null)" = true ] || return 0   # (is_running, without the owner's token)
+  echo "agent-up: stopping $c while its papers folders are checked and mounted (it starts again below)"
+  env -u OP_SERVICE_ACCOUNT_TOKEN docker stop "$c" >/dev/null </dev/null 2>&1 || die "could not stop $c: nothing was changed"
 }
 check_fetcher_volume_users(){ # $1 config dir: while a fetcher config exists, no container but fetcher-agent-1 may mount the volume fetcher-profile
   local users bad
@@ -1186,6 +1223,7 @@ up_fetcher(){ # $1 config dir: no secrets, no 1Password, no T3
   papers_make "$rd" fetcher      # only now, after every check: a refused up creates no folder
   prepare "$1"
   env -u OP_SERVICE_ACCOUNT_TOKEN "${COMPOSE[@]}" up -d --force-recreate
+  verify_papers_mounted "$name-agent-1" "$name" < <(fetcher_papers_pairs "$1")
   echo "agent-up: '$name' running (paper fetcher: open public egress, no agent, no secrets, papers folders only)"
   echo "agent-up: papers folders: _general $(fetcher_projects "$rd" 2>/dev/null | paste -sd' ' - || true)"
   echo "agent-up: library route: $(fetch_route "$1"); viewer: $(fetch_view_url "$1")"
@@ -1217,11 +1255,13 @@ cmd_up(){
   if [ "$(profile "$cfg")" = research ] || research_on "$cfg"; then mkdir -p "$(research_dir "$cfg")"; fi
   check_research_overlaps "$cfg"   # BEFORE any project subfolder is created
   if [ "$(profile "$cfg")" = research ]; then
+    stop_research_first "$cfg"   # BEFORE its papers folders are checked, created and rendered
     make_exchange "$cfg"
     prepare "$cfg"
     check_rendered "$cfg"
     # No secrets at all: no `op run`, and not even the owner's service-account token in compose's environment.
     env -u OP_SERVICE_ACCOUNT_TOKEN "${COMPOSE[@]}" up -d --force-recreate
+    verify_papers_mounted "$name-agent-1" "$name" < <(research_papers_pairs "$cfg")
     echo "agent-up: '$name' running (research: open public egress, no secrets). Shell: agent-up shell $name"
     echo "agent-up: research projects: $(exchange_projects "$(research_dir "$cfg")" 2>/dev/null | paste -sd' ' - || true)"
   else

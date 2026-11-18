@@ -60,7 +60,16 @@ cat > "$T/dstub/docker" <<'STUB'
   echo "ENV: COMPOSE_FILE=${COMPOSE_FILE-<unset>} COMPOSE_PROFILES=${COMPOSE_PROFILES-<unset>} PROJECT_DIR=${PROJECT_DIR-<unset>} SPADES_AI_DIR=${SPADES_AI_DIR-<unset>} GH_TOKEN=${GH_TOKEN-<unset>}"
   echo "OPTOK: ${OP_SERVICE_ACCOUNT_TOKEN-<unset>}"
 } >> "$DLOG"
+# the config root agent-up uses (for the generated overlays the stub reads: what Docker would mount)
+croot="${AGENT_CONTAINERS_CONFIG:-$HOME/.config/agent-containers}"
 case "$*" in
+  "stop "*)   # WATCH (a path): log whether it existed when the container was stopped (call order vs folder creation)
+    sd="$(dirname "$DLOG")"; [ ! -f "$sd/WATCH" ] || { if [ -e "$(cat "$sd/WATCH")" ]; then echo "WATCHED: exists"; else echo "WATCHED: absent"; fi >> "$DLOG"; } ;;
+  "exec "*" /usr/bin/stat -c %d:%i -- "*)   # the folder a container sees at a target: the generated overlay's source for it, stat'ed
+    sd="$(dirname "$DLOG")"; c="$2"; tgt="${*: -1}"   # STATBAD.<c>: a different folder (a swap Docker followed)
+    if [ -f "$sd/STATBAD.$c" ]; then echo 0:0; exit 0; fi
+    src="$(awk -v t="target: \"$tgt\"" '/^ *source: /{s=$0} /^ *target: /{l=$0; sub(/^ +/, "", l); if (l == t) {sub(/^ *source: "/, "", s); sub(/"$/, "", s); print s; exit}}' "$croot/${c%-agent-1}/.generated/"*.yaml 2>/dev/null)"
+    [ -n "$src" ] && stat -c %d:%i -- "$src" ;;
   "inspect -f {{.State.Running}} "*)
     sd="$(dirname "$DLOG")"
     if { [ -f "$sd/RUNNING" ] && [ "$(cat "$sd/RUNNING")" = 0 ]; } || { [ -f "$sd/RUNNING.$4" ] && [ "$(cat "$sd/RUNNING.$4")" = 0 ]; }; then echo false; else echo true; fi ;;
@@ -84,8 +93,9 @@ case "$*" in
     sd="$(dirname "$DLOG")"; cat "$sd/psa.research" 2>/dev/null || true ;;
   "ps -a --filter volume=fetcher-profile --format {{.Names}}")      # who mounts the fetcher's profile volume: $sd/psa.fvol, else nobody
     sd="$(dirname "$DLOG")"; cat "$sd/psa.fvol" 2>/dev/null || true ;;
-  "inspect -f {{range .Mounts}}"*)                                   # a container's bind sources: $sd/mounts.<c>
-    sd="$(dirname "$DLOG")"; cat "$sd/mounts.${*: -1}" 2>/dev/null || true ;;
+  "inspect -f {{range .Mounts}}"*)                                   # a container's bind sources: $sd/mounts.<c>, else its overlay's sources
+    sd="$(dirname "$DLOG")"; c="${*: -1}"
+    if [ -f "$sd/mounts.$c" ]; then cat "$sd/mounts.$c"; else sed -n 's/^ *source: "\(.*\)"$/\1/p' "$croot/${c%-agent-1}/.generated/"*.yaml 2>/dev/null || true; fi ;;
   "compose config --help")                                           # NO_ENV_FLAG: a Compose without config --no-env-resolution
     sd="$(dirname "$DLOG")"; echo "      --no-interpolate          Don't interpolate environment variables"
     [ -f "$sd/NO_ENV_FLAG" ] || echo "      --no-env-resolution       Don't resolve service env files" ;;
@@ -965,6 +975,38 @@ rm -rf "$RD/dl-link"
 mv "$RD/bio2/downloads/papers" "$T/bio2papers.bak"; ln -s "$RD/bio2/briefs" "$RD/bio2/downloads/papers"
 refuses "up research refuses a papers folder that is a symlink" 'bio2/downloads/papers is a symlink' au up research
 rm -f "$RD/bio2/downloads/papers"; mv "$T/bio2papers.bak" "$RD/bio2/downloads/papers"
+# ---- the upgrade race: a running research container is stopped BEFORE its papers folders are checked, created and mounted
+mkdir -p "$RD/newp/briefs" "$RD/newp/reports" "$RD/newp/downloads"
+echo "$RD/newp/downloads/papers" > "$T/WATCH"; : > "$DLOG"
+upr="$(au up research 2>&1)" && rc=0 || rc=$?
+check "up research with the research container running: stops it first, says so, then starts it" \
+  bash -c '[ "$1" -eq 0 ] && grep -qF "agent-up: stopping research-agent-1 while its papers folders are checked and mounted" <<<"$2"' _ "$rc" "$upr"
+check "  ...the stop came before the new papers folder was created (stub saw it absent) and before compose up" \
+  bash -c 's=$(grep -nxF "ARGS: stop research-agent-1" "$1" | head -n1 | cut -d: -f1); w=$(grep -nx "WATCHED: absent" "$1" | head -n1 | cut -d: -f1)
+    u=$(grep -nxF "ARGS: $2 up -d --force-recreate" "$1" | head -n1 | cut -d: -f1)
+    [ -n "$s" ] && [ -n "$w" ] && [ -n "$u" ] && [ "$w" -eq $((s + 3)) ] && [ "$s" -lt "$u" ] && [ -d "$3" ]' _ "$DLOG" "$RC" "$RD/newp/downloads/papers"
+check "  ...after compose up, each papers folder's identity is checked inside the container (device:inode)" \
+  bash -c 'u=$(grep -nxF "ARGS: $2 up -d --force-recreate" "$1" | cut -d: -f1); x=$(grep -nF "ARGS: exec research-agent-1 /usr/bin/stat -c %d:%i -- /research/newp/downloads/papers" "$1" | cut -d: -f1)
+    g=$(grep -nF "ARGS: exec research-agent-1 /usr/bin/stat -c %d:%i -- /research/_general/papers" "$1" | cut -d: -f1)
+    [ -n "$x" ] && [ -n "$g" ] && [ "$x" -gt "$u" ] && [ "$g" -gt "$u" ] && [ "$(grep -c "^ARGS: stop" "$1")" = 1 ]' _ "$DLOG" "$RC"
+rm -f "$T/WATCH"
+echo 0 > "$T/RUNNING.research-agent-1"; : > "$DLOG"
+upr="$(au up research 2>&1)" && rc=0 || rc=$?
+check "up research with no running research container: nothing to stop, starts normally" \
+  bash -c '[ "$1" -eq 0 ] && ! grep -q "^ARGS: stop" "$2" && grep -qxF "ARGS: $3 up -d --force-recreate" "$2" && ! grep -q stopping <<<"$4"' _ "$rc" "$DLOG" "$RC" "$upr"
+rm -f "$T/RUNNING.research-agent-1"
+touch "$T/STATBAD.research-agent-1"; : > "$DLOG"
+refuses "up research: a papers folder that is not the same directory inside (identity check) -> stopped again, fails" \
+  'stopped research-agent-1 again: what it mounted is not what agent-up checked: /research/_general/papers inside is not .*_general/papers \(device:inode [0-9]+:[0-9]+ on the host, 0:0 inside\)' au up research
+check "  ...the container was stopped AFTER it was started" \
+  bash -c 'u=$(grep -nxF "ARGS: $2 up -d --force-recreate" "$1" | cut -d: -f1); s=$(grep -nxF "ARGS: stop research-agent-1" "$1" | tail -n1 | cut -d: -f1); [ -n "$u" ] && [ -n "$s" ] && [ "$s" -gt "$u" ]' _ "$DLOG" "$RC"
+rm -f "$T/STATBAD.research-agent-1"
+printf '%s\n' "$RDP/_general" > "$T/mounts.research-agent-1"; : > "$DLOG"
+refuses "up research: a papers folder that is not its own mount after start -> stopped again, fails" \
+  'stopped research-agent-1 again: .*_general/papers is not its own mount' au up research
+check "  ...stopped after compose up" bash -c 'grep -qxF "ARGS: stop research-agent-1" "$1" && tail -n 3 "$1" | grep -qxF "ARGS: stop research-agent-1"' _ "$DLOG"
+rm -f "$T/mounts.research-agent-1"
+rm -rf "$RD/newp"
 au up research >/dev/null 2>&1 || true
 rm -rf "$RD/Bad Name" "$RD/partial"; rm -f "$RD/linked"
 echo "x" > "$RD/$NAME/downloads/big.tif"
@@ -1740,6 +1782,15 @@ check "  ...and starts nothing" bash -c '! grep -q " up -d" "$1"' _ "$DLOG"
 check "  ...it asked Docker for the research container's mounts (inspect, Go template, no jq)" grep -qF "ARGS: inspect -f {{range .Mounts}}" "$DLOG"
 fpapers alpha beta gamma delta >> "$T/mounts.research-agent-1"
 check "up fetcher starts when every papers folder is the research container's own mount" fau up fetcher
+check "  ...after compose up, each /papers/<project> mount's identity is checked inside the fetcher (device:inode)" \
+  bash -c 'u=$(grep -nxF "ARGS: $2 up -d --force-recreate" "$1" | tail -n1 | cut -d: -f1); for t in _general alpha beta gamma delta; do
+    x=$(grep -nxF "ARGS: exec fetcher-agent-1 /usr/bin/stat -c %d:%i -- /papers/$t" "$1" | tail -n1 | cut -d: -f1); [ -n "$x" ] && [ "$x" -gt "$u" ] || exit 1; done' _ "$DLOG" "$FC"
+touch "$T/STATBAD.fetcher-agent-1"; : > "$DLOG"
+refuses "up fetcher: a /papers mount that is not the same directory inside -> the fetcher is stopped again, up fails" \
+  'stopped fetcher-agent-1 again: what it mounted is not what agent-up checked: /papers/_general inside is not' fau up fetcher
+check "  ...stopped after compose up" \
+  bash -c 'u=$(grep -nxF "ARGS: $2 up -d --force-recreate" "$1" | cut -d: -f1); s=$(grep -nxF "ARGS: stop fetcher-agent-1" "$1" | cut -d: -f1); [ -n "$u" ] && [ -n "$s" ] && [ "$s" -gt "$u" ]' _ "$DLOG" "$FC"
+rm -f "$T/STATBAD.fetcher-agent-1"
 mkdir -p "$FRD/epsilon/briefs" "$FRD/epsilon/reports" "$FRD/epsilon/downloads"; : > "$DLOG"
 refuses "up fetcher refuses a project added after the research container started (until research is brought up again)" "not its own mount there: .*epsilon/downloads/papers.*agent-up up research first" fau up fetcher
 check "  ...started nothing, created no papers folder for it" bash -c '! grep -q " up -d" "$1" && [ ! -e "$2/epsilon/downloads/papers" ]' _ "$DLOG" "$FRD"
