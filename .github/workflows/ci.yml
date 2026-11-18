@@ -105,7 +105,7 @@ jobs:
       - name: Use the pushed images as spades-*:ci for the remaining tests
         if: steps.mode.outputs.mode == 'full'
         run: |
-          for img in base gis bio research; do
+          for img in base gis bio research fetcher; do
             docker pull -q "localhost:5000/allenlarocque/spades-$img:latest"
             docker tag "localhost:5000/allenlarocque/spades-$img:latest" "spades-$img:ci"
           done
@@ -167,11 +167,16 @@ jobs:
           mapfile -t targets < <(grep -oE '^ +- [a-z0-9-]+:(/home/agent/[^ ]+)' project-template/config/compose.yaml | sed -E 's/.*:(\/home\/agent\/[^ ]+)/\1/')
           # Volumes that agent-up's generated overlays add (RSTUDIO=1: the rstudio-<project> volume).
           mapfile -t -O "${#targets[@]}" targets < <(grep -oE '"      - [a-z0-9-]+:/home/agent/[^ "]+' bin/agent-up | sed -E 's/.*:(\/home\/agent\/[^ "]+)/\1/')
+          # The fetcher's profile volume exists only in the fetcher image: checked there, below.
+          base_targets=(); for t in "${targets[@]}"; do [ "$t" = /home/agent/.fetcher ] || base_targets+=("$t"); done
+          [ "${#base_targets[@]}" -lt "${#targets[@]}" ] || { echo "no /home/agent/.fetcher volume found in bin/agent-up"; exit 1; }
+          targets=("${base_targets[@]}")
           [ "${#targets[@]}" -ge 6 ] || { echo "parsed only ${#targets[@]} volume targets: ${targets[*]}"; exit 1; }
           args=(); i=0
           for t in "${targets[@]}"; do args+=(-v "fresh-vol-$i:$t"); i=$((i+1)); done
           printf '%s\n' "${targets[@]}"
           docker run --rm "${args[@]}" -u 1000:1000 spades-base:ci bash -c 'for t in "$@"; do touch "$t/w" || exit 1; done; echo "all volumes writable"' _ "${targets[@]}"
+          docker run --rm --entrypoint bash -v fresh-fetcher:/home/agent/.fetcher -u 1000:1000 spades-fetcher:ci -c 'touch /home/agent/.fetcher/w && echo "fetcher profile volume writable"'
           # And what failed in real use: agent-init must write settings + plugins into the claude-config volume,
           # and the Codex config into the codex-config volume.
           docker run --rm -v fresh-claude:/home/agent/.claude -v fresh-codex:/home/agent/.codex spades-base:ci bash -c '/usr/local/bin/agent-init.sh 2>&1 | tee /tmp/init.log; ! grep -q WARN /tmp/init.log && test -s /home/agent/.claude/settings.json && test -s /home/agent/.codex/config.toml'
@@ -529,7 +534,7 @@ jobs:
         if: always()
         run: |
           shellcheck --version
-                    shellcheck -S warning images/base/*.sh tests/*/*.sh scripts/*.sh images/research/paper-tools/*.sh images/fetcher/*.sh images/fetcher/fetcherctl bin/agent-up bin/agent-new
+                    shellcheck -S warning images/base/*.sh tests/*/*.sh scripts/*.sh images/research/paper-tools/*.sh images/fetcher/*.sh images/fetcher/fetcher-view bin/agent-up bin/agent-new
       - name: CI classifier unit test (which change sets may skip the image build)
         if: always()
         run: bash tests/ci/test-classify.sh
