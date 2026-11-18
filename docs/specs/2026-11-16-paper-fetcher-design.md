@@ -70,7 +70,7 @@ container; start `Xvfb` directly.
 - Zotero in or out, tagging, semantic search (next iteration, after the survey).
 - A writing bot, report generation, Obsidian.
 - Fetching anything that is not a paper (data sets keep their own rules).
-- Search. The fetcher takes DOIs (or direct paper URLs); finding papers stays with the research bot.
+- Search. The fetcher takes DOIs only (no URLs); finding papers stays with the research bot.
 
 ## Anti-goals
 
@@ -156,7 +156,8 @@ What it does:
 1. **Takes lists.** The research bot writes a request file into `_fetch/requests/` inside a papers
    folder: one DOI per line and nothing else. DOIs only in this iteration: a line must match a
    strict DOI pattern (`10.<registrant>/<suffix>` from a safe character set, no whitespace, no `@`,
-   `?`, `#`, `..` or backslash) or it is rejected with status `bad-request`. Direct URLs are not
+   `?`, `#`, `..` or backslash) or it is rejected: it is recorded by line number (`line:<n>`) with status `bad-request`, never
+   echoed. Direct URLs are not
    accepted: the request is written by an AI that reads untrusted pages, and a URL would let it
    send the session-holding browser anywhere. Papers without a DOI stay on the report's
    "not obtained" list. The fetcher notices new files.
@@ -172,7 +173,7 @@ What it does:
    - *Login or paywall page*: if the library link is configured, retry once through it (below);
      if that lands on an OpenAthens or Duo page, mark `needs-owner: login` and do not try further
      library-routed papers in this run.
-   - *No PDF link, HTTP error, not a PDF*: mark `not-available` with the reason and the final URL.
+   - *No PDF link, HTTP error, not a PDF*: mark `not-available` with the reason code (no URL is written).
 4. **Writes results** where the bot reads them: the PDF in a folder under the same papers folder,
    with a `metadata.md`, and one status line per requested paper under `_fetch/status/`.
    - Everything the fetcher writes is generated from fixed vocabulary and validated values: the
@@ -188,8 +189,7 @@ What it does:
      are untrusted input to the research container's PDF tools, as they are today.
 5. **Waits for the owner** on the `needs-owner` papers. Retry is keyed on the publisher host (for
    a check) or on the library route (for a login). When the owner has dealt with it in the browser
-   view, they tell the fetcher to retry (a file drop or an `agent-up` subcommand: builder's
-   choice), and it retries only the waiting papers for that host or route.
+   view, they tell the fetcher to retry (`agent-up fetch retry`), and it retries only the waiting papers for that host or route.
 
 The library route:
 - Config value (owner fills it in; not a secret, but it names their institution so it lives in the
@@ -202,7 +202,7 @@ The owner's view of the browser:
 - A web page on the host's loopback only, on a port set in the fetcher's config (the RStudio
   pattern: `127.0.0.1:<port>`, a generated password, nothing listening on other interfaces),
   showing the fetcher's browser so the owner can type their OpenAthens password, approve Duo, or
-  tick a check box. noVNC or an equivalent maintained package; builder's choice.
+  tick a check box. noVNC, served on port 3773 inside the container (the only inbound port the base firewall admits).
 - While the owner is using the view, the script does not drive the browser.
 - The owner never types a password into a page a request chose. To sign in, the owner asks the
   fetcher for the login page (an `agent-up` subcommand); the fetcher opens the configured library
@@ -320,12 +320,60 @@ container may mount the fetcher's profile volume or config.
 
 ## Left to the builder
 
-- Request and status file names and layout within `_fetch/` (the content rules above are fixed);
-  how new requests are noticed (poll or inotify).
-- How the owner asks for a retry.
-- noVNC versus another maintained viewer; how the script yields the browser to the owner.
-- Base image for the fetcher; how it joins the publish and attestation flow.
-- Whether `paper-search-mcp`'s download tools are exposed to the research bot or only its search.
-- Naming (`fetcher` profile name, config keys, port default).
-- The order of work. A sensible first slice: the fetcher without the library route (it already
-  recovers Wiley and MDPI), then the browser view and retry, then the library route, then change A.
+Decided in the build (see the amendments below): request and status file names are
+`[A-Za-z0-9._-]`, `.txt` for requests and `.tsv` for status, under `_fetch/requests/` and
+`_fetch/status/`; requests are polled; the owner asks for a retry with `agent-up fetch retry`; the
+viewer is noVNC and x11vnc; the fetcher image is built `FROM spades-base` and is the fifth attested
+image; the profile is `fetcher`, its config keys are `FETCH_VIEW_PORT`, `LIBRARY_LINK_PREFIX`,
+`FETCH_PER_HOST`, `FETCH_PER_DAY` and `FETCH_LIBRARY_PER_DAY`. Still the builder's: whether `paper-search-mcp`'s download tools are exposed to the research
+bot, and the order of work.
+
+## Amendments during implementation (2026-11-17)
+
+Where the build differs from the text above, the build wins. The code is the reference.
+
+- **DOIs only.** Requests have no URLs. A rejected line is recorded as `line:<n>` with status
+  `bad-request`. At most 200 lines per request file; file names `[A-Za-z0-9._-]` ending `.txt`.
+- **Fixed fields only.** Status and metadata files hold the DOI (or `line:<n>`), a status code, the
+  publisher host name, the date and the library route (`yes`/`no`). Nothing comes from a web page, and
+  `not-available` carries no URL.
+- **Pacing.** `doi.org` lookups are paced and have their own daily cap (default 300). Downloads are
+  capped at 100 MiB. One bot check on a host stops that host for the run: the life of the engine's
+  state, ending at a restart, the UTC day change, or an owner retry.
+- **Library route.** It is used only when the landing page is still on the publisher the DOI
+  resolved to.
+- **Papers folders are nested mounts in the research container.** The research container cannot
+  rename or replace them. Otherwise it could replace `papers` with a link to any host folder, and the
+  fetcher's next automatic restart would mount that. `agent-up up fetcher` refuses until a running
+  research container has those mounts: run `agent-up up research` before the first start and after
+  adding a project.
+- **The fetcher's `compose.yaml`** must equal the shipped seed apart from the image digest. The
+  viewer port and password come from generated files.
+- **Seccomp.** The profile is Docker's default plus one rule allowing `clone`, `setns` and
+  `unshare`, which Chromium's sandbox needs. Compared with Docker's default, a process that had
+  already broken out of Chromium's sandbox could create its own user and network namespaces inside
+  the container, exposing more kernel networking code to it. It does not bypass the firewall, and
+  mount and `bpf`-style calls stay blocked. `agent-up up fetcher` refuses if the copy in the config
+  folder differs from the shipped one, and says how to refresh it.
+- **The viewer.** `FETCH_VIEW_PORT` is published on the host's `127.0.0.1` only. Inside the
+  container it uses port 3773, the only port the base firewall admits from the host (the fetcher
+  runs no T3), not noVNC's usual 6080. The 8-character password is in
+  `<fetcher config>/.generated/view-password`. Clipboard sharing is off: the owner types the library
+  password. The browser's address bar is visible.
+- **Owner pages.** `agent-up fetch login` keeps the page up only if it landed on a configured login
+  host; otherwise it blanks the tab and says so. If the owner is already signed in it says so and
+  points to `agent-up fetch retry login`. `agent-up fetch check <host>` keeps the page only if it
+  landed on that host.
+- **Updates.** `agent-up update` restarts the fetcher without the busy question; the session survives
+  in the `fetcher-profile` volume.
+- **Launcher.** Every project's `up` now needs a Docker Compose that supports
+  `config --no-env-resolution`, and refuses otherwise. Any `volumes_from`, and any bind, secret,
+  config or `env_file` that reaches into the fetcher's config folder, is refused in other projects'
+  compose files.
+- **Image.** Built `FROM spades-base`; a fifth attested image, `spades-fetcher`. Until the first
+  publish that includes it, `agent-up update fetcher` refuses with the "not yet published with
+  attestations" hint.
+- **Pins.** Playwright is pinned in `images/fetcher/engine/package.json` and the Chromium download by
+  a hash in `images/fetcher/Dockerfile`; both must be bumped together. The weekly update agent's
+  instructions do not cover them yet.
+- **Owner procedure:** `docs/runbooks/paper-fetcher.md`.

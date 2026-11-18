@@ -29,6 +29,7 @@ Host: Linux or WSL2 (GNU coreutils).
 | `bin/agent-up shell <project>` | `zsh` in the container as `agent` |
 | `bin/agent-up pair <project>` | prints a one-time T3 Code pairing link (`http://localhost:<T3_PORT>/pair#token=…`, valid 10 min) |
 | `bin/agent-up rstudio <project>` | prints the RStudio Server address, user and password (only with `RSTUDIO=1`) |
+| `bin/agent-up fetch status \| view \| check <host> \| login \| retry [<host>\|login]` | the paper fetcher's controls (see "Paper fetcher" and [the runbook](../docs/runbooks/paper-fetcher.md)) |
 | `bin/agent-up status \| stop \| down <project>` | `stop` keeps it stopped, even after a reboot; `down` removes the container; named volumes are kept |
 
 `<project>` is the project folder name, lowercased to `[a-z0-9_-]` (or `--name` at init). The
@@ -410,6 +411,8 @@ this change (`agent-up update <project>` pins it) (an older image ignores the sw
 
 ## Paper fetcher
 
+Owner's procedure, status codes, caps, refusals and risks: [docs/runbooks/paper-fetcher.md](../docs/runbooks/paper-fetcher.md).
+
 One **shared** container, `fetcher`, fetches the papers the research bot asks for with a real,
 sandboxed Chromium (docs/specs/2026-11-16-paper-fetcher-design.md). No agent, no secrets, no
 1Password. Same open public egress as the research container (its firewall profile). It mounts only
@@ -428,7 +431,7 @@ agent-up status fetcher                   # library route set/unset, caps, paper
 In `~/.config/agent-containers/fetcher/project.conf`: `LIBRARY_LINK_PREFIX` (empty, or exactly
 `https://go.openathens.net/redirector/<institution>?url=`; agent-up never prints it, it shows
 `set`/`unset`), `FETCH_PER_HOST` / `FETCH_PER_DAY` / `FETCH_LIBRARY_PER_DAY` (positive whole
-numbers; unset = 30 / 100 / 20), `FETCH_VIEW_PORT` (checked, not served yet). A papers folder that
+numbers; unset = 30 / 100 / 20), `FETCH_VIEW_PORT` (the owner's browser view on `127.0.0.1`; empty = off). A papers folder that
 is a symbolic link is refused. `fetcher-seccomp.json` keeps Chromium's sandbox on; `up` refuses a
 copy that differs from `project-template/config/fetcher-seccomp.json` in this clone: after pulling a
 new one, refresh it with

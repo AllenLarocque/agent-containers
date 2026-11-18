@@ -97,3 +97,7 @@ Nothing in the project folder configures the container.
 `RESEARCH=1` in the project's `project.conf`, `agent-up up <project>`, then `agent-up up research`.
 First time ever: `agent-up init --profile research`. See
 [project-template/README.md "Research container"](../../project-template/README.md#research-container).
+
+**Fetching papers the research bot cannot get** (a real browser, your library login if you set one):
+see [paper-fetcher.md](paper-fetcher.md). Run `agent-up up research` once after adding a project,
+then `agent-up up fetcher`.
