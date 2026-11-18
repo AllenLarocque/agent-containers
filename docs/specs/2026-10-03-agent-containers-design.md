@@ -736,3 +736,15 @@ above. `publish` now attaches a build attestation to each image before it moves 
 `agent-up update` (and `agent-new`) pin a digest only after verifying that attestation. Everything
 here that says a digest is copied from `digests.md`, or that merging the digests PR is the human
 gate, no longer applies. Pinning by digest in `compose.yaml` is unchanged.
+
+## Amendment 2026-11-17: a third profile, `fetcher`
+
+A third profile, `fetcher`, is one shared container (like `research`) with its own config folder
+(`~/.config/agent-containers/fetcher/`) and image, `spades-fetcher` (the fifth attested image). It
+holds a sandboxed Chromium and a small fetch script: no agent, no tokens, no 1Password, no project
+folder. It mounts only the research exchange's papers folders, read-write. It is the one container
+that holds a library login session (the browser profile, in the volume `fetcher-profile`, which no
+other container may mount). It uses the research profile's firewall (open public egress, private
+ranges denied). The research container's own papers folders become nested mounts so it cannot
+re-point what the fetcher mounts. Design: `2026-11-16-paper-fetcher-design.md` (with its
+amendments); owner procedure: `docs/runbooks/paper-fetcher.md`.

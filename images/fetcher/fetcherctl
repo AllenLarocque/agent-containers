@@ -1,0 +1,17 @@
+#!/usr/bin/env node
+// fetcherctl: the owner's controls for the running fetcher, run as `docker exec <fetcher> fetcherctl ...`
+// (agent-up fetch ... does this). All of its behaviour is main() in /opt/fetcher/lib/control.mjs, which
+// validates every argument before writing anything and writes only fixed-format files under /run/fetcher.
+//   fetcherctl status                 paused or not, the last page request's answer, counts per project
+//   fetcherctl view                   pause: the engine finishes the paper in flight, then leaves the browser alone
+//   fetcherctl check <host>           open the landing page of the first paper waiting on a check at <host>
+//   fetcherctl login                  open the library sign-in for the first paper waiting on the login
+//   fetcherctl retry [<host>|login]   end the pause; retry the papers waiting on <host>, on the login, or all
+// The pause also ends 30 minutes after the last fetcherctl call.
+'use strict';
+import('/opt/fetcher/lib/control.mjs').then(async ({ main }) => {
+  process.exitCode = await main(process.argv.slice(2));
+}).catch((e) => {
+  console.error(`fetcherctl: failed (${e?.code ?? e?.name ?? 'error'})`);
+  process.exitCode = 1;
+});

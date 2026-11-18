@@ -1,0 +1,8 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>A page full of dialogs</title><meta name="citation_pdf_url" content="__SELF__/pdf/__KEY__"></head>
+<body><p>Abstract. Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p>
+<script>
+  window.addEventListener('beforeunload', (e) => { e.preventDefault(); e.returnValue = 'stay'; return 'stay'; });
+  setTimeout(() => { for (;;) { alert('x'); confirm('y'); prompt('z'); } }, 50);
+</script>
+</body></html>

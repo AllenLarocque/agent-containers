@@ -22,4 +22,9 @@ for the `publish` run it triggers to finish, then run `bin/agent-up update --all
 on `main`; it needs `gh auth login` on the host), re-add the environments it lists (after a T3
 protocol change), then update the apps. Details: `project-template/README.md`.
 
+**Paper fetcher:** a third, shared container, `fetcher`, fetches the papers the research bot lists
+by DOI with a sandboxed browser (no agent, no tokens). Papers behind a bot check or your library
+login wait for you: `agent-up fetch status | view | check <host> | login | retry`. Setup, risks and
+every message: `docs/runbooks/paper-fetcher.md`.
+
 Status: **Phase 1 in progress** (PR #3). See `docs/specs/2026-10-03-agent-containers-design.md`.

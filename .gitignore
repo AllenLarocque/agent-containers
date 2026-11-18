@@ -4,3 +4,4 @@
 .env
 # Claude Code session worktrees
 .claude/
+images/fetcher/engine/node_modules/
