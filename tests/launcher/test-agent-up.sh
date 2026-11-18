@@ -2065,7 +2065,7 @@ for kv in T3_CONNECT=1 RSTUDIO=1 FTP_HOSTS=ftp.example.org T3_PORT=3999 RESEARCH
 done
 cp "$T/fconf.bak" "$FCFG/project.conf"; echo 'RESEARCH_CONTACT_EMAIL=papers@relay.example' >> "$FCFG/project.conf"
 refuses "up fetcher refuses RESEARCH_CONTACT_EMAIL" 'for the research container only' fau up fetcher
-cp "$T/fconf.bak" "$FCFG/project.conf"; echo 'CORE_API_KEY=Ab12Cd34Ef56Gh78' >> "$FCFG/project.conf"
+cp "$T/fconf.bak" "$FCFG/project.conf"; echo "CORE_API_KEY=$CK" >> "$FCFG/project.conf"
 refuses "up fetcher refuses CORE_API_KEY" 'for the research container only' fau up fetcher
 cp "$T/fconf.bak" "$FCFG/project.conf"
 # the seccomp profile: present and identical to the template this launcher ships
