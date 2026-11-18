@@ -182,14 +182,15 @@ and the browser session survives in the `fetcher-profile` volume.
 ## Ending the library session
 
 The browser has two profiles in the `fetcher-profile` volume (mounted at `/home/agent/.fetcher` in
-the container): `profile-library` holds only the library session (used for your sign-in and for
-library-routed visits, nothing else), and `profile-direct` holds the ordinary publisher cookies,
-including any bot-check clearance. A page visited directly never runs in the library profile.
+the container): `profile-library` is used only for your sign-in and for library-routed visits, and
+`profile-direct` holds the ordinary publisher cookies, including any bot-check clearance. A page
+visited directly never runs in the library profile. A page reached through the library route does
+run there, beside the session (see Risks).
 
 To end only the library session:
 
 ```bash
-agent-up fetch view        # pause: the paper in flight finishes, the library browser is closed
+agent-up fetch view        # pause: the paper in flight finishes. If a sign-in page is still up, wait for it to go blank or run `agent-up fetch retry` and start again
 docker exec -u agent fetcher-agent-1 rm -rf /home/agent/.fetcher/profile-library
 agent-up fetch retry       # end the pause
 ```
@@ -216,8 +217,8 @@ session may have been exposed, or when you stop using the library route.
 - **A real browser on the open internet.** A hostile page could attack Chromium. It runs inside a
   container with no other secrets and no project code, behind the research firewall (public
   addresses only). The engine also refuses, in both browsers and at all times, any request to a
-  loopback, private or link-local address, `localhost` or `*.internal` (redirect hops included on
-  the engine's own tab), and WebSockets to them; it keeps one tab, closes every popup, keeps only
+  loopback, private or link-local address, `localhost` or `*.internal` (redirect hops included for the
+  tab's own page; not for redirect hops inside a cross-site frame or a worker), and WebSockets to them; it keeps one tab, closes every popup, keeps only
   the download it asked for, answers dialogs, and cuts off a page that stops answering. Limits: the
   WebSocket guard is Playwright's in-page script shim (a page's worker is not covered); a name that
   resolves to a loopback address (DNS rebinding) is not caught by name; the container's own
@@ -232,8 +233,20 @@ session may have been exposed, or when you stop using the library route.
   folders (that is how it makes requests and reads results), so it can write a request or a status
   file for any project it serves. The fetcher treats those as untrusted: it re-checks every request
   line and every status line and never follows links. The bot cannot rename or replace a papers
-  folder, because each is its own mount in its container. It cannot reach the fetcher's session, its
-  config or its browser. Fetched PDFs are untrusted input, like any download.
+  folder, because each is its own mount in its container. It cannot read the fetcher's session, its
+  config or its browser profile. It can influence what the session is used for: see the next point. Fetched PDFs are untrusted input, like any download.
+- **Library-routed pages run beside the session.** When a paper has no free PDF, its publisher page
+  is opened through your library link in the library browser. That page cannot read the library's
+  sign-in cookies (the browser's same-origin rules; not separately tested here), but while it is
+  open it can send the tab to other public sites, including other addresses behind your library
+  link, and load frames, all as you. A request for a DOI whose landing page someone hostile controls
+  (the research bot can be tricked into writing one) therefore gets a page running as your library
+  identity until the per-visit time limit. The caps and the one-tab rule bound it; locking that tab
+  to the library and the one publisher is a planned follow-up. If you would rather not carry this,
+  leave `LIBRARY_LINK_PREFIX` empty: the library route is then never used.
+- **Sign-in hosts are a fixed list.** The sign-in tab may only be on OpenAthens, Duo and your library
+  link's own host. If your sign-in passes through another host (a university page), the tab goes
+  blank partway and the library route cannot be used until a setting for extra hosts is added.
 - **Pinned browser.** Playwright (in `images/fetcher/engine/package.json`) and the Chromium download
   (a hash in `images/fetcher/Dockerfile`) are pinned and must be bumped together by hand. The weekly
   update agent does not cover them yet.

@@ -22,7 +22,7 @@
 //   check <host>  the page must land on <host>, else the tab is blanked (wrong-host); once up, its
 //                 main frame may not leave <host>: if it does, it is blanked (left-host).
 //   login         from the first navigation, the main frame may only be on a configured login host
-//                 (OpenAthens, Duo; config LOGIN_HOSTS) or the library prefix's host. The moment it
+//                 (OpenAthens, Duo; engine key LOGIN_HOSTS, not yet rendered by agent-up) or the library prefix's host. The moment it
 //                 goes anywhere else (sign-in finished and the library sends it on, or anything else)
 //                 the tab is blanked and the reply becomes signed-in-or-left: the owner then runs
 //                 agent-up fetch retry login. So the owner never looks at a non-login page in login

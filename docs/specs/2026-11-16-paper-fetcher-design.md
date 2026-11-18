@@ -407,7 +407,7 @@ Where the build differs from the text above, the build wins. The code is the ref
   browser and keeps the page only if it landed on `<host>`; from then on the main frame may only be on
   `<host>`, and if it leaves the tab is blanked (`left-host`). `agent-up fetch login` opens in the
   library browser, and from its first navigation the main frame may only be on a configured login
-  host (`isLoginHost`: OpenAthens, Duo, `LOGIN_HOSTS`) or the library prefix's host; the moment it
+  host (`isLoginHost`: OpenAthens, Duo, and the engine's `LOGIN_HOSTS` key, which `agent-up` does not yet render, so the list is fixed in practice) or the library prefix's host; the moment it
   goes anywhere else (sign-in finished, or anything else) the navigation is refused, the tab blanked,
   the login-page state ended, and the outcome `signed-in-or-left` recorded for `fetch status`; the
   owner then runs `agent-up fetch retry login`. The owner never looks at a non-login page in login
