@@ -22,7 +22,8 @@ manifest_exact() {
   pip=$(grep '^pip:' "$M" | paste -sd'|')
   [ "$apt" = "poppler-utils qpdf tesseract-ocr tesseract-ocr-eng tesseract-ocr-osd openjdk-21-jre-headless" ] \
     || { echo "apt names: $apt"; return 1; }
-  [ "$pip" = "pip: ocrmypdf==17.13.0" ] || { echo "pip lines: $pip"; return 1; }
+  [ "$pip" = "pip: ocrmypdf==17.13.0|pip: paper-search-mcp @ git+https://github.com/openags/paper-search-mcp@cab1b5cc276a0cd004a0044003926a6440088049" ] \
+    || { echo "pip lines: $pip"; return 1; }
 }
 no_network() { ! curl -sS -m 5 -o /dev/null https://pypi.org; }
 no_gs() { ! command -v gs; }
@@ -164,6 +165,79 @@ grobid_stop() {
   [ "$rc" -eq 1 ] || { echo "grobid status after stop: exit $rc"; return 1; }
 }
 
+# --- paper-search-mcp: installed, registered for Claude in the research profile only, Sci-Hub tools denied ---
+PSM=/opt/paper-tools/venv/bin/paper-search-mcp
+pc=$(mktemp -d)   # fake profile files and Claude config dirs (the real /etc/firewall/profile is root's)
+printf 'PROFILE=research\n' > "$pc/research"; printf 'PROFILE=builder\n' > "$pc/builder"
+configure() {  # configure <profile file> <claude config dir>: what agent-init runs at container start
+  AGENT_PROFILE_FILE="$1" CLAUDE_CONFIG_DIR="$2" node /usr/local/lib/agent/configure-claude-settings.js "$(command -v node)"
+}
+registered() { jq -e '.mcpServers["paper-search"] != null' "$1/.claude.json" >/dev/null 2>&1; }
+# Start the server exactly as registered in <claude config dir>/.claude.json, over stdio, and print the
+# tool definitions it serves (what Claude sees) as JSON. The server's stderr goes to <errlog>.
+list_tools() {  # list_tools <claude config dir> <errlog>
+  /opt/paper-tools/venv/bin/python -I -c '
+import asyncio, json, os, sys
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+cfg = json.load(open(sys.argv[1]))["mcpServers"]["paper-search"]
+async def main():
+    p = StdioServerParameters(command=cfg["command"], args=cfg.get("args", []), env=dict(os.environ, **cfg.get("env", {})))
+    with open(sys.argv[2], "w") as err:
+        async with stdio_client(p, errlog=err) as (r, w):
+            async with ClientSession(r, w) as s:
+                await s.initialize()
+                print(json.dumps([t.model_dump(mode="json") for t in (await s.list_tools()).tools]))
+asyncio.run(asyncio.wait_for(main(), 90))' "$1/.claude.json" "$2"
+}
+paper_search_installed() {
+  [ -x "$PSM" ] || { echo "no $PSM"; return 1; }
+  [ "$(readlink /usr/local/bin/paper-search-mcp)" = "$PSM" ] || { echo "/usr/local/bin/paper-search-mcp is not a link to $PSM"; return 1; }
+  /opt/paper-tools/venv/bin/python -I -c 'import paper_search_mcp.server'
+}
+paper_search_registered_research() {  # the registered server starts offline and serves its tools
+  local n
+  configure "$pc/research" "$pc/r" || return 1
+  registered "$pc/r" || { echo "no paper-search in $pc/r/.claude.json"; return 1; }
+  list_tools "$pc/r" "$pc/r.err" > "$pc/tools.json" || { tail -n 20 "$pc/r.err"; return 1; }
+  n=$(jq length "$pc/tools.json"); echo "tools: $n"
+  [ "$n" -ge 30 ] && jq -e 'map(.name) | index("search_arxiv") and index("download_arxiv")' "$pc/tools.json" >/dev/null
+}
+# Keyed on behaviour, not on one name (Review Focus 1): EVERY served tool whose definition (name,
+# description or parameters) mentions Sci-Hub must be denied to Claude by name.
+scihub_tools_denied() {
+  local t found=0
+  while IFS= read -r t; do
+    found=1; echo "Sci-Hub tool: $t"
+    jq -e --arg r "mcp__paper-search__$t" '.permissions.deny // [] | index($r)' "$pc/r/settings.json" >/dev/null \
+      || { echo "NOT denied: mcp__paper-search__$t"; return 1; }
+  done < <(jq -r '.[] | select(tostring | test("sci.?hub"; "i")) | .name' "$pc/tools.json")
+  # None found means the enumeration broke, or upstream dropped Sci-Hub (then update this check).
+  [ "$found" -eq 1 ]
+}
+scihub_not_enabled() {  # nothing switches Sci-Hub on: not the environment, the registration or an allow rule
+  if grep -Eiq 'sci.?hub' <<< "$(env)"; then echo "environment mentions Sci-Hub"; return 1; fi
+  if grep -Eiq 'sci.?hub' <<< "$(jq -c '.mcpServers["paper-search"]' "$pc/r/.claude.json")"; then echo "registration mentions Sci-Hub"; return 1; fi
+  jq -e '.permissions.allow // [] | map(select(test("sci.?hub|paper-search"; "i"))) | length == 0' "$pc/r/settings.json" >/dev/null \
+    || { echo "an allow rule names the server or Sci-Hub"; return 1; }
+}
+contact_email_passed() {  # Unpaywall gets RESEARCH_CONTACT_EMAIL when set; unset, the server still starts (Review Focus 2)
+  grep -q UNPAYWALL "$pc/r.err" || { echo "unset: no Unpaywall warning on stderr"; return 1; }
+  RESEARCH_CONTACT_EMAIL=papers+research@relay.example list_tools "$pc/r" "$pc/e.err" >/dev/null || { tail -n 20 "$pc/e.err"; return 1; }
+  if grep -q UNPAYWALL "$pc/e.err"; then echo "set: the server still says the Unpaywall email is missing"; return 1; fi
+}
+paper_search_not_builder() {  # no profile file, PROFILE=builder, and research -> builder on the same volume
+  configure "$pc/absent" "$pc/b1" || return 1
+  configure "$pc/builder" "$pc/b2" || return 1
+  configure "$pc/research" "$pc/b3" && configure "$pc/builder" "$pc/b3" || return 1
+  local d; for d in b1 b2 b3; do if registered "$pc/$d"; then echo "registered in $d"; return 1; fi; done
+}
+broken_claude_json_kept() {  # a registration failure warns, keeps the file, and still writes the settings (Review Focus 4)
+  mkdir -p "$pc/x" && printf '{not json\n' > "$pc/x/.claude.json" && cp "$pc/x/.claude.json" "$pc/x/before"
+  configure "$pc/research" "$pc/x" || return 1
+  cmp "$pc/x/before" "$pc/x/.claude.json" && jq -e '.permissions.defaultMode == "bypassPermissions"' "$pc/x/settings.json" >/dev/null
+}
+
 check "MANIFEST lists exactly the specs"            manifest_exact
 check "no Ghostscript"                              no_gs
 check "ocrmypdf on PATH, venv python 3.12"          ocrmypdf_venv
@@ -185,4 +259,11 @@ check "grobid header"                               grobid_header
 check "three grobid fulltext runs at once"          grobid_three_at_once
 info_jvm_rss || true
 check "grobid stop"                                 grobid_stop
+check "paper-search-mcp installed (import + entry point)"           paper_search_installed
+check "paper-search registered for research, starts offline"        paper_search_registered_research
+check "every tool that mentions Sci-Hub is denied"                  scihub_tools_denied
+check "nothing enables Sci-Hub"                                     scihub_not_enabled
+check "RESEARCH_CONTACT_EMAIL reaches Unpaywall; unset still starts" contact_email_passed
+check "paper-search NOT registered for builders"                    paper_search_not_builder
+check "unreadable .claude.json: kept, settings still written"       broken_claude_json_kept
 [ "$fail" -eq 0 ] && echo "SMOKE research-offline: ALL PASSED" || { echo "SMOKE research-offline: FAILURES"; exit 1; }
