@@ -7,6 +7,10 @@
 //   127.0.0.2  publisher                   127.0.0.5  library redirector (libraryPrefix)
 //   127.0.0.3  CDN                         127.0.0.6  a second publisher (challenge host)
 //   127.0.0.7  an intermediate redirect host (a "first hop" that is not the landing host)
+//
+// Bot checks: check/check2 (on 127.0.0.6) and pcheck (on 127.0.0.2) show a challenge page until a
+// test calls pass(host): from then on that host serves them as good articles with a PDF (the owner
+// has ticked the box in the view).
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -28,6 +32,7 @@ const PAGES = {
   big: 'article-good', bignolen: 'article-good',
 };
 const PDF_KEYS = /^(ok|inject|hok|paywall[23]?|good[0-9]*|via[0-9])$/;
+const CHECK_KEYS = /^(check2?|pcheck)$/;
 
 function keyOf(url) {
   let s = url;
@@ -38,6 +43,7 @@ function keyOf(url) {
 
 export async function startFixtureServer() {
   const log = [];
+  const passed = new Set();
   const sockets = new Set();
   let port;
   const base = (h) => `http://${h}:${port}`;
@@ -83,7 +89,7 @@ export async function startFixtureServer() {
       if ((m = u.pathname.match(/^\/article\/([a-z0-9]+)$/))) {
         const k = m[1];
         if (k === 'slow') return hang();
-        if (k === 'check' || k === 'check2') return page(res, 'challenge', host, k, 403);
+        if (CHECK_KEYS.test(k)) return passed.has(host) ? page(res, 'article-good', host, k) : page(res, 'challenge', host, k, 403);
         if (/^paywall[23]?$/.test(k) && u.searchParams.get('lib') === '1') return page(res, 'article-paywall-lib', host, k);
         if (PAGES[k]) return page(res, PAGES[k], host, k);
         if (k === 'hok' || /^(good[0-9]*|via[0-9])$/.test(k)) return page(res, 'article-good', host, k);
@@ -91,7 +97,7 @@ export async function startFixtureServer() {
       }
       if ((m = u.pathname.match(/^\/pdf\/([a-z0-9]+)$/))) {
         const k = m[1];
-        if (PDF_KEYS.test(k)) return pdf(res);
+        if (PDF_KEYS.test(k) || (CHECK_KEYS.test(k) && passed.has(host))) return pdf(res);
         if (k === 'pdfcheck') return page(res, 'challenge', host, k, 403);
         if (k === 'html') return send(res, 200, 'text/html', read('page.html'),
           { 'content-disposition': 'attachment; filename="paper.pdf"' });
@@ -133,6 +139,7 @@ export async function startFixtureServer() {
     port, log, base,
     resolver: `${base(H.R)}/`,
     libraryPrefix: `${base(H.Y)}/lib?url=`,
+    pass: (host) => passed.add(host),
     hits: (key, host) => log.filter((e) => e.key === key && (!host || e.host === host)),
     close: () => new Promise((r) => { for (const s of sockets) s.destroy(); server.close(() => r()); }),
   };

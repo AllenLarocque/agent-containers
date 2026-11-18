@@ -78,4 +78,32 @@ check "the PDF is in the paper's folder and starts %PDF-" bash -c '
     && [ "$(find "$1/papers/proj" -name paper.pdf | wc -l)" = 1 ]' _ "$w"
 check "nothing left in the download temp dir" bash -c '[ -z "$(ls -A "$1/dl" 2>/dev/null)" ]' _ "$w"
 
+# ---- the owner's view (fetcher-view, as the entry point starts it when agent-up mounts a password file) ----
+# The smoke run has no /etc/fetcher/view-password (root-owned folder, no extra docker options), so the same script is
+# started on a temp password file. Xvfb :99 is still up from above.
+check "no password file: fetcher-view refuses, nothing listens on 5900 or 3773" bash -c '
+  ! /usr/local/bin/fetcher-view "$1/no-such-password" && sleep 1 && ! ss -Hltn | grep -Eq ":(5900|3773)\b"' _ "$w"
+( umask 077; printf 'Ab3dE6gH' > "$w/view-password" )
+/usr/local/bin/fetcher-view "$w/view-password" > "$w/view.log" 2>&1
+for _ in $(seq 50); do curl -fsS -o /dev/null -m 1 http://127.0.0.1:3773/vnc.html 2>/dev/null && break; sleep 0.2; done
+check "viewer: noVNC answers on 3773" curl -fsS -o /dev/null -m 5 http://127.0.0.1:3773/vnc.html
+check "viewer: x11vnc listens on 127.0.0.1:5900 only; 3773 is the only other new listener" bash -c '
+  l=$(ss -Hltn | awk "{print \$4}" | sort -u); echo "$l"
+  grep -qx "127.0.0.1:5900" <<<"$l" && ! grep -v "^127.0.0.1:5900$" <<<"$l" | grep -q ":5900$" \
+    && grep -Eqx "(0.0.0.0|\*|\[::\]):3773" <<<"$l" \
+    && [ -z "$(grep -Ev "^127.0.0.1:5900$|:3773$" <<<"$l")" ]'
+# RFB handshake far enough to see the security types offered: VNC authentication (2) only, never None (1).
+check "viewer: the VNC server requires its password (security types offered: 2 only)" node -e '
+  const s = require("net").connect(5900, "127.0.0.1"); let buf = Buffer.alloc(0), sent = false;
+  const done = (ok, m) => { console.log(m); s.destroy(); process.exit(ok ? 0 : 1); };
+  s.on("data", (d) => { buf = Buffer.concat([buf, d]);
+    if (!sent && buf.length >= 12) { sent = true; console.log("server: " + buf.subarray(0, 11)); s.write(buf.subarray(0, 12)); buf = buf.subarray(12); }
+    else if (sent && buf.length >= 1 && buf.length >= 1 + buf[0]) {
+      const types = [...buf.subarray(1, 1 + buf[0])]; done(types.length > 0 && types.every((t) => t === 2), "security types: " + types.join(",")); } });
+  s.on("error", (e) => done(false, String(e))); setTimeout(() => done(false, "timeout"), 5000);'
+check "viewer: the password is in no log and on no command line" bash -c '
+  ! grep -rq "Ab3dE6g[H]" /tmp/fetcher-view "$1/view.log" && ! grep -qa "Ab3dE6g[H]" /proc/[0-9]*/cmdline' _ "$w"
+pkill -x x11vnc; pkill -f "[w]ebsockify"; sleep 1
+check "viewer stopped: nothing listens on 5900 or 3773" bash -c '! ss -Hltn | grep -Eq ":(5900|3773)\b"'
+
 [ "$fail" -eq 0 ] && echo "SMOKE fetcher-offline: ALL PASSED" || { echo "SMOKE fetcher-offline: FAILURES"; exit 1; }

@@ -200,7 +200,7 @@ test('a symlink planted at the paper folder: nothing written outside, no status 
 test('pause flag: a pass makes no request and writes nothing', async () => {
   const { d, go } = env();
   request(d.papers, 'p', 'r.txt', ['10.5555/good1']);
-  fs.writeFileSync(path.join(d.control, 'pause'), '');
+  fs.writeFileSync(path.join(d.control, 'pause'), `${Date.now()}\n`);   // lib/control.mjs: "<ms of the last fetcherctl call>\n"
   const mark = fx.log.length;
   await go();
   assert.equal(fx.log.length, mark);

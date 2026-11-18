@@ -8,11 +8,11 @@ import { withDir, listAt, readSmall, readSmallAt } from './fs-util.mjs';
 import path from 'node:path';
 
 export const REQUEST_NAME = /^[A-Za-z0-9._-]{1,80}\.txt$/;
-const PROJECT = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,79}$/;
+export const PROJECT = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,79}$/;
 const MAX_LINES = 200;
 const MAX_REF = 9999;                    // records.mjs accepts line:1 .. line:9999
 export const MAX_REQUEST_BYTES = 64 * 1024;
-const MAX_STATUS_BYTES = 1024 * 1024;
+export const MAX_STATUS_BYTES = 1024 * 1024;
 const TERMINAL = (s) => s === 'saved' || s === 'bad-request' || (typeof s === 'string' && s.startsWith('not-available:'));
 
 function parseRequest(text) {
@@ -52,17 +52,26 @@ export const statusName = (requestName) => requestName.replace(/\.txt$/, '.tsv')
 export const statusText = (papersRoot, project, requestName) =>
   withDir(papersRoot, [project, '_fetch', 'status'], (fd) => readSmallAt(fd, statusName(requestName), MAX_STATUS_BYTES));
 
+// One status line (without its newline) -> {doi, status, host, date, library} if it
+// re-renders byte for byte; null otherwise. (Also used by fetcherctl status.)
+export function statusRecord(line) {
+  const f = line.split('\t');
+  if (f.length !== 5) return null;
+  const rec = { doi: f[0], status: f[1], host: f[2] === '-' ? '' : f[2], date: f[3], library: f[4] };
+  try {
+    return statusLine(rec) === `${line}\n` ? rec : null;
+  } catch {
+    return null;                         // not ours
+  }
+}
+
 // doi -> {status, host, date, library}, from lines that re-render exactly.
 export function parseStatus(text) {
   const map = new Map();
   if (typeof text !== 'string') return map;
   for (const line of text.split('\n')) {
-    const f = line.split('\t');
-    if (f.length !== 5 || f[1] === 'bad-request') continue;
-    const rec = { doi: f[0], status: f[1], host: f[2] === '-' ? '' : f[2], date: f[3], library: f[4] };
-    try {
-      if (statusLine(rec) === `${line}\n`) map.set(rec.doi, rec);
-    } catch { /* not ours: ignore */ }
+    const rec = statusRecord(line);
+    if (rec && rec.status !== 'bad-request') map.set(rec.doi, rec);
   }
   return map;
 }

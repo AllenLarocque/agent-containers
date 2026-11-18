@@ -10,7 +10,8 @@
 // a run each paper gets one attempt, a challenged host is not visited again, and after a
 // login page there are no more library-routed visits. A run ends when the process
 // restarts, at the next UTC day, or (for one host or the library route) when the owner
-// drops a retry request into the control directory.
+// asks for a retry (fetcherctl retry). The owner's controls (pause, opening a page for
+// the owner, retry) are lib/control.mjs; this file only wires them in.
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -22,7 +23,8 @@ import { loadConfig } from './lib/config.mjs';
 import { hostOf } from './lib/classify.mjs';
 import { openBrowser, resolveDoi, fetchOne } from './lib/browser.mjs';
 import { scanRequests, statusText, parseStatus, pendingIn, renderStatus, statusName } from './lib/queue.mjs';
-import { withDir, readSmall, startsWithAt } from './lib/fs-util.mjs';
+import { withDir, startsWithAt } from './lib/fs-util.mjs';
+import { serviceControl, takeRetry, applyRetryLines, waitForControl } from './lib/control.mjs';
 
 export const DEFAULTS = Object.freeze({
   papersRoot: '/papers',
@@ -35,7 +37,6 @@ export const DEFAULTS = Object.freeze({
 });
 
 const LIBRARY_RETRY = new Set(['not-available:no-pdf-link', 'not-available:not-a-pdf', 'not-available:http-error']);
-const HOST = /^[a-z0-9.-]{1,253}$/;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const day = (ms) => new Date(ms).toISOString().slice(0, 10);
 
@@ -46,37 +47,8 @@ export function newRun(date = day(Date.now())) {
 // A new UTC day starts a new run (challenged hosts and attempts are forgotten).
 export const nextRun = (run, nowMs) => (run.date === day(nowMs) ? run : newRun(day(nowMs)));
 
-// Control hooks (the control directory is the owner's, not mounted to the research side):
-//   pause  - while present, no paper is started.
-//   retry  - read once and removed; lines "check <host>", "login" or "all".
-const paused = (controlDir) => fs.existsSync(path.join(controlDir, 'pause'));
-
-export function applyRetry(controlDir, run) {
-  const file = path.join(controlDir, 'retry');
-  const text = readSmall(file, 4096);
-  if (text === null) return;
-  fs.rmSync(file, { force: true });
-  for (const line of text.split('\n').map((s) => s.trim())) {
-    if (line === 'all') {
-      run.challenged.clear();
-      run.libraryBlocked = false;
-      run.results.clear();
-    } else if (line === 'login') {
-      run.libraryBlocked = false;
-      for (const [doi, r] of run.results) if (r.status === 'needs-owner:login') run.results.delete(doi);
-    } else if (line.startsWith('check ') && HOST.test(line.slice(6))) {
-      const h = line.slice(6);
-      run.challenged.delete(h);
-      for (const [doi, r] of run.results) {
-        if ((r.status === 'needs-owner:check' || r.status === 'skipped:host-challenged') && (r.host === h || r.hop === h)) {
-          run.challenged.delete(r.host);
-          run.challenged.delete(r.hop);
-          run.results.delete(doi);
-        }
-      }
-    }
-  }
-}
+// Read the control directory's retry requests into the run (lib/control.mjs has the formats).
+export const applyRetry = (controlDir, run) => applyRetryLines(takeRetry(controlDir), run);
 
 // A real PDF already in this project's folder for this DOI (no links followed).
 function alreadySaved(papersRoot, project, doi) {
@@ -113,10 +85,12 @@ async function attempt(ctx, doi, { cfg, pacer, run }) {
   // that host gets at most one extra load per distinct first hop.
   if (r.status === 'skipped:host-challenged') challenge(run, hop);
   // Library route only with an http(s) landing URL on the host the direct visit recorded.
+  // checkHost and landingUrl stay in the run's memory (an owner's check or login page is opened
+  // from them); they are never written or logged.
   if (!LIBRARY_RETRY.has(r.status) || !cfg.libraryPrefix || !r.landingUrl || hostOf(r.landingUrl) !== r.host) {
-    return { ...base, host, status: r.status, tmpPdf: r.tmpPdf };
+    return { ...base, host, status: r.status, tmpPdf: r.tmpPdf, checkHost: r.checkHost };
   }
-  if (run.libraryBlocked) return { ...base, host, status: 'needs-owner:login' };
+  if (run.libraryBlocked) return { ...base, host, status: 'needs-owner:login', landingUrl: r.landingUrl };
   const lskip = pacer.check(hop, true);
   if (lskip) return { ...base, host, status: lskip };
   await sleep(pacer.waitMs(hop));
@@ -124,7 +98,8 @@ async function attempt(ctx, doi, { cfg, pacer, run }) {
   const l = await fetchOne(ctx, doi, { cfg, library: true, url: r.landingUrl, blocked: run.challenged });
   if (l.status === 'needs-owner:login') run.libraryBlocked = true;
   if (l.status === 'needs-owner:check') challenge(run, l.checkHost);
-  return { ...base, host, status: l.status, library: 'yes', tmpPdf: l.tmpPdf };
+  return { ...base, host, status: l.status, library: 'yes', tmpPdf: l.tmpPdf, checkHost: l.checkHost,
+           landingUrl: l.status === 'needs-owner:login' ? r.landingUrl : undefined };
 }
 
 // Move the PDF in and write metadata.md. false (and "write refused <doi>") on refusal.
@@ -154,15 +129,15 @@ function writeStatus(papersRoot, req, map, date, label, log) {
 // downloadDir (optional) is emptied after each paper, so nothing a page started by itself
 // accumulates there.
 export async function runOnce({ ctx, pacer, cfg, run, papersRoot, controlDir, downloadDir, log = console.log, now = Date.now }) {
-  applyRetry(controlDir, run);
-  if (paused(controlDir)) return;
+  const control = () => serviceControl({ ctx, cfg, run, controlDir, now, log });
+  if (await control()) return;
   for (const req of scanRequests(papersRoot)) {
     const date = day(now());
     const current = statusText(papersRoot, req.project, req.name);
     const map = parseStatus(current);
     if (current !== renderStatus(req, map, date)) writeStatus(papersRoot, req, map, date, 'status-file', log);
     for (const doi of pendingIn(req, map)) {
-      if (paused(controlDir)) return;
+      if (await control()) return;          // paused: the paper in flight is done; the browser is the owner's
       const cached = run.results.get(doi);
       let r;
       if (alreadySaved(papersRoot, req.project, doi)) {
@@ -214,7 +189,7 @@ export async function runLoop(opts = {}) {
       await runOnce({ ctx, pacer, cfg, run, papersRoot: o.papersRoot, controlDir: o.controlDir,
                       downloadDir: o.downloadDir, log, now });
       if (o.once) break;
-      await sleep(o.pollMs);
+      await waitForControl(o.controlDir, o.pollMs);   // wakes early for an owner request
     }
   } finally {
     await ctx.close().catch(() => {});

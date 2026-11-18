@@ -58,12 +58,13 @@ COPY engine/fetcher.mjs /opt/fetcher/fetcher.mjs
 COPY engine/lib/ /opt/fetcher/lib/
 COPY fetcher-entrypoint.sh /usr/local/bin/fetcher-entrypoint
 COPY fetcherctl /usr/local/bin/fetcherctl
+COPY fetcher-view /usr/local/bin/fetcher-view
 # (Modes are set here and in the npm layer, not with a chmod -R over /opt/fetcher, which would copy
 # node_modules into another layer.)
-RUN chmod 0755 /usr/local/bin/fetcher-entrypoint /usr/local/bin/fetcherctl \
+RUN chmod 0755 /usr/local/bin/fetcher-entrypoint /usr/local/bin/fetcherctl /usr/local/bin/fetcher-view \
     && chmod 0644 /opt/fetcher/fetcher.mjs && chmod -R a+rX,go-w /opt/fetcher/lib \
     && ! grep -rIl -e '--no-sandbox' -e FETCHER_TEST_SANDBOX /opt/fetcher/fetcher.mjs /opt/fetcher/lib \
-           /usr/local/bin/fetcher-entrypoint /usr/local/bin/fetcherctl
+           /usr/local/bin/fetcher-entrypoint /usr/local/bin/fetcherctl /usr/local/bin/fetcher-view
 
 # Paths the engine uses (fetcher.mjs DEFAULTS). The profile volume mounts at /home/agent/.fetcher: it must
 # exist agent-owned here, or a fresh volume comes up root-owned. /etc/fetcher holds the read-only config mount.

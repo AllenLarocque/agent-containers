@@ -82,8 +82,8 @@ check "Chromium for exactly the pinned Playwright revision" bash -c '
   echo "revision $rev"; [ -x "$PLAYWRIGHT_BROWSERS_PATH/chromium-$rev/chrome-linux64/chrome" ]'
 check "Xvfb, x11vnc, noVNC, websockify present" bash -c 'command -v Xvfb && command -v x11vnc && command -v websockify && test -f /usr/share/novnc/vnc.html'
 # (Playwright's library under node_modules contains the string: it is what chromiumSandbox: false adds.)
-check "no --no-sandbox or test sandbox switch in the engine, entry point or fetcherctl" \
-  bash -c '! grep -rIl -e "--no-sandbox" -e FETCHER_TEST_SANDBOX -e "chromiumSandbox: *false" /opt/fetcher --exclude-dir=node_modules "$1" "$(command -v fetcherctl)"' _ "$EP"
+check "no --no-sandbox or test sandbox switch in the engine, entry point, fetcherctl or fetcher-view" \
+  bash -c '! grep -rIl -e "--no-sandbox" -e FETCHER_TEST_SANDBOX -e "chromiumSandbox: *false" /opt/fetcher --exclude-dir=node_modules "$1" "$(command -v fetcherctl)" "$(command -v fetcher-view)"' _ "$EP"
 check "paths: profile and state dirs, control dir, papers root agent-owned; /etc/fetcher root-owned" bash -c '
   for d in /home/agent/.fetcher /home/agent/.fetcher/profile /home/agent/.fetcher/state /run/fetcher /papers /tmp/fetcher-dl; do
     [ -d "$d" ] && [ "$(stat -c %U "$d")" = agent ] || { echo "bad: $d"; exit 1; }; done
@@ -137,7 +137,7 @@ check "after 20 s the engine's Chromium is sandboxed (kernel view: renderers in 
 # No agent program running: exact program names (a bare "t3" substring also matches random profile paths).
 check "after 20 s no t3, claude, codex or agent-init process" \
   bash -c '! pgrep -a -f "(^|[/ ])(t3|claude|codex|agent-init\.sh|agent-t3|agent-entrypoint)( |$)"'
-check "no viewer without /etc/fetcher/view-password" bash -c '[ ! -e /etc/fetcher/view-password ] && ! pgrep -x x11vnc && ! pgrep -f "[w]ebsockify"'
+check "no viewer without /etc/fetcher/view-password: no x11vnc, no websockify, nothing on 5900 or 3773" bash -c '[ ! -e /etc/fetcher/view-password ] && ! pgrep -x x11vnc && ! pgrep -f "[w]ebsockify" && ! ss -Hltn | grep -Eq ":(5900|3773)\b"'
 # chrome://sandbox from the engine's own launch function: "adequately sandboxed" only with the namespace
 # sandbox (layer 1) AND seccomp-BPF (layer 2) up. Chromium refuses to start sandboxed without them
 # ("No usable sandbox!"), so a fallback would fail the launch or this page, never pass silently.
@@ -150,13 +150,21 @@ sbx_ok() {
 }
 check "Chromium (engine's openBrowser, headed, Xvfb) reports: adequately sandboxed" sbx_ok
 
-# ---- fetcherctl: validated arguments, writes only under /run/fetcher ----
-check "fetcherctl rejects a bad host and writes nothing" bash -c '
-  ! fetcherctl retry check "a b;rm" 2>/dev/null && ! fetcherctl retry check "../x" 2>/dev/null && ! fetcherctl nope 2>/dev/null \
-    && [ ! -e /run/fetcher/retry ]'
-check "fetcherctl pause / resume / retry" bash -c '
-  fetcherctl pause && [ -f /run/fetcher/pause ] && fetcherctl resume && [ ! -e /run/fetcher/pause ] \
-    && fetcherctl retry check www.example.org && [ "$(cat /run/fetcher/retry)" = "check www.example.org" ] && rm /run/fetcher/retry'
+# ---- fetcherctl: validated arguments, writes only under /run/fetcher; the running engine answers ----
+check "fetcherctl rejects bad arguments and writes nothing" bash -c '
+  ! fetcherctl check "a b;rm" 2>/dev/null && ! fetcherctl check "../x" 2>/dev/null && ! fetcherctl retry "a;b" 2>/dev/null \
+    && ! fetcherctl nope 2>/dev/null && ! fetcherctl view x 2>/dev/null && [ -z "$(ls -A /run/fetcher)" ]'
+check "fetcherctl login with no library prefix refuses, writes nothing" bash -c '
+  out=$(fetcherctl login 2>&1); rc=$?; echo "$out"; [ "$rc" -eq 1 ] && grep -q "no library prefix" <<<"$out" && [ -z "$(ls -A /run/fetcher)" ]'
+check "fetcherctl view sets the pause (<ms>), status says paused" bash -c '
+  fetcherctl view && grep -qxE "[0-9]{13}" /run/fetcher/pause && fetcherctl status | grep -qx "paused: yes"'
+check "fetcherctl retry <host> ends the pause; the engine takes the request within 5 s and logs it" bash -c '
+  fetcherctl retry www.example.org && [ ! -e /run/fetcher/pause ]
+  for _ in $(seq 25); do [ ! -e /run/fetcher/retry ] && grep -q "^retry www.example.org$" "$1" && exit 0; sleep 0.2; done
+  ls -A /run/fetcher; tail -n 5 "$1"; exit 1' _ "$eplog"
+check "fetcherctl check <host> with nothing waiting: the engine says so, opens nothing, no pause" bash -c '
+  out=$(fetcherctl check nothing.example 2>&1); rc=$?; echo "$out"
+  [ "$rc" -eq 1 ] && grep -q "nothing opened" <<<"$out" && [ ! -e /run/fetcher/pause ] && grep -qx "nothing-waiting check nothing.example" /run/fetcher/reply'
 
 kill "$ep_pid" 2>/dev/null; wait "$ep_pid" 2>/dev/null
 if [ "$fail" -ne 0 ]; then echo "--- entry point log (tail)"; tail -n 30 "$eplog" | sed 's/^/    | /'; fi

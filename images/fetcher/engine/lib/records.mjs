@@ -18,7 +18,7 @@ export const STATUS = Object.freeze([
   'bad-request',
 ]);
 
-const HOST = /^[a-z0-9.-]{1,253}$/;
+export const HOST = /^[a-z0-9.-]{1,253}$/;   // the host-name pattern of every file the fetcher writes or reads
 const DATE = /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/;
 
 function fail(name, value) {
