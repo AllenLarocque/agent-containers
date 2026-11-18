@@ -16,7 +16,7 @@ test('defaults', () => {
   assert.equal(c.resolver, 'https://doi.org/');
   assert.equal(c.libraryPrefix, '');
   assert.deepEqual(c.loginHosts, ['login.openathens.net', 'go.openathens.net']);
-  assert.deepEqual(c.caps, { gapMs: 25000, hostGapMs: 60000, perHost: 30, perDay: 100, libraryPerDay: 20, resolverPerDay: 300 });
+  assert.deepEqual(c.caps, { gapMs: 90000, hostGapMs: 300000, perHost: 10, perDay: 100, libraryPerDay: 20, resolverPerDay: 300 });
   assert.equal(c.maxPdfBytes, 104857600);
 });
 

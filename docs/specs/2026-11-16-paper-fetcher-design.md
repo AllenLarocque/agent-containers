@@ -436,3 +436,14 @@ Where the build differs from the text above, the build wins. The code is the ref
   a hash in `images/fetcher/Dockerfile`; both must be bumped together. The weekly update agent's
   instructions do not cover them yet.
 - **Owner procedure:** `docs/runbooks/paper-fetcher.md`.
+
+## Amendment 2026-11-18: slower pacing; the browser does not announce automation
+
+After the first live run the owner decided two changes. The engine's defaults are slower: at least
+90 s between papers, 5 minutes between papers from one publisher's site (all its host names
+together), 10 papers per publisher host per day, each wait lengthened by a random amount up to half
+as much again, and a wait gives way to an owner command. The browser is started without
+Chromium's automation switch, so a check the owner ticks in the view can pass; the profile is set
+never to offer to save or autofill what is typed. Unchanged: the engine never interacts with a
+check, a host that showed one is not visited again until the owner acts, and no stealth plug-in
+or challenge solver is used.

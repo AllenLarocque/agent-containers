@@ -5,7 +5,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { scanRequests, pending, SCAN } from '../lib/queue.mjs';
-import { runOnce, newRun, nextRun, applyRetry, parseArgs, DEFAULTS } from '../fetcher.mjs';
+import { runOnce, newRun, nextRun, applyRetry, parseArgs, pacing, DEFAULTS } from '../fetcher.mjs';
 import { Pacer } from '../lib/pacing.mjs';
 import { folderName } from '../lib/doi.mjs';
 import { startFixtureServer, H, PDF } from './fixture-server.mjs';
@@ -452,4 +452,40 @@ test('library-routed navigation that times out: the prefix never reaches stdout/
   assert.deepEqual(statusLines(d.papers, 'p', 'r.txt').map((l) => [l[1], l[4]]), [['not-available:timeout', 'yes']]);
   assert.ok(c.out.text.includes('10.5555/paywallslow not-available:timeout'), c.out.text);
   assert.ok(!c.out.text.includes('/lib') && !c.out.text.includes(H.Y) && !c.out.text.includes(fx.libraryPrefix), c.out.text);
+});
+
+// ---------------- slower pacing an owner request can interrupt (2026-11-18) ----------------
+test('pacing: the wait is the gap plus up to half as much again; no wait at all for 0', async () => {
+  const d = tempDirs();
+  let t = Date.now();
+  assert.equal(await pacing({ controlDir: d.control, rand: () => 0.999 })(200), false);
+  assert.ok(Date.now() - t >= 290, `waited ${Date.now() - t} ms`);
+  t = Date.now();
+  assert.equal(await pacing({ controlDir: d.control, rand: () => 0 })(200), false);
+  assert.ok(Date.now() - t >= 190 && Date.now() - t < 290, `waited ${Date.now() - t} ms`);
+  t = Date.now();
+  assert.equal(await pacing({ controlDir: d.control, rand: () => 0.999 })(0), false);
+  assert.ok(Date.now() - t < 100);
+});
+
+test('pacing: an owner request ends the wait at once and is reported', async () => {
+  const d = tempDirs();
+  fs.writeFileSync(path.join(d.control, 'retry'), 'all\n');
+  const t = Date.now();
+  assert.equal(await pacing({ controlDir: d.control })(60000), true);
+  assert.ok(Date.now() - t < 500);
+});
+
+test('an owner request during a paper\'s wait is served within a second or two; the paper is fetched afterwards, once', async () => {
+  const { d, go } = env({ caps: { gapMs: 20000, hostGapMs: 0, perHost: 30, perDay: 100, libraryPerDay: 20, resolverPerDay: 300 } });
+  request(d.papers, 'p', 'r.txt', ['10.5555/404a', '10.5555/404b']);
+  const run = newRun();
+  const mark = fx.log.length;
+  const t = Date.now();
+  setTimeout(() => fs.writeFileSync(path.join(d.control, 'retry'), 'check nowhere.example\n'), 700);
+  assert.equal(await go(run), 'again');                      // the second lookup was waiting out its 20 s gap
+  assert.ok(Date.now() - t < 6000, `returned after ${Date.now() - t} ms`);
+  assert.equal(fs.existsSync(path.join(d.control, 'retry')), false, 'the request was served');
+  assert.deepEqual(statusLines(d.papers, 'p', 'r.txt').map((l) => l[0]), ['10.5555/404a']);
+  assert.equal(fx.log.slice(mark).filter((e) => e.host === H.R).length, 1);
 });

@@ -39,7 +39,7 @@ export function loadConfig(path) {
     resolver: 'https://doi.org/',
     libraryPrefix: '',
     loginHosts: [...DEFAULT_LOGIN_HOSTS],
-    caps: { gapMs: 25000, hostGapMs: 60000, perHost: 30, perDay: 100, libraryPerDay: 20, resolverPerDay: 300 },
+    caps: { gapMs: 90000, hostGapMs: 300000, perHost: 10, perDay: 100, libraryPerDay: 20, resolverPerDay: 300 },
     maxPdfBytes: 104857600,
     timeouts: { navMs: 60000, settleMs: 9000, downloadMs: 45000 },
   };

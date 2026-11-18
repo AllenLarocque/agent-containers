@@ -251,7 +251,7 @@ FETCH_VIEW_PORT=
 LIBRARY_LINK_PREFIX=
 # Caps (positive whole numbers; unset = the fetcher's defaults below): papers per publisher host per day, papers per day,
 # library-routed papers per day.
-#FETCH_PER_HOST=30
+#FETCH_PER_HOST=10
 #FETCH_PER_DAY=100
 #FETCH_LIBRARY_PER_DAY=20
 CONFEOF

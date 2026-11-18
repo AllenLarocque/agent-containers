@@ -140,12 +140,14 @@ unset means the default), then run `agent-up up fetcher`:
 
 | Key | Default | Limits |
 |---|---|---|
-| `FETCH_PER_HOST` | 30 | papers per publisher host per day |
+| `FETCH_PER_HOST` | 10 | papers per publisher host per day |
 | `FETCH_PER_DAY` | 100 | papers per day, all hosts |
 | `FETCH_LIBRARY_PER_DAY` | 20 | library-routed papers per day |
 
-Fixed in the engine, not in `project.conf`: at least 25 s between papers, 60 s between papers from
-one host, `doi.org` lookups paced and capped at 300 a day, PDFs capped at 100 MiB each, and a hard
+The fetcher is slow on purpose. Fixed in the engine, not in `project.conf`: at least 90 s between
+papers and 5 minutes between papers from one publisher's site (all its host names together), each
+wait lengthened by a random amount up to half as much again; an owner command (`fetch check`,
+`login`, `retry`) is served within a second or two even while a paper waits its turn. Also fixed: `doi.org` lookups paced and capped at 300 a day, PDFs capped at 100 MiB each, and a hard
 limit on each browser visit (`PAPER_DEADLINE_MS`: by default the navigation, settle and download
 timeouts plus 30 s, about 2.5 minutes). The per-host cap and gap count every host a visit reaches
 (a redirect's landing host too, not only the paper's first address). Changing those means changing

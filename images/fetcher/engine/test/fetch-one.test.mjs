@@ -20,6 +20,15 @@ before(async () => {
 });
 after(async () => { await browsers?.close(); await fx?.close(); });
 
+test('the browser does not announce automation, and never offers to keep a typed password', async () => {
+  assert.equal(await ctx.page.evaluate(() => navigator.webdriver), false);
+  const prefs = JSON.parse(fs.readFileSync(path.join(dirs.profile, PROFILES.direct, 'Default', 'Preferences'), 'utf8'));
+  assert.equal(prefs.credentials_enable_service, false);
+  assert.equal(prefs.profile.password_manager_enabled, false);
+  assert.equal(prefs.autofill.profile_enabled, false);
+  assert.equal(prefs.plugins.always_open_pdf_externally, true);
+});
+
 const startsPdf = (p) => fs.readFileSync(p).subarray(0, 5).toString() === '%PDF-';
 const tabBlank = () => assert.deepEqual(ctx.ctx.pages().map((p) => p.url()), ['about:blank']);
 

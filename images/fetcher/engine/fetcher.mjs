@@ -25,7 +25,7 @@ import { hostOf } from './lib/classify.mjs';
 import { Browsers, resolveDoi, fetchOne } from './lib/browser.mjs';
 import { scanRequests, statusText, parseStatus, pendingIn, renderStatus, statusName } from './lib/queue.mjs';
 import { withDir, startsWithAt } from './lib/fs-util.mjs';
-import { serviceControl, takeRetry, applyRetryLines, waitForControl } from './lib/control.mjs';
+import { serviceControl, takeRetry, applyRetryLines, waitForControl, controlPending } from './lib/control.mjs';
 
 export const DEFAULTS = Object.freeze({
   papersRoot: '/papers',
@@ -77,11 +77,24 @@ function hostGuard(run, pacer, hop, approved) {
     return null;
   };
 }
+// A paper put back because an owner request arrived while it waited its turn: nothing was visited
+// for that step, nothing is recorded, and it is taken again after the request is served.
+const DEFERRED = Object.freeze({ deferred: true });
+
+// The wait before a visit: the pacer's gap plus up to half as much again (so visits are not on a
+// fixed beat), ended early by an owner request. -> true if a request is waiting.
+export function pacing({ controlDir, rand = Math.random }) {
+  return async (ms) => {
+    if (ms > 0) await waitForControl(controlDir, ms + Math.floor(rand() * ms * 0.5));
+    return controlPending(controlDir);
+  };
+}
+
 const waitFor = (pacer, run, hop) => Math.max(pacer.waitMs(hop), ...[...(run.landings.get(hop) ?? [])].map((h) => pacer.waitMs(h)));
 
 // One paper: pacing, the direct visit (direct browser), and at most one library-routed visit
 // (library browser, closed again afterwards).
-async function attempt(browsers, doi, { cfg, pacer, run }) {
+async function attempt(browsers, doi, { cfg, pacer, run, pace }) {
   // Every network request is paced. The resolver lookup has its own cap and gap
   // (Pacer.checkLookup/lookupWaitMs/recordLookup) and does not count toward the daily
   // total of publisher visits.
@@ -89,7 +102,7 @@ async function attempt(browsers, doi, { cfg, pacer, run }) {
   const resolver = hostOf(cfg.resolver);
   const capped = pacer.checkLookup(resolver);
   if (capped) return { status: capped, host: '', library: 'no' };
-  await sleep(pacer.lookupWaitMs(resolver));
+  if (await pace(pacer.lookupWaitMs(resolver))) return DEFERRED;
   pacer.recordLookup(resolver);
   const res = await resolveDoi(direct, doi, { cfg });
   if (res.status) return { status: res.status, host: '', library: 'no' };
@@ -98,7 +111,7 @@ async function attempt(browsers, doi, { cfg, pacer, run }) {
   if (run.challenged.has(hop)) return { ...base, status: 'skipped:host-challenged' };
   const skip = pacer.check(hop, false);
   if (skip) return { ...base, status: skip };
-  await sleep(waitFor(pacer, run, hop));
+  if (await pace(waitFor(pacer, run, hop))) return DEFERRED;
   pacer.record(hop, false);
   const r = await fetchOne(direct, doi, { cfg, url: res.url, navCheck: hostGuard(run, pacer, hop, [hop]) });
   // Library-routed results report the direct landing host: a proxy's host could name
@@ -115,7 +128,7 @@ async function attempt(browsers, doi, { cfg, pacer, run }) {
   if (run.libraryBlocked) return { ...base, host, status: 'needs-owner:login', landingUrl: r.landingUrl };
   const lskip = pacer.check(hop, true);
   if (lskip) return { ...base, host, status: lskip };
-  await sleep(waitFor(pacer, run, hop));
+  if (await pace(waitFor(pacer, run, hop))) return DEFERRED;
   pacer.record(hop, true);
   let l;
   try {
@@ -158,7 +171,8 @@ function writeStatus(papersRoot, req, map, date, label, log) {
 // round-robin across projects (one DOI per project in turn), so one project cannot starve the
 // others. downloadDir (optional) is emptied after each paper, so nothing a page started by itself
 // accumulates there.
-export async function runOnce({ browsers, pacer, cfg, run, papersRoot, controlDir, downloadDir, log = console.log, now = Date.now }) {
+export async function runOnce({ browsers, pacer, cfg, run, papersRoot, controlDir, downloadDir, log = console.log, now = Date.now, rand }) {
+  const pace = pacing({ controlDir, rand });
   const control = () => serviceControl({ browsers, cfg, run, controlDir, now, log });
   if (await control()) return;
   const queues = new Map();                 // project -> [{req, map, doi}]
@@ -176,12 +190,17 @@ export async function runOnce({ browsers, pacer, cfg, run, papersRoot, controlDi
     for (const q of lists) {
       if (i >= q.length) continue;
       if (await control()) return;          // paused: the paper in flight is done; the browser is the owner's
-      await one(q[i], { browsers, pacer, cfg, run, papersRoot, downloadDir, log, now });
+      // An owner request arrived while this paper waited its turn: serve it, then start the pass
+      // again (the paper is still pending).
+      if (await one(q[i], { browsers, pacer, cfg, run, papersRoot, downloadDir, log, now, pace }) === 'deferred') {
+        await control();
+        return 'again';
+      }
     }
   }
 }
 
-async function one({ req, map, doi }, { browsers, pacer, cfg, run, papersRoot, downloadDir, log, now }) {
+async function one({ req, map, doi }, { browsers, pacer, cfg, run, papersRoot, downloadDir, log, now, pace }) {
   const date = day(now());
   const cached = run.results.get(doi);
   let r;
@@ -193,7 +212,8 @@ async function one({ req, map, doi }, { browsers, pacer, cfg, run, papersRoot, d
     r = cached;                            // same paper in another request file: one attempt per run
   } else {
     try {
-      r = await attempt(browsers, doi, { cfg, pacer, run });
+      r = await attempt(browsers, doi, { cfg, pacer, run, pace });
+      if (r.deferred) return 'deferred';
       if (r.status === 'saved' && !store(papersRoot, req.project, doi, r, date, log)) r = null;
     } finally {
       if (downloadDir) emptyDir(downloadDir);
@@ -232,8 +252,9 @@ export async function runLoop(opts = {}) {
   try {
     for (;;) {
       run = nextRun(run, now());
-      await runOnce({ browsers, pacer, cfg, run, papersRoot: o.papersRoot, controlDir: o.controlDir,
-                      downloadDir: o.downloadDir, log, now });
+      const again = await runOnce({ browsers, pacer, cfg, run, papersRoot: o.papersRoot, controlDir: o.controlDir,
+                                    downloadDir: o.downloadDir, log, now }) === 'again';
+      if (again) { await sleep(1000); continue; }
       if (o.once) break;
       await waitForControl(o.controlDir, o.pollMs);   // wakes early for an owner request
     }

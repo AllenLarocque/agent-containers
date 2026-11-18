@@ -213,9 +213,12 @@ export async function serviceControl({ browsers, cfg, run, controlDir, now = Dat
 }
 
 // Wait up to ms, waking early (checked every stepMs) when an open or retry request arrives.
+// An owner request (fetcherctl) is waiting to be served.
+export const controlPending = (controlDir) => fs.existsSync(file(controlDir, 'open')) || fs.existsSync(file(controlDir, 'retry'));
+
 export async function waitForControl(controlDir, ms, stepMs = 1000) {
   for (const t0 = Date.now(); Date.now() - t0 < ms;) {
-    if (fs.existsSync(file(controlDir, 'open')) || fs.existsSync(file(controlDir, 'retry'))) return;
+    if (controlPending(controlDir)) return;
     await new Promise((r) => setTimeout(r, Math.min(stepMs, ms - (Date.now() - t0))));
   }
 }

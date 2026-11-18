@@ -1810,7 +1810,7 @@ check "  ...fetcher-seccomp.json is the shipped template" cmp -s "$FCFG/fetcher-
 check "  ...project.conf: PROJECT/PROFILE=fetcher, RESEARCH_DIR as the research config has it, viewer and library route off" \
   bash -c 'grep -qx PROJECT=fetcher "$1" && grep -qx PROFILE=fetcher "$1" && grep -qx "RESEARCH_DIR=$2" "$1" && grep -qx "FETCH_VIEW_PORT=" "$1" && grep -qx "LIBRARY_LINK_PREFIX=" "$1"' _ "$FCFG/project.conf" "$FRD"
 check "  ...project.conf: caps only as comments; no T3, RStudio, FTP or contact settings" \
-  bash -c 'grep -qx "#FETCH_PER_HOST=30" "$1" && grep -qx "#FETCH_PER_DAY=100" "$1" && grep -qx "#FETCH_LIBRARY_PER_DAY=20" "$1" && ! grep -Eq "^#?(T3_PORT|T3_CONNECT|RSTUDIO|FTP_HOSTS|RESEARCH_CONTACT_EMAIL|GOOGLE_DRIVE)=" "$1"' _ "$FCFG/project.conf"
+  bash -c 'grep -qx "#FETCH_PER_HOST=10" "$1" && grep -qx "#FETCH_PER_DAY=100" "$1" && grep -qx "#FETCH_LIBRARY_PER_DAY=20" "$1" && ! grep -Eq "^#?(T3_PORT|T3_CONNECT|RSTUDIO|FTP_HOSTS|RESEARCH_CONTACT_EMAIL|GOOGLE_DRIVE)=" "$1"' _ "$FCFG/project.conf"
 check "  ...compose: the fetcher seed (spades-fetcher placeholder, init, no ports, no agent volumes)" \
   bash -c 'grep -qx "    image: ghcr.io/allenlarocque/spades-fetcher@sha256:REPLACE_WITH_DIGEST" "$1" && grep -qE "^    init: true" "$1" && ! sed "s/#.*//" "$1" | grep -Eq "ports:|T3_PORT|claude|codex|t3:|/workspace|research"' _ "$FCFG/compose.yaml"
 check "  ...the seed names Chromium's seccomp profile's source and date" \
