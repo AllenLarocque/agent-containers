@@ -101,3 +101,26 @@ First time ever: `agent-up init --profile research`. See
 **Fetching papers the research bot cannot get** (a real browser, your library login if you set one):
 see [paper-fetcher.md](paper-fetcher.md). Run `agent-up up research` once after adding a project,
 then `agent-up up fetcher`.
+
+## Discovery sources for the research agent
+
+Owner steps, done once at setup. The research agent never does them. The research container has a
+`paper-search` server (Claude Code only) that searches many open sources for papers. It works without
+any of the steps below. Each step adds one source.
+
+1. **CORE key (optional).** CORE is an open-access aggregator. Without a key its searches are
+   rate-limited or refused. To get a free key, go to <https://core.ac.uk/services/api>, register with
+   your email address and wait for the key by email. Put it on the `CORE_API_KEY=` line of
+   `~/.config/agent-containers/research/project.conf` (the seed has it commented as `#CORE_API_KEY=`;
+   remove the `#`). It is 16 to 64 letters and digits, with no quotes. `agent-up status research` and
+   `agent-up config research` show only `set` or `unset`, never the value. Builders refuse the line.
+2. **BASE registration (optional).** BASE (Bielefeld Academic Search Engine) lets only registered
+   callers use its API, so `search_base` returns nothing until BASE knows your public IP address. Ask
+   BASE for registration through the contact details on base-search.net, giving your public IP
+   address (look it up from the host, not from inside the container) and saying it is for
+   non-commercial research use. If your home IP address changes, register the new one.
+3. **Apply.** Run `agent-up up research`. The key takes effect at the next `up`.
+
+Skipped steps: no CORE key means CORE searches may be refused or slow; no BASE registration means
+`search_base` returns no results. The agent then uses the other sources. The contact alias
+(`RESEARCH_CONTACT_EMAIL`, see the README) is what Unpaywall and OpenAlex lookups need.

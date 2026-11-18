@@ -87,6 +87,20 @@ Papers are not data. These rules sit next to the data rules and do not weaken th
   bioRxiv / EarthArXiv, publisher open-access pages, institutional repositories) before the
   publisher. Use Crossref for metadata. Record which version you found
   (published, accepted manuscript, preprint). They can differ.
+- Discovery tools: when the `paper-search` tools are listed, use them across their sources before you
+  decide a paper has no legal free copy. `search_papers` searches several sources at once; for one
+  source use `search_openalex`, `search_crossref`, `search_europepmc`, `search_core`, `search_arxiv`,
+  `search_biorxiv`, `search_medrxiv`, `search_pmc`, `search_zenodo`, `search_openaire`, `search_base`
+  and the others in the list. `get_citing_papers` and `get_referenced_papers` follow citations;
+  `search_unpaywall` (by DOI) gives an open-access `pdf_url`. Details: `/opt/paper-tools/README.md`.
+  Discovery finds which papers exist and where a free copy is. PDFs that a site refuses to scripts
+  still go to the fetcher (next section).
+- Downloads through the `paper-search` tools: use the source's own `download_<source>` tool and always
+  pass `save_path` as the paper's folder in the layout under "Storage" below, then write its
+  `metadata.md` there. Do not use `download_scihub` or `download_with_fallback`: they are denied.
+  Sci-Hub and other shadow libraries must not be used by any route.
+- A CORE API key may be present in your environment. It goes to CORE's API only, through the
+  `search_core` tool. Never put it in a report, a form, a file or a message.
 - Download the PDF itself, never a web-fetch summary of it.
 - Send `$RESEARCH_CONTACT_EMAIL` only to discovery services that ask for it (Unpaywall, OpenAlex,
   Crossref). Never put it in a form, a sign-up or a report; the one exception is a form on which
