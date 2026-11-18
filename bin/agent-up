@@ -358,7 +358,9 @@ check_core_key(){ # $1 config dir: research only; a builder or the fetcher never
     die "CORE_API_KEY is for the research container only"
   fi
 }
-core_state(){ if [ -n "$(core_key "$1")" ] && core_ok "$1"; then echo set; else echo unset; fi; }   # $1 config dir
+core_state(){ # $1 config dir -> set | unset | invalid (never the value)
+  if [ -z "$(core_key "$1")" ]; then echo unset; elif core_ok "$1"; then echo set; else echo invalid; fi
+}
 check_t3_port(){ # only up and pair need it: stop/down must work on a config that predates T3
   local port; port="$(conf_get "$1/project.conf" T3_PORT)"
   [[ $port =~ ^[0-9]+$ ]] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] \
@@ -1214,17 +1216,44 @@ write_restart(){ # always: come back when Docker starts (e.g. after a reboot), u
     echo "    restart: unless-stopped"
   } > "$1/.generated/restart.yaml"
 }
+write_compose_env(){ # research: compose's interpolation variables = project.conf without any line naming CORE_API_KEY
+  # (in every form compose's env-file parser reads, including a quoted value continued over several lines). The key
+  # reaches compose only from agent-up's environment: the value at `up`, a placeholder at `config`. Never refuses.
+  [ "$(profile "$1")" = research ] || return 0
+  local out="$1/.generated/compose.env"
+  mkdir -p "$1/.generated"; chmod 700 "$1/.generated"
+  ( umask 077
+    awk -v sq="'" '
+      function closes(t, q) { if (q == sq) return index(t, q) > 0; gsub(/\\\\/, "", t); gsub(/\\"/, "", t); return index(t, q) > 0 }
+      { l[NR] = $0 }
+      END {
+        for (i = 1; i <= NR; i++) {
+          s = l[i]; sub(/\r$/, "", s); k = index(s, "CORE_API_KEY")
+          if (k == 0) { print l[i]; continue }
+          v = substr(s, k + 12)   # the line is left out; a quoted value that opens here and closes later goes too
+          if (match(v, /^[ \t]*[=:][ \t]*/)) {
+            v = substr(v, RLENGTH + 1); q = substr(v, 1, 1)
+            if ((q == "\"" || q == sq) && !closes(substr(v, 2), q)) {
+              for (j = i + 1; j <= NR; j++) if (closes(l[j], q)) break
+              if (j <= NR) i = j
+            }
+          }
+        }
+      }' "$1/project.conf" > "$out.tmp" && mv "$out.tmp" "$out" ) || die "could not write $out"
+  chmod 600 "$out"
+}
 compose_cmd(){ # sets COMPOSE for config dir $1
   if [ "$(profile "$1")" = fetcher ]; then   # its own overlays only; interpolation from .generated/compose.env, never project.conf
     COMPOSE=(docker compose --env-file "$1/.generated/compose.env" -f "$1/compose.yaml" -f "$1/.generated/fetcher.yaml" -f "$1/.generated/hostname.yaml" -f "$1/.generated/restart.yaml"
              --project-directory "$1" -p "$(basename "$1")")
     return 0
   fi
-  COMPOSE=(docker compose --env-file "$1/project.conf" -f "$1/compose.yaml" -f "$1/.generated/env-passthrough.yaml"
+  local envf="$1/project.conf"; [ "$(profile "$1")" != research ] || envf="$1/.generated/compose.env"   # write_compose_env
+  COMPOSE=(docker compose --env-file "$envf" -f "$1/compose.yaml" -f "$1/.generated/env-passthrough.yaml"
            -f "$1/.generated/t3-connect.yaml" -f "$1/.generated/research.yaml" -f "$1/.generated/rstudio.yaml" -f "$1/.generated/ftp.yaml" -f "$1/.generated/google-drive.yaml" -f "$1/.generated/hostname.yaml" -f "$1/.generated/restart.yaml"
            --project-directory "$1" -p "$(basename "$1")")
 }
-prepare(){ check_files "$1"; if [ "$(profile "$1")" = fetcher ]; then write_fetcher "$1"; write_hostname "$1"; write_restart "$1"; compose_cmd "$1"; return 0; fi; write_passthrough "$1"; write_t3_connect "$1"; write_research "$1"; write_rstudio "$1"; write_ftp "$1"; write_google_drive "$1"; write_hostname "$1"; write_restart "$1"; compose_cmd "$1"; }
+prepare(){ check_files "$1"; if [ "$(profile "$1")" = fetcher ]; then write_fetcher "$1"; write_hostname "$1"; write_restart "$1"; compose_cmd "$1"; return 0; fi; write_passthrough "$1"; write_t3_connect "$1"; write_research "$1"; write_rstudio "$1"; write_ftp "$1"; write_google_drive "$1"; write_hostname "$1"; write_restart "$1"; write_compose_env "$1"; compose_cmd "$1"; }
 
 up_fetcher(){ # $1 config dir: no secrets, no 1Password, no T3
   local name rd; name="$(basename "$1")"
@@ -1359,8 +1388,10 @@ cmd_config(){
   # Never print the owner's ambient value of a passthrough key: it is only meaningful under `op run`.
   local k
   [ ! -f "$cfg/project.env" ] || while IFS= read -r k; do [ -z "$k" ] || unset "$k"; done < <(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$cfg/project.env")
+  # The CORE key: compose's env file never holds it (write_compose_env); here it renders as a placeholder, never the value.
+  if [ "$(profile "$cfg")" = research ] && [ "$(core_state "$cfg")" = set ]; then export CORE_API_KEY='(set; not shown)'; fi
   "${COMPOSE[@]}" config "$@"
-  [ "$(profile "$cfg")" != research ] || echo "agent-up: CORE_API_KEY: $(core_state "$cfg")" >&2   # set/unset, never the value; stderr keeps --format json clean
+  [ "$(profile "$cfg")" != research ] || echo "agent-up: CORE_API_KEY: $(core_state "$cfg")" >&2   # set/unset/invalid, never the value; stderr keeps --format json clean
 }
 cmd_shell(){
   [ $# -eq 1 ] || usage
