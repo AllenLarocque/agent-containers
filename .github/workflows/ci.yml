@@ -200,16 +200,36 @@ jobs:
           # T3 Connect OFF (no switch mounted): a Cloudflare tunnel edge that really listens on 7844.
           EDGE_IP=$(getent ahostsv4 region1.v2.argotunnel.com | awk 'NR==1{print $1}')
           timeout 8 bash -c "</dev/tcp/$EDGE_IP/7844" && echo "runner reaches $EDGE_IP:7844"
-          docker run -d --name fw --cap-add NET_ADMIN --cap-add NET_RAW \
-            -v /tmp/40-extra.txt:/etc/firewall/allowlist.d/40-extra.txt:ro \
-            -v /tmp/50-project.txt:/etc/firewall/allowlist.d/50-project.txt:ro \
-            -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
+          start_fw() {   # extra docker args (the meta fixture, on the rate-limit fallback only)
+            docker run -d --name fw --cap-add NET_ADMIN --cap-add NET_RAW "$@" \
+              -v /tmp/40-extra.txt:/etc/firewall/allowlist.d/40-extra.txt:ro \
+              -v /tmp/50-project.txt:/etc/firewall/allowlist.d/50-project.txt:ro \
+              -v "$PWD/tests:/tests:ro" spades-base:ci sleep infinity
+          }
+          start_fw
           UP=$(docker exec fw awk '/^nameserver/{print $2; exit}' /etc/resolv.conf); echo "original resolver: $UP"
           set -o pipefail
-          docker exec fw sudo /usr/local/bin/init-firewall.sh 2>&1 | tee /tmp/fw.log
-          # Non-vacuity: this container has NO meta fixture, so the production path (live fetch) ran.
-          grep -qx 'Fetching GitHub IP ranges...' /tmp/fw.log || { echo "::error title=default-bridge firewall::no live GitHub meta fetch"; exit 1; }
-          if grep -q '^GitHub meta: from' /tmp/fw.log; then echo "::error title=default-bridge firewall::used a meta file, not the live fetch"; exit 1; fi
+          live=1; fwrc=0
+          docker exec fw sudo /usr/local/bin/init-firewall.sh 2>&1 | tee /tmp/fw.log || fwrc=$?
+          # This container has NO meta fixture, so the production path (live, unauthenticated fetch) runs.
+          # The runner's shared IP is sometimes out of unauthenticated API allowance. Only then, and only
+          # after the live fetch was attempted, run this step's suites with the fixture instead.
+          if [ "$fwrc" -ne 0 ] && grep -qx 'Fetching GitHub IP ranges...' /tmp/fw.log \
+             && grep -q '^ERROR: api.github.com/meta answered HTTP 403: API rate limit exceeded' /tmp/fw.log; then
+            echo "::warning title=default-bridge firewall::live GitHub meta fetch was rate-limited on this runner; this run used the fixture, so the live fetch path was not exercised"
+            live=0
+            docker rm -f fw
+            start_fw -v "$GH_META_FIXTURE:/etc/firewall/github-meta.json:ro"
+            UP=$(docker exec fw awk '/^nameserver/{print $2; exit}' /etc/resolv.conf); echo "original resolver: $UP"
+            docker exec fw sudo /usr/local/bin/init-firewall.sh 2>&1 | tee /tmp/fw.log
+          elif [ "$fwrc" -ne 0 ]; then
+            exit "$fwrc"
+          fi
+          if [ "$live" = 1 ]; then
+            # Non-vacuity: the live fetch ran and no meta file was used.
+            grep -qx 'Fetching GitHub IP ranges...' /tmp/fw.log || { echo "::error title=default-bridge firewall::no live GitHub meta fetch"; exit 1; }
+            if grep -q '^GitHub meta: from' /tmp/fw.log; then echo "::error title=default-bridge firewall::used a meta file, not the live fetch"; exit 1; fi
+          fi
           rc=0   # run both suites, fail at the end
           docker exec -u root -e EXPECT_UPSTREAM="$UP" fw bash /tests/firewall/test-firewall.sh || rc=1
           docker exec -u agent -e EXPECT_UPSTREAM="$UP" -e SSH_PROBE_IP="$SSH_PROBE_IP" fw bash /tests/firewall/test-agent-egress.sh || rc=1
