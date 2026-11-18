@@ -73,9 +73,12 @@ RUN chmod 0755 /usr/local/bin/fetcher-entrypoint /usr/local/bin/fetcherctl /usr/
     && ! grep -rIl -e '--no-sandbox' -e FETCHER_TEST_SANDBOX /opt/fetcher/fetcher.mjs /opt/fetcher/lib \
            /usr/local/bin/fetcher-entrypoint /usr/local/bin/fetcherctl /usr/local/bin/fetcher-view
 
-# Paths the engine uses (fetcher.mjs DEFAULTS). The profile volume mounts at /home/agent/.fetcher: it must
-# exist agent-owned here, or a fresh volume comes up root-owned. /etc/fetcher holds the read-only config mount.
-RUN install -d -o agent -g agent -m 0700 /home/agent/.fetcher /home/agent/.fetcher/profile /home/agent/.fetcher/state \
+# Paths the engine uses (fetcher.mjs DEFAULTS, lib/browser.mjs PROFILES). The profile volume mounts at
+# /home/agent/.fetcher: it must exist agent-owned here, or a fresh volume comes up root-owned. Two browser
+# profiles: profile-direct (ordinary visits) and profile-library (the library session). /etc/fetcher holds the
+# read-only config mount.
+RUN install -d -o agent -g agent -m 0700 /home/agent/.fetcher /home/agent/.fetcher/profile-direct \
+         /home/agent/.fetcher/profile-library /home/agent/.fetcher/state \
          /run/fetcher /tmp/fetcher-dl \
     && install -d -o agent -g agent -m 0755 /papers \
     && install -d -o root -g root -m 0755 /etc/fetcher

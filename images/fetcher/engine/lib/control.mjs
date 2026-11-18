@@ -8,18 +8,27 @@
 //                                   of the last fetcherctl call; IDLE_MS after it the engine removes
 //                                   it. `retry` removes it at once.
 //   open   "check <host>\n"         open, in the visible browser, the landing page of the first paper
-//          "login\n"                waiting on a bot check at <host> (resolver + DOI), or the library
-//                                   prefix + the landing URL of the first paper waiting on the login.
-//                                   Read once and removed. Opening a page also sets the pause.
+//          "login\n"                waiting on a bot check at <host> (resolver + DOI, in the DIRECT
+//                                   browser), or the library sign-in (the library prefix, in the
+//                                   LIBRARY browser). Read once and removed. Opening a page also sets
+//                                   the pause.
 //   retry  lines "all" | "login" | "check <host>"   appended; read once and removed.
 //   reply  "<word> check <host>\n" | "<word> login\n", word = opened | nothing-waiting | no-prefix |
-//                                   wrong-host | not-a-login-page | already-signed-in: the engine's
-//                                   answer to the last open request.
+//                                   wrong-host | not-a-login-page | signed-in-or-left | left-host |
+//                                   page-timeout: the engine's answer to the last open request, or
+//                                   what became of the page since.
 //
-// Where the page landed is checked before it is left up for the owner: a check page must be on the
-// host the owner named; a login page must be on a configured login host (OpenAthens, Duo). Otherwise
-// the tab goes back to about:blank and the pause is not set. A library link that goes straight
-// through to the paper's publisher means the owner is already signed in (already-signed-in).
+// Owner pages are HOST-LOCKED while they are up (lib/browser.mjs Browser.ownerOpen):
+//   check <host>  the page must land on <host>, else the tab is blanked (wrong-host); once up, its
+//                 main frame may not leave <host>: if it does, it is blanked (left-host).
+//   login         from the first navigation, the main frame may only be on a configured login host
+//                 (OpenAthens, Duo; config LOGIN_HOSTS) or the library prefix's host. The moment it
+//                 goes anywhere else (sign-in finished and the library sends it on, or anything else)
+//                 the tab is blanked and the reply becomes signed-in-or-left: the owner then runs
+//                 agent-up fetch retry login. So the owner never looks at a non-login page in login
+//                 mode. The prefix is followed by the paper's landing URL only if that URL's host is
+//                 the publisher host the engine itself recorded for the paper.
+// A page that does not answer in time is killed with its browser (page-timeout).
 //
 // Opening a page for the owner is a plain navigation: the engine never clicks, types or otherwise
 // touches page content, and never reads it here.
@@ -29,7 +38,7 @@ import { randomBytes } from 'node:crypto';
 import { HOST, STATUS } from './records.mjs';
 import { hostOf, isLoginHost } from './classify.mjs';
 import { loadConfig } from './config.mjs';
-import { PROJECT, MAX_STATUS_BYTES, statusRecord } from './queue.mjs';
+import { PROJECT, MAX_STATUS_BYTES, statusRecord, requestNames } from './queue.mjs';
 import { withDir, listAt, readSmall, readSmallAt } from './fs-util.mjs';
 
 export const IDLE_MS = 30 * 60 * 1000;
@@ -37,7 +46,7 @@ export const hostOk = (h) => typeof h === 'string' && HOST.test(h);
 const MAX_CONTROL_BYTES = 4096;
 const PAUSE = /^([0-9]{1,15})\n$/;
 const OPEN = /^(?:check ([a-z0-9.-]{1,253})|login)\n$/;
-const REPLY = /^(opened|nothing-waiting|no-prefix|wrong-host|not-a-login-page|already-signed-in) (check [a-z0-9.-]{1,253}|login)\n$/;
+const REPLY = /^(opened|nothing-waiting|no-prefix|wrong-host|not-a-login-page|signed-in-or-left|left-host|page-timeout) (check [a-z0-9.-]{1,253}|login)\n$/;
 const { O_WRONLY, O_CREAT, O_EXCL, O_APPEND, O_NOFOLLOW } = fs.constants;
 
 // ---------------- file primitives (fixed names only) ----------------
@@ -123,47 +132,59 @@ export function applyRetryLines(lines, run) {
 }
 
 // The page to open for an owner request, from the engine's own memory of this run (never from a
-// status file, which the research side can write). -> {url} | {reply}
+// status file, which the research side can write). -> {url, kind, what, ...} | {reply}
 export function ownerTarget(req, run, cfg) {
   const what = req.kind === 'check' ? `check ${req.host}` : 'login';
   if (req.kind === 'check') {
-    for (const [doi, r] of run.results) if (waitingOn(r, req.host)) return { url: cfg.resolver + doi, what, expect: req.host };
+    for (const [doi, r] of run.results) if (waitingOn(r, req.host)) return { kind: 'check', url: cfg.resolver + doi, what, expect: req.host };
     return { reply: `nothing-waiting ${what}` };
   }
   if (!cfg.libraryPrefix) return { reply: `no-prefix ${what}` };
   for (const r of run.results.values()) {
-    if (r.status === 'needs-owner:login' && hostOf(r.landingUrl)) {
-      return { url: cfg.libraryPrefix + encodeURIComponent(r.landingUrl), what, publisher: r.host };
+    // The landing URL rides along only on the publisher host the engine itself recorded.
+    if (r.status === 'needs-owner:login' && r.host && hostOf(r.landingUrl) === r.host) {
+      return { kind: 'login', url: cfg.libraryPrefix + encodeURIComponent(r.landingUrl), what };
     }
   }
   return { reply: `nothing-waiting ${what}` };
 }
 
-// Judge where an owner page landed, by host name only. -> a reply word
-export function landed(t, host, cfg) {
-  if (t.expect !== undefined) return host && host === t.expect ? 'opened' : 'wrong-host';
-  if (host && isLoginHost(host, cfg)) return 'opened';
-  if (host && host === t.publisher) return 'already-signed-in';
-  return 'not-a-login-page';
-}
+// What a login page may show: a configured login host, or the library prefix's own host.
+export const loginAllow = (cfg) => (host) => Boolean(host) && (isLoginHost(host, cfg) || host === hostOf(cfg.libraryPrefix));
 
-// The visible tab back to about:blank, other tabs closed (between papers and when nothing is asked).
-async function blank(ctx) {
-  const [page, ...rest] = ctx.pages();
-  for (const p of rest) await p.close().catch(() => {});
-  if (page && page.url() !== 'about:blank') await page.goto('about:blank', { timeout: 10000 }).catch(() => {});
+const OPEN_WORD = { check: { landed: 'opened', left: 'wrong-host', elsewhere: 'wrong-host' },
+                    login: { landed: 'opened', left: 'signed-in-or-left', elsewhere: 'not-a-login-page' } };
+
+// Open an owner page (target t) in the right browser, host-locked. -> a reply word
+async function openForOwner(browsers, t, cfg, controlDir, log) {
+  const onLeave = (word) => () => {
+    try { put(controlDir, 'reply', `${word} ${t.what}\n`); } catch { /* the control dir is the fetcher's own */ }
+    log(`owner page left its hosts: ${word} ${t.what}`);
+  };
+  let b;
+  if (t.kind === 'login') {
+    b = await browsers.library();          // parks the direct window
+    const got = await b.ownerOpen({ url: t.url, allow: loginAllow(cfg), lock: 'now', cfg, onLeave: onLeave('signed-in-or-left') });
+    if (got === 'page-timeout') return 'page-timeout';
+    if (got !== 'landed') await browsers.idle();
+    return OPEN_WORD.login[got];
+  }
+  await browsers.closeLibrary();
+  b = await browsers.direct();
+  const got = await b.ownerOpen({ url: t.url, allow: (h) => h === t.expect, lock: 'after-landing', cfg, onLeave: onLeave('left-host') });
+  return got === 'page-timeout' ? 'page-timeout' : OPEN_WORD.check[got];
 }
 
 // Called by the engine before every paper. Applies retry requests (which end the pause), opens a
 // requested page (which starts the pause), ends a pause after IDLE_MS without a fetcherctl call.
 // -> true while paused (start no paper).
-export async function serviceControl({ ctx, cfg, run, controlDir, now = Date.now, log = console.log }) {
+export async function serviceControl({ browsers, cfg, run, controlDir, now = Date.now, log = console.log }) {
   const retry = takeRetry(controlDir);
   if (retry.length) {
     applyRetryLines(retry, run);
     if (pauseState(controlDir, now()) !== 'none') log('pause ended (retry)');
     drop(controlDir, 'pause');
-    await blank(ctx);
+    await browsers.idle();
     log(`retry ${retry.map((l) => (l.kind === 'check' ? l.host : l.kind)).join(' ')}`);
   }
   const req = takeOpen(controlDir);
@@ -171,15 +192,9 @@ export async function serviceControl({ ctx, cfg, run, controlDir, now = Date.now
     const t = ownerTarget(req, run, cfg);
     if (t.url) {
       // No paper starts while this runs (the loop is here); the pause is set only once the page passed.
-      const page = ctx.pages()[0] ?? await ctx.newPage();
-      await page.goto(t.url, { waitUntil: 'domcontentloaded', timeout: cfg.timeouts?.navMs ?? 60000 }).catch(() => {});
-      await new Promise((r) => setTimeout(r, cfg.timeouts?.settleMs ?? 9000));   // let redirects settle
-      const word = landed(t, hostOf(page.url()), cfg);
-      if (word === 'opened') {
-        setPause(controlDir, now());
-      } else {
-        await blank(ctx);
-      }
+      const word = await openForOwner(browsers, t, cfg, controlDir, log);
+      if (word === 'opened') setPause(controlDir, now());
+      else await browsers.idle();
       put(controlDir, 'reply', `${word} ${t.what}\n`);
       log(word === 'opened' ? `owner page opened: ${t.what}` : `owner page not left open: ${word} ${t.what}`);
     } else {
@@ -190,7 +205,7 @@ export async function serviceControl({ ctx, cfg, run, controlDir, now = Date.now
   const st = pauseState(controlDir, now());
   if (st === 'expired') {
     drop(controlDir, 'pause');
-    await blank(ctx);
+    await browsers.idle();
     log('pause ended (30 minutes without a fetcherctl call)');
     return false;
   }
@@ -216,12 +231,13 @@ export function statusSummary(papersRoot, limits = LIMITS) {
   const projects = [];
   let bytes = 0;
   let truncated = false;
-  const names = (withDir(papersRoot, [], listAt) ?? []).filter((p) => PROJECT.test(p)).sort();
+  const names = (withDir(papersRoot, [], (fd) => listAt(fd, 5000)) ?? []).filter((p) => PROJECT.test(p)).sort();
   if (names.length > limits.projects) truncated = true;
   for (const project of names.slice(0, limits.projects)) {
-    const s = { project, counts: new Map(), invalid: 0, checkHosts: new Set(), login: false };
+    const s = { project, counts: new Map(), invalid: 0, checkHosts: new Set(), login: false,
+                ignored: withDir(papersRoot, [project, '_fetch', 'requests'], (fd) => requestNames(fd).ignored) ?? 0 };
     withDir(papersRoot, [project, '_fetch', 'status'], (fd) => {
-      const files = listAt(fd).filter((n) => STATUS_NAME.test(n)).sort();
+      const files = listAt(fd, 5000).filter((n) => STATUS_NAME.test(n)).sort();
       if (files.length > limits.filesPerProject) truncated = true;
       for (const n of files.slice(0, limits.filesPerProject)) {
         const text = readSmallAt(fd, n, MAX_STATUS_BYTES);
@@ -239,7 +255,7 @@ export function statusSummary(papersRoot, limits = LIMITS) {
         }
       }
     });
-    if (s.counts.size || s.invalid) projects.push(s);
+    if (s.counts.size || s.invalid || s.ignored) projects.push(s);
   }
   return { projects, truncated };
 }
@@ -250,6 +266,7 @@ export function renderSummary({ projects, truncated }, limits = LIMITS) {
   for (const s of projects) {
     const counts = STATUS.filter((k) => s.counts.has(k)).map((k) => `${k}=${s.counts.get(k)}`);
     if (s.invalid) counts.push(`invalid=${s.invalid}`);
+    if (s.ignored) counts.push(`ignored=${s.ignored}`);   // request files beyond the 50 per project the engine considers
     out.push(`project ${s.project}: ${counts.join(' ')}`);
     const hosts = [...s.checkHosts].sort();
     const more = hosts.length > limits.hostsShown ? ` (+${hosts.length - limits.hostsShown} more)` : '';
@@ -262,16 +279,19 @@ export function renderSummary({ projects, truncated }, limits = LIMITS) {
 
 // ---------------- fetcherctl ----------------
 export const USAGE = 'usage: fetcherctl status | view | check <host> | login | retry [<host>|login]';
+const LOGIN_HINT = 'Type your library password only on a page whose address bar shows your library\'s sign-in host';
 const REPLY_TEXT = {
   opened: (w) => (w === 'login'
-    ? 'opened the library sign-in for the first paper waiting on the login. Check the address bar before typing. When signed in: agent-up fetch retry login'
-    : `opened the landing page of the first paper waiting on ${w.slice(6)}. When the check is done: agent-up fetch retry ${w.slice(6)}`),
+    ? `opened the library sign-in (library browser). ${LOGIN_HINT}. When you are signed in the tab goes blank by itself; then: agent-up fetch retry login`
+    : `opened the landing page of the first paper waiting on ${w.slice(6)}. A check page never needs your library password. When the check is done: agent-up fetch retry ${w.slice(6)}`),
   'nothing-waiting': (w) => (w === 'login' ? 'no paper is waiting on the library login in this run: nothing opened'
     : `no paper is waiting on a check at ${w.slice(6)} in this run: nothing opened`),
   'no-prefix': () => 'no library prefix is configured (LIBRARY_LINK_PREFIX): nothing opened',
   'wrong-host': (w) => `the waiting paper's page did not land on ${w.slice(6)} (the publisher may have moved it): nothing left open`,
   'not-a-login-page': () => 'the library link did not land on a library sign-in page (not an OpenAthens or Duo host): nothing left open',
-  'already-signed-in': () => 'the library link went straight through to the publisher: you are already signed in. Nothing left open; run: agent-up fetch retry login',
+  'signed-in-or-left': () => 'the sign-in page went on to a page that is not a library sign-in host (you are signed in, or the page left): the tab was blanked. If you are signed in, run: agent-up fetch retry login',
+  'left-host': (w) => `the check page left ${w.slice(6)}: the tab was blanked. If the check is done: agent-up fetch retry ${w.slice(6)}; otherwise: agent-up fetch check ${w.slice(6)}`,
+  'page-timeout': () => 'the page did not respond in time: the browser was restarted and nothing was left open',
 };
 const replyText = (text) => { const m = REPLY.exec(text ?? ''); return m ? { word: m[1], what: m[2], line: REPLY_TEXT[m[1]](m[2]) } : null; };
 
@@ -335,7 +355,7 @@ export async function main(argv, o = {}) {
   for (const t0 = Date.now(); Date.now() - t0 < waitMs;) {
     const r = replyText(read(controlDir, 'reply'));
     if (r && r.what === what) {
-      const ok = r.word === 'opened' || r.word === 'already-signed-in';
+      const ok = r.word === 'opened' || r.word === 'signed-in-or-left';
       (ok ? out : err)(r.line);
       return ok ? 0 : 1;
     }

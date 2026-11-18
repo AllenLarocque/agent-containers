@@ -9,15 +9,18 @@
 # There is no agent here: this never runs agent-init, T3, or any agent CLI. Chromium's sandbox stays on
 # (the container's seccomp profile allows it); nothing here passes a sandbox opt-out.
 set -uo pipefail
+# The inherited PATH starts with an agent-owned npm folder (base image): nothing here is looked up
+# through it. A fixed root-owned PATH, and every program started by absolute path.
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 log() { echo "[fetcher-entrypoint] $*"; }
 
-sudo /usr/local/bin/init-firewall.sh || { log "firewall setup FAILED: exiting, nothing started"; exit 1; }
+/usr/bin/sudo /usr/local/bin/init-firewall.sh || { log "firewall setup FAILED: exiting, nothing started"; exit 1; }
 
 # Unix socket only (no TCP listener). A stale lock from an unclean stop would make Xvfb refuse :99.
-rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
+/usr/bin/rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
 # Larger than the browser window (1280x900 page + its toolbar), so the address bar and the whole window fit in the view.
-Xvfb :99 -screen 0 1440x1080x24 -nolisten tcp >/dev/null 2>&1 &
-for _ in $(seq 100); do [ -S /tmp/.X11-unix/X99 ] && break; sleep 0.1; done
+/usr/bin/Xvfb :99 -screen 0 1440x1080x24 -nolisten tcp >/dev/null 2>&1 &
+for _ in $(/usr/bin/seq 100); do [ -S /tmp/.X11-unix/X99 ] && break; /usr/bin/sleep 0.1; done
 [ -S /tmp/.X11-unix/X99 ] || { log "Xvfb did not start on :99: exiting"; exit 1; }
 export DISPLAY=:99
 
@@ -31,4 +34,4 @@ if [ -e /etc/fetcher/view-password ]; then
 fi
 # ---- end of the owner's view ----
 
-exec node /opt/fetcher/fetcher.mjs
+exec /usr/bin/node /opt/fetcher/fetcher.mjs

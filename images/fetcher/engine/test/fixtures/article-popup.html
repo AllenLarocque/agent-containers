@@ -1,0 +1,10 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>An article that opens popups</title><meta name="citation_pdf_url" content="__SELF__/pdf/__KEY__"></head>
+<body><h1>An article that opens popups</h1>
+<p>Abstract. Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p>
+<a id="blank" target="_blank" href="__SELF__/article/popupblank">more</a>
+<script>
+  window.open('__SELF__/article/popupwin', '_blank');
+  setTimeout(() => { window.open('__SELF__/article/popuplate'); document.getElementById('blank').click(); }, 150);
+</script>
+</body></html>

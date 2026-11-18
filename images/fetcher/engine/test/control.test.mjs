@@ -7,11 +7,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { main, pauseState, setPause, statusSummary, renderSummary, ownerTarget, IDLE_MS, LIMITS } from '../lib/control.mjs';
-import { openBrowser } from '../lib/browser.mjs';
 import { runOnce, newRun } from '../fetcher.mjs';
 import { Pacer } from '../lib/pacing.mjs';
 import { startFixtureServer, H } from './fixture-server.mjs';
-import { SANDBOX, testCfg, tempDirs, request, statusLines, allFiles } from './helpers.mjs';
+import { testCfg, tempDirs, request, statusLines, allFiles, browsersFor } from './helpers.mjs';
 
 const T0 = Date.UTC(2026, 10, 16, 12, 0, 0);
 const MIN = 60 * 1000;
@@ -171,24 +170,29 @@ test('ownerTarget: from the run only; check by host; login needs the prefix and 
   r.results.set('10.5555/a', { status: 'skipped:host-challenged', host: 'x.org', hop: 'x.org' });
   r.results.set('10.5555/b', { status: 'needs-owner:check', host: 'p.org', hop: 'p.org', checkHost: 'cdn.org' });
   r.results.set('10.5555/c', { status: 'needs-owner:login', host: 'q.org', landingUrl: 'https://q.org/article/c' });
-  assert.deepEqual(ownerTarget({ kind: 'check', host: 'cdn.org' }, r, cfg), { url: 'https://doi.org/10.5555/b', what: 'check cdn.org', expect: 'cdn.org' });
+  assert.deepEqual(ownerTarget({ kind: 'check', host: 'cdn.org' }, r, cfg),
+    { kind: 'check', url: 'https://doi.org/10.5555/b', what: 'check cdn.org', expect: 'cdn.org' });
   assert.deepEqual(ownerTarget({ kind: 'check', host: 'x.org' }, r, cfg), { reply: 'nothing-waiting check x.org' });
   assert.deepEqual(ownerTarget({ kind: 'login' }, r, cfg), { reply: 'no-prefix login' });
   const pfx = 'https://go.openathens.net/redirector/u?url=';
   assert.deepEqual(ownerTarget({ kind: 'login' }, r, { ...cfg, libraryPrefix: pfx }),
-    { url: `${pfx}${encodeURIComponent('https://q.org/article/c')}`, what: 'login', publisher: 'q.org' });
-  r.results.get('10.5555/c').landingUrl = 'javascript:alert(1)';
-  assert.deepEqual(ownerTarget({ kind: 'login' }, r, { ...cfg, libraryPrefix: pfx }), { reply: 'nothing-waiting login' });
+    { kind: 'login', url: `${pfx}${encodeURIComponent('https://q.org/article/c')}`, what: 'login' });
+  // the landing URL rides along only on the publisher host the engine recorded for the paper
+  for (const bad of ['javascript:alert(1)', 'https://evil.example/q.org/article/c', 'https://q.org.evil.example/x']) {
+    r.results.get('10.5555/c').landingUrl = bad;
+    assert.deepEqual(ownerTarget({ kind: 'login' }, r, { ...cfg, libraryPrefix: pfx }), { reply: 'nothing-waiting login' }, bad);
+  }
 });
 
 // ---------------- with the real browser and the fixture server ----------------
-let fx, ctx, shared;
+let fx, browsers, shared;
 before(async () => {
   fx = await startFixtureServer();
   shared = tempDirs();
-  ctx = await openBrowser({ profileDir: shared.profile, downloadDir: shared.downloads, sandbox: SANDBOX });
+  browsers = browsersFor(fx, shared);
+  await browsers.direct();
 });
-after(async () => { await ctx?.close(); await fx?.close(); });
+after(async () => { await browsers?.close(); await fx?.close(); });
 
 function env(extraCfg = {}, server = () => fx) {
   const d = tempDirs();
@@ -196,11 +200,17 @@ function env(extraCfg = {}, server = () => fx) {
   const logs = [];
   const pacer = new Pacer({ statePath: path.join(d.state, 'pacing.json'), caps: cfg.caps });
   const clock = { t: Date.now() };
-  const go = (r, now = () => clock.t) => runOnce({ ctx, pacer, cfg, run: r, papersRoot: d.papers, controlDir: d.control,
+  const go = (r, now = () => clock.t) => runOnce({ browsers, pacer, cfg, run: r, papersRoot: d.papers, controlDir: d.control,
                                                     downloadDir: shared.downloads, log: (s) => logs.push(s), now });
   return { d, cfg, go, logs, clock };
 }
-const visible = () => ctx.pages()[0]?.url() ?? '';
+// The direct browser's tab (check pages), and the library browser's (login pages; '' when closed).
+const visible = () => browsers.b.direct.page?.url() ?? '';
+const libVisible = () => (browsers.libraryOpen ? browsers.b.library.page?.url() ?? '' : '');
+const waitUntil = async (cond, ms = 8000) => {
+  for (const t0 = Date.now(); Date.now() - t0 < ms;) { if (cond()) return true; await new Promise((r) => setTimeout(r, 50)); }
+  return cond();
+};
 const since = (server, mark) => server.log.slice(mark).filter((e) => e.path !== '/favicon.ico');
 
 test('with the pause set, a new request is not fetched (nothing requested, nothing written)', async () => {
@@ -279,26 +289,29 @@ test('library login page: prefix + the landing URL of the first login-waiting pa
   await go(r);
   const res = await c.done;
   assert.equal(res.code, 0, res.err);
-  assert.match(res.out, /opened the library sign-in .*Check the address bar.*agent-up fetch retry login/);
+  assert.match(res.out, /opened the library sign-in \(library browser\)\. Type your library password only on a page whose address bar shows your library's sign-in host.*agent-up fetch retry login/);
   const lib = since(fx, mark).filter((e) => e.host === H.Y);
   assert.equal(lib.length, 1);
   assert.equal(new URL(lib[0].path, 'http://x').searchParams.get('url'), `${fx.base(H.P)}/article/paywall2`);
-  assert.equal(new URL(visible()).hostname, H.L, 'the login host is in the address bar');
+  assert.equal(new URL(libVisible()).hostname, H.L, 'the login host is in the library browser\'s address bar');
+  assert.equal(visible(), 'about:blank', 'the direct browser is not showing anything');
   assert.equal(pauseState(d.control, Date.now()), 'paused');
   for (const f of [...allFiles(d.control), ...allFiles(d.papers)]) {
     const t = fs.readFileSync(f, 'latin1');
     assert.ok(!t.includes('/lib') && !t.includes(H.Y) && !t.includes('openathens') && !t.includes('/article/'), f);
   }
   for (const s of [...logs, res.out]) assert.ok(!s.includes('/lib') && !s.includes(H.Y) && !s.includes('/article/'), s);
-  // retry login ends the pause; the visible tab goes back to about:blank
+  // retry login ends the pause; the library browser is closed, the direct tab blank
   await run(['retry', 'login'], d);
   await go(r);
   assert.equal(visible(), 'about:blank');
+  assert.equal(browsers.libraryOpen, false);
   assert.equal(fs.existsSync(path.join(d.control, 'pause')), false);
 });
 
 test('check on hosts A and B; owner passes A; retry A saves A\'s papers, B\'s stay needs-owner:check with no request', async () => {
   const fx2 = await startFixtureServer();          // its own server: pass() changes it for good
+  for (const b of Object.values(browsers.b)) for (const hp of fx2.allow) b.allow.add(hp);   // its port, through the loopback guard
   try {
     const { d, go, logs } = env({}, () => fx2);
     request(d.papers, 'p', 'r.txt', ['10.5555/check', '10.5555/check2', '10.5555/good1', '10.5555/pcheck']);
@@ -350,35 +363,76 @@ async function openWith(results, req, extraCfg = {}) {
   return { d, logs, res: await c.done, url: visible() };
 }
 
-test('login: the library link lands on the login host -> left open, paused', async () => {
+test('login: the library link lands on the login host -> left open in the LIBRARY browser, paused; it stays while on login hosts', async () => {
   const { d, res } = await openWith([['10.5555/paywall2', { status: 'needs-owner:login', host: H.P, hop: H.P,
     landingUrl: `${fx.base(H.P)}/article/paywall2` }]], ['login'], { libraryPrefix: fx.libraryPrefix });
   assert.equal(res.code, 0, res.err);
-  assert.equal(new URL(visible()).hostname, H.L);
+  assert.ok(browsers.libraryOpen && browsers.b.library.profileDir.endsWith('/profile-library'));
+  assert.equal(new URL(libVisible()).hostname, H.L);
+  assert.equal(visible(), 'about:blank');
+  // the direct window is parked off the display while the library one is up
+  const cdp = browsers.b.direct.cdp;
+  const { windowId } = await cdp.send('Browser.getWindowForTarget');
+  assert.ok((await cdp.send('Browser.getWindowBounds', { windowId })).bounds.left < -1000, 'direct window not parked');
   assert.equal(read(d, 'reply'), 'opened login\n');
   assert.equal(pauseState(d.control, Date.now()), 'paused');
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.equal(new URL(libVisible()).hostname, H.L, 'a page on a login host is kept');
+  await run(['retry', 'login'], d);
+  await browsers.idle();
 });
 
-test('login: the library link lands on another host (a look-alike) -> tab blanked, not-a-login-page, no pause', async () => {
-  const { d, res, logs } = await openWith([['10.5555/good1', { status: 'needs-owner:login', host: H.P, hop: H.P,
-    landingUrl: `${fx.base(H.X)}/article/good1` }]], ['login'], { libraryPrefix: fx.libraryPrefix });
-  assert.equal(res.code, 1);
-  assert.match(res.err, /did not land on a library sign-in page .*nothing left open/);
-  assert.ok(!res.err.includes('http') && !res.err.includes(H.X), res.err);
+test('login: after sign-in the page goes on to the publisher -> blanked before it loads, signed-in-or-left', async () => {
+  const mark = fx.log.length;
+  const { d, res, logs } = await openWith([['10.5555/paywalldone', { status: 'needs-owner:login', host: H.P, hop: H.P,
+    landingUrl: `${fx.base(H.P)}/article/paywalldone` }]], ['login'], { libraryPrefix: fx.libraryPrefix });
+  assert.equal(res.code, 0, res.err);
+  assert.equal(new URL(libVisible()).hostname, H.L);
+  assert.ok(await waitUntil(() => fs.existsSync(path.join(d.control, 'reply')) && read(d, 'reply') === 'signed-in-or-left login\n'),
+    'reply not updated');
+  assert.ok(await waitUntil(() => libVisible() === 'about:blank'));
+  assert.deepEqual(fx.log.slice(mark).filter((e) => e.host === H.P), [], 'the publisher was contacted in login mode');
+  assert.ok(logs.includes('owner page left its hosts: signed-in-or-left login'), logs.join('\n'));
+  const st = await run(['status'], d, { now: () => Date.now() });
+  assert.match(st.out, /^last page request: signed-in-or-left login$/m);
+  await run(['retry', 'login'], d);
+  await browsers.idle();
+});
+
+test('login: the library link sends the tab to a look-alike on another host -> refused before it loads, nothing left open', async () => {
+  const mark = fx.log.length;
+  const { d, res, logs } = await openWith([['10.5555/paywallfake', { status: 'needs-owner:login', host: H.P, hop: H.P,
+    landingUrl: `${fx.base(H.P)}/article/paywallfake` }]], ['login'], { libraryPrefix: fx.libraryPrefix });
+  assert.equal(res.code, 0, res.err);
+  assert.match(res.out, /not a library sign-in host .*the tab was blanked.*agent-up fetch retry login/);
+  assert.ok(!res.out.includes('http') && !res.out.includes(H.X), res.out);
+  assert.deepEqual(fx.log.slice(mark).filter((e) => e.host === H.X), []);
+  assert.equal(libVisible(), '', 'the library browser was not closed');
   assert.equal(visible(), 'about:blank');
-  assert.equal(read(d, 'reply'), 'not-a-login-page login\n');
+  assert.equal(read(d, 'reply'), 'signed-in-or-left login\n');
   assert.equal(fs.existsSync(path.join(d.control, 'pause')), false);
-  assert.ok(logs.includes('owner page not left open: not-a-login-page login'), logs.join('\n'));
+  assert.ok(logs.includes('owner page not left open: signed-in-or-left login'), logs.join('\n'));
 });
 
-test('login: straight through to the paper\'s publisher -> already-signed-in, tab blanked, told to retry login', async () => {
+test('login: straight through to the paper\'s publisher (already signed in) -> the publisher is never loaded, signed-in-or-left', async () => {
+  const mark = fx.log.length;
   const { d, res } = await openWith([['10.5555/paywall', { status: 'needs-owner:login', host: H.P, hop: H.P,
     landingUrl: `${fx.base(H.P)}/article/paywall` }]], ['login'], { libraryPrefix: fx.libraryPrefix });
   assert.equal(res.code, 0, res.err);
-  assert.match(res.out, /already signed in.*agent-up fetch retry login/);
-  assert.equal(visible(), 'about:blank');
-  assert.equal(read(d, 'reply'), 'already-signed-in login\n');
+  assert.match(res.out, /agent-up fetch retry login/);
+  assert.deepEqual(fx.log.slice(mark).filter((e) => e.host === H.P), []);
+  assert.equal(read(d, 'reply'), 'signed-in-or-left login\n');
   assert.equal(fs.existsSync(path.join(d.control, 'pause')), false);
+});
+
+test('login: a landing URL on another host than the recorded publisher is never sent: nothing opened', async () => {
+  const mark = fx.log.length;
+  const { d, res } = await openWith([['10.5555/good1', { status: 'needs-owner:login', host: H.P, hop: H.P,
+    landingUrl: `${fx.base(H.X)}/article/good1` }]], ['login'], { libraryPrefix: fx.libraryPrefix });
+  assert.equal(res.code, 1);
+  assert.match(res.err, /no paper is waiting on the library login/);
+  assert.deepEqual(since(fx, mark), []);
+  assert.equal(read(d, 'reply'), 'nothing-waiting login\n');
 });
 
 test('check <host>: the landing page is on another host -> tab blanked, wrong-host, no pause', async () => {
@@ -392,11 +446,71 @@ test('check <host>: the landing page is on another host -> tab blanked, wrong-ho
   assert.equal(fs.existsSync(path.join(d.control, 'pause')), false);
 });
 
-test('check <host>: a host that no longer challenges shows its landing page on <host> -> left open', async () => {
+test('check <host>: a host that no longer challenges shows its landing page on <host>, in the DIRECT browser -> left open', async () => {
   const { d, res } = await openWith([['10.5555/good2', { status: 'needs-owner:check', host: H.P, hop: H.P, checkHost: H.P }]],
     ['check', H.P]);
   assert.equal(res.code, 0, res.err);
+  assert.match(res.out, /A check page never needs your library password/);
   assert.equal(visible(), `${fx.base(H.P)}/article/good2`);
+  assert.equal(browsers.libraryOpen, false);
   assert.equal(read(d, 'reply'), `opened check ${H.P}\n`);
   assert.equal(pauseState(d.control, Date.now()), 'paused');
+  await run(['retry', H.P], d);
+  await browsers.idle();
+});
+
+test('check <host>: the page later leaves <host> -> blanked before the other host loads, left-host', async () => {
+  const mark = fx.log.length;
+  const { d, res, logs } = await openWith([['10.5555/pleave', { status: 'needs-owner:check', host: H.P, hop: H.P, checkHost: H.P }]],
+    ['check', H.P]);
+  assert.equal(res.code, 0, res.err);
+  assert.ok(await waitUntil(() => read(d, 'reply') === `left-host check ${H.P}\n`), 'reply not updated');
+  assert.ok(await waitUntil(() => visible() === 'about:blank'));
+  assert.deepEqual(fx.log.slice(mark).filter((e) => e.host === H.V), [], 'the other host was contacted');
+  assert.ok(logs.includes(`owner page left its hosts: left-host check ${H.P}`), logs.join('\n'));
+  await run(['retry', H.P], d);
+  await browsers.idle();
+});
+
+test('check <host>: popups from the owner\'s page are closed and make no request; the page stays', async () => {
+  const mark = fx.log.length;
+  const { d, res } = await openWith([['10.5555/popup', { status: 'needs-owner:check', host: H.P, hop: H.P, checkHost: H.P }]],
+    ['check', H.P]);
+  assert.equal(res.code, 0, res.err);
+  await new Promise((r) => setTimeout(r, 800));
+  assert.equal(browsers.b.direct.ctx.pages().length, 1);
+  assert.equal(visible(), `${fx.base(H.P)}/article/popup`);
+  assert.deepEqual(fx.log.slice(mark).filter((e) => /^popup(win|late|blank)$/.test(e.key)), []);
+  await run(['retry', H.P], d);
+  await browsers.idle();
+});
+
+test('while paused for the owner, a download the page starts is cancelled; nothing is left in the temp dir', async () => {
+  const mark = fx.log.length;
+  const { d, res } = await openWith([['10.5555/autodl', { status: 'needs-owner:check', host: H.P, hop: H.P, checkHost: H.P }]],
+    ['check', H.P]);
+  assert.equal(res.code, 0, res.err);
+  assert.equal(pauseState(d.control, Date.now()), 'paused');
+  assert.ok(await waitUntil(() => fx.log.slice(mark).some((e) => e.path === '/files/junk.bin')), 'fixture did not start its download');
+  const files = () => fs.readdirSync(shared.downloads).filter((n) => !fs.statSync(path.join(shared.downloads, n)).isDirectory());
+  assert.ok(await waitUntil(() => files().length === 0, 3000), `left behind: ${files()}`);
+  await run(['retry', H.P], d);
+  await browsers.idle();
+});
+
+test('an owner page that stops answering is killed with its browser: page-timeout, nothing left open, no pause', async () => {
+  const { d, res } = await openWith([['10.5555/busy', { status: 'needs-owner:check', host: H.P, hop: H.P, checkHost: H.P }]],
+    ['check', H.P]);
+  assert.equal(res.code, 1);
+  assert.match(res.err, /did not respond in time: the browser was restarted/);
+  assert.equal(read(d, 'reply'), `page-timeout check ${H.P}\n`);
+  assert.equal(fs.existsSync(path.join(d.control, 'pause')), false);
+  assert.equal(visible(), 'about:blank');
+});
+
+test('fetcherctl status counts request files beyond the 50 the engine considers as ignored', async () => {
+  const d = tempDirs();
+  for (let i = 0; i < 60; i++) request(d.papers, 'p', `r${String(i).padStart(2, '0')}.txt`, ['10.5555/good1']);
+  const r = await run(['status'], d);
+  assert.match(r.out, /^project p: ignored=10$/m);
 });

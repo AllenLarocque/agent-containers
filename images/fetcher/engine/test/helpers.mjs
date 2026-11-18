@@ -5,8 +5,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { H } from './fixture-server.mjs';
+import { Browsers } from '../lib/browser.mjs';
 
 export const SANDBOX = process.env.FETCHER_TEST_SANDBOX !== 'off';
+
+// The two browsers for a test file: profiles under dirs.profile, the fixture's hosts let through
+// the loopback guard (testOnlyAllow: tests only).
+export const browsersFor = (fx, dirs) =>
+  new Browsers({ profilesDir: dirs.profile, downloadDir: dirs.downloads, sandbox: SANDBOX, testOnlyAllow: fx.allow });
 
 export function testCfg(fx, extra = {}) {
   return {

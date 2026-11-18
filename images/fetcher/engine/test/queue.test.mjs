@@ -4,13 +4,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { scanRequests, pending } from '../lib/queue.mjs';
-import { openBrowser } from '../lib/browser.mjs';
+import { scanRequests, pending, SCAN } from '../lib/queue.mjs';
 import { runOnce, newRun, nextRun, applyRetry, parseArgs, DEFAULTS } from '../fetcher.mjs';
 import { Pacer } from '../lib/pacing.mjs';
 import { folderName } from '../lib/doi.mjs';
 import { startFixtureServer, H, PDF } from './fixture-server.mjs';
-import { SANDBOX, testCfg, tempDirs, request, statusLines, statusOf, allFiles } from './helpers.mjs';
+import { testCfg, tempDirs, request, statusLines, statusOf, allFiles, browsersFor } from './helpers.mjs';
 
 // ---------------- scanRequests / pending (no browser) ----------------
 describe('scanRequests', () => {
@@ -59,6 +58,41 @@ describe('scanRequests', () => {
     assert.ok(Date.now() - t0 < 2000, 'the FIFO blocked the scan');
   });
 
+  test('bounded: at most 50 request files per project, lexicographic; the rest untouched', () => {
+    const d = tempDirs();
+    for (let i = 0; i < 60; i++) request(d.papers, 'p', `r${String(i).padStart(2, '0')}.txt`, [`10.5555/good${i}`]);
+    const got = scanRequests(d.papers);
+    assert.equal(SCAN.filesPerProject, 50);
+    assert.equal(got.length, 50);
+    assert.equal(got[0].name, 'r00.txt');
+    assert.equal(got.at(-1).name, 'r49.txt');
+    assert.equal(fs.readdirSync(path.join(d.papers, 'p', '_fetch', 'requests')).length, 60);
+  });
+
+  test('bounded: projects and directory entries read per folder; bytes per pass', () => {
+    const d = tempDirs();
+    for (const p of ['a', 'b', 'c']) request(d.papers, p, 'r.txt', ['10.5555/good1']);
+    assert.deepEqual(scanRequests(d.papers, { limits: { ...SCAN, projects: 2 } }).map((r) => r.project), ['a', 'b']);
+    assert.deepEqual(scanRequests(d.papers, { limits: { ...SCAN, totalBytes: 20 } }).map((r) => r.project), ['a']);
+  });
+
+  test('an unchanged request file (same identity, size, mtime) is not read or parsed again', () => {
+    const d = tempDirs();
+    request(d.papers, 'p', 'r.txt', ['10.5555/good1']);
+    const f = path.join(d.papers, 'p', '_fetch', 'requests', 'r.txt');
+    const cache = new Map();
+    fs.utimesSync(f, 1700000000, 1700000000);              // whole seconds: restored exactly below
+    assert.deepEqual(scanRequests(d.papers, { cache })[0].dois, ['10.5555/good1']);
+    fs.writeFileSync(f, '10.5555/good2\n');               // same size ...
+    fs.utimesSync(f, 1700000000, 1700000000);              // ... and the old mtime: not read again
+    assert.deepEqual(scanRequests(d.papers, { cache })[0].dois, ['10.5555/good1']);
+    fs.writeFileSync(f, '10.5555/good22\n');              // a different size: read again
+    assert.deepEqual(scanRequests(d.papers, { cache })[0].dois, ['10.5555/good22']);
+    fs.rmSync(f);
+    assert.deepEqual(scanRequests(d.papers, { cache }), []);
+    assert.equal(cache.size, 0);
+  });
+
   test('pending: needs-owner and skipped are not terminal; saved and not-available are', () => {
     const d = tempDirs();
     const st = path.join(d.papers, 'p', '_fetch', 'status');
@@ -73,20 +107,21 @@ describe('scanRequests', () => {
 });
 
 // ---------------- the loop, with a real browser ----------------
-let fx, ctx, shared;
+let fx, browsers, shared;
 before(async () => {
   fx = await startFixtureServer();
   shared = tempDirs();
-  ctx = await openBrowser({ profileDir: shared.profile, downloadDir: shared.downloads, sandbox: SANDBOX });
+  browsers = browsersFor(fx, shared);
+  await browsers.direct();
 });
-after(async () => { await ctx?.close(); await fx?.close(); });
+after(async () => { await browsers?.close(); await fx?.close(); });
 
 function env(extraCfg = {}) {
   const d = tempDirs();
   const cfg = testCfg(fx, extraCfg);
   const logs = [];
   const pacer = new Pacer({ statePath: path.join(d.state, 'pacing.json'), caps: cfg.caps });
-  const go = (run = newRun()) => runOnce({ ctx, pacer, cfg, run, papersRoot: d.papers, controlDir: d.control,
+  const go = (run = newRun()) => runOnce({ browsers, pacer, cfg, run, papersRoot: d.papers, controlDir: d.control,
                                             downloadDir: shared.downloads, log: (s) => logs.push(s) });
   return { d, go, logs, pacer };
 }
@@ -210,8 +245,8 @@ test('pause flag: a pass makes no request and writes nothing', async () => {
 // ---------------- the real loop in its own process ----------------
 const childPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'child.mjs');
 function startChild(d, extra = {}) {
-  const opts = { papersRoot: d.papers, profileDir: d.profile, stateDir: d.state, downloadDir: d.downloads,
-                 controlDir: d.control, cfg: testCfg(fx), pollMs: 600000, ...extra };
+  const opts = { papersRoot: d.papers, profilesDir: d.profile, stateDir: d.state, downloadDir: d.downloads,
+                 controlDir: d.control, cfg: testCfg(fx), pollMs: 600000, testOnlyAllow: fx.allow, ...extra };
   const f = path.join(d.base, `child-${Date.now()}.json`);
   fs.writeFileSync(f, JSON.stringify(opts));
   const p = spawn(process.execPath, [childPath, f], { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -308,17 +343,52 @@ test('the resolver cap stops further lookups: remaining DOIs are skipped:daily-c
     ['10.5555/404g', 'skipped:daily-cap'], ['10.5555/good1', 'skipped:daily-cap']]);
 });
 
-test('redirects onto a challenged host: one load for a pair sharing a first hop, then the hop is skipped', async () => {
+test('redirects onto a challenged host from two different first hops: that host is loaded once in all', async () => {
   const { d, go } = env();
-  request(d.papers, 'p', 'r.txt', ['10.5555/check', '10.5555/via1', '10.5555/via2']);
+  request(d.papers, 'p', 'r.txt', ['10.5555/check', '10.5555/via1', '10.5555/wia1', '10.5555/via2']);
   const mark = fx.log.length;
   await go();
   const st = statusLines(d.papers, 'p', 'r.txt');
-  assert.deepEqual(st.map((l) => [l[0], l[1]]), [['10.5555/check', 'needs-owner:check'],
-    ['10.5555/via1', 'skipped:host-challenged'], ['10.5555/via2', 'skipped:host-challenged']]);
-  const onX = fx.log.slice(mark).filter((e) => e.host === H.X && (e.key === 'via1' || e.key === 'via2'));
-  assert.equal(onX.length, 1, JSON.stringify(onX));
-  assert.equal(newHits(mark, 'via2', H.V), 0);
+  assert.deepEqual(st.map((l) => [l[0], l[1], l[2]]), [['10.5555/check', 'needs-owner:check', H.X],
+    ['10.5555/via1', 'skipped:host-challenged', H.X], ['10.5555/wia1', 'skipped:host-challenged', H.X],
+    ['10.5555/via2', 'skipped:host-challenged', H.X]]);
+  const onX = fx.log.slice(mark).filter((e) => e.host === H.X && e.path !== '/favicon.ico');
+  assert.deepEqual(onX.map((e) => e.key), ['check']);
+  const hop = (h, p) => fx.log.slice(mark).filter((e) => e.host === h && e.path === p).length;
+  assert.ok(hop(H.V, '/go/via1') === 1 && hop(H.W, '/go/wia1') === 1 && hop(H.V, '/go/via2') === 1, 'the first hops were visited');
+});
+
+test('the per-host cap counts the landing host: a redirect onto a capped host is refused before it is contacted', async () => {
+  const { d, go } = env({ caps: { gapMs: 0, hostGapMs: 0, perHost: 2, perDay: 100, libraryPerDay: 20, resolverPerDay: 300 } });
+  request(d.papers, 'p', 'r.txt', ['10.5555/good1', '10.5555/good2', '10.5555/vp1']);
+  const mark = fx.log.length;
+  await go();
+  assert.deepEqual(statusLines(d.papers, 'p', 'r.txt').map((l) => [l[0], l[1], l[2]]), [['10.5555/good1', 'saved', H.P],
+    ['10.5555/good2', 'saved', H.P], ['10.5555/vp1', 'skipped:host-cap', H.P]]);
+  assert.equal(newHits(mark, 'vp1', H.P), 0);
+  assert.equal(fx.log.slice(mark).filter((e) => e.host === H.V && e.path === '/go/vp1').length, 1);
+});
+
+test('the landing host is counted against its own cap and pacing (pacing state)', async () => {
+  const { d, go, pacer } = env();
+  request(d.papers, 'p', 'r.txt', ['10.5555/vp2']);
+  await go();
+  assert.deepEqual(statusLines(d.papers, 'p', 'r.txt').map((l) => [l[1], l[2]]), [['saved', H.P]]);
+  const saved = JSON.parse(fs.readFileSync(pacer.statePath, 'utf8'));
+  assert.equal(saved.hosts[H.V], 1);
+  assert.equal(saved.hosts[H.P], 1);
+  assert.equal(saved.total, 1);
+});
+
+test('fair across projects: one DOI per project in turn (100 DOIs in one project do not starve 2 in another)', async () => {
+  const { d, go } = env({ caps: { gapMs: 0, hostGapMs: 0, perHost: 30, perDay: 100, libraryPerDay: 20, resolverPerDay: 4 } });
+  request(d.papers, 'a', 'r.txt', Array.from({ length: 100 }, (_, i) => `10.5555/404x${i}`));
+  request(d.papers, 'b', 'r.txt', ['10.5555/good5', '10.5555/good6']);
+  await go();
+  assert.deepEqual(statusLines(d.papers, 'b', 'r.txt').map((l) => [l[0], l[1]]), [['10.5555/good5', 'saved'], ['10.5555/good6', 'saved']]);
+  const a = statusLines(d.papers, 'a', 'r.txt');
+  assert.deepEqual(a.slice(0, 2).map((l) => l[1]), ['not-available:doi-not-found', 'not-available:doi-not-found']);
+  assert.ok(a.slice(2).every((l) => l[1] === 'skipped:daily-cap'));
 });
 
 test('UTC day rollover starts a new run; the same day keeps it', () => {
@@ -360,12 +430,16 @@ test('retry lines: login re-opens only the library route; all clears the run; ju
 
 test('CLI arguments: absolute paths for known flags, --once; anything else is refused', () => {
   assert.deepEqual(parseArgs([]), {});
-  assert.deepEqual(parseArgs(['--papers=/p', '--config=/c', '--profile=/pr', '--state=/s', '--downloads=/d', '--control=/r', '--once']),
-    { papersRoot: '/p', configPath: '/c', profileDir: '/pr', stateDir: '/s', downloadDir: '/d', controlDir: '/r', once: true });
-  for (const bad of [['--papers=rel'], ['--papers'], ['--sandbox=off'], ['--no-sandbox'], ['x']])
+  assert.deepEqual(parseArgs(['--papers=/p', '--config=/c', '--profiles=/pr', '--state=/s', '--downloads=/d', '--control=/r', '--once']),
+    { papersRoot: '/p', configPath: '/c', profilesDir: '/pr', stateDir: '/s', downloadDir: '/d', controlDir: '/r', once: true });
+  // nothing on the command line turns a guard off or lets loopback through
+  for (const bad of [['--papers=rel'], ['--papers'], ['--sandbox=off'], ['--no-sandbox'], ['x'], ['--testOnlyAllow=/x'],
+                     ['--allow=/127.0.0.1:3773'], ['--profile=/old']])
     assert.throws(() => parseArgs(bad), /bad argument/, bad[0]);
   assert.equal(DEFAULTS.papersRoot, '/papers');
   assert.equal(DEFAULTS.downloadDir, '/tmp/fetcher-dl');
+  assert.equal(DEFAULTS.profilesDir, '/home/agent/.fetcher');
+  assert.equal('profileDir' in DEFAULTS, false);
 });
 
 test('library-routed navigation that times out: the prefix never reaches stdout/stderr', async () => {

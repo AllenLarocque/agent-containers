@@ -15,16 +15,17 @@
 # listener on any other port would not be reachable at all.
 # The password is passed by file (never on a command line, never logged). Logs: /tmp/fetcher-view/ (container-private).
 set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin   # never the inherited, agent-owned npm folder; programs by absolute path
 pw="${1:?usage: fetcher-view <password file>}"
 log() { echo "[fetcher-view] $*"; }
 [ -f "$pw" ] && [ -r "$pw" ] || { log "no readable password file: viewer not started"; exit 1; }
 # One line of 8 printable characters, no spaces (agent-up generates exactly that).
-[ "$(wc -l < "$pw")" -le 1 ] && [[ $(head -c 64 "$pw") =~ ^[[:graph:]]{8}$ ]] \
+[ "$(/usr/bin/wc -l < "$pw")" -le 1 ] && [[ $(/usr/bin/head -c 64 "$pw") =~ ^[[:graph:]]{8}$ ]] \
   || { log "the password file is not one line of 8 printable characters: viewer not started"; exit 1; }
-logs=/tmp/fetcher-view; mkdir -p "$logs"; chmod 700 "$logs"
-x11vnc -display :99 -localhost -noipv6 -rfbportv6 -1 -rfbport 5900 -passwdfile "$pw" -forever -shared -noxdamage \
+logs=/tmp/fetcher-view; /usr/bin/mkdir -p "$logs"; /usr/bin/chmod 700 "$logs"
+/usr/bin/x11vnc -display :99 -localhost -noipv6 -rfbportv6 -1 -rfbport 5900 -passwdfile "$pw" -forever -shared -noxdamage \
   -noremote -novncconnect -noclipboard -nosel \
   -o "$logs/x11vnc.log" >/dev/null 2>&1 &
-for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/5900) 2>/dev/null && break; sleep 0.1; done
-websockify --web /opt/fetcher/novnc 3773 127.0.0.1:5900 >"$logs/websockify.log" 2>&1 &
+for _ in $(/usr/bin/seq 50); do (exec 3<>/dev/tcp/127.0.0.1/5900) 2>/dev/null && break; /usr/bin/sleep 0.1; done
+/usr/bin/websockify --web /opt/fetcher/novnc 3773 127.0.0.1:5900 >"$logs/websockify.log" 2>&1 &
 log "viewer started (noVNC on port 3773; VNC on the container's loopback only)"

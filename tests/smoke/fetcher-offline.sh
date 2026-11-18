@@ -7,7 +7,9 @@
 # This starts the pieces itself (Xvfb, the fixture server, the engine's runLoop) instead of going
 # through the entry point: the entry point reads /etc/fetcher/config, which accepts only an https
 # resolver, and the fixture server is plain http on loopback. Everything else is the production
-# code: runLoop and openBrowser from /opt/fetcher, with the sandbox left at its default (on).
+# code: runLoop and the browsers from /opt/fetcher, with the sandbox left at its default (on). The one
+# test-only setting is testOnlyAllow: the fixture's loopback hosts through the browsers' loopback
+# guard (only a caller's options can set it; the command line, the config and the environment cannot).
 set -uo pipefail
 fail=0
 ok()   { echo "OK:   $*"; }
@@ -25,9 +27,11 @@ for _ in $(seq 50); do [ -e /tmp/.X11-unix/X99 ] && break; sleep 0.1; done
 check "Xvfb :99 up" test -e /tmp/.X11-unix/X99
 
 w=$(mktemp -d)
-mkdir -p "$w/papers/proj/_fetch/requests" "$w/profile" "$w/state" "$w/control"
-# Two DOIs the fixture answers (a PDF; a bot check) and a URL line, which must never be fetched.
-printf '10.5555/ok\n10.5555/check\nhttps://127.0.0.2/article/ok\n' > "$w/papers/proj/_fetch/requests/list.txt"
+mkdir -p "$w/papers/proj/_fetch/requests" "$w/profiles" "$w/state" "$w/control"
+# Two DOIs the fixture answers (a PDF; a bot check), a URL line, which must never be fetched, a page that
+# stops answering (a busy loop: cut off by the deadline, the browser killed and relaunched) and a paper
+# after it, which must still be saved.
+printf '10.5555/ok\n10.5555/check\nhttps://127.0.0.2/article/ok\n10.5555/busy\n10.5555/good1\n' > "$w/papers/proj/_fetch/requests/list.txt"
 
 # shellcheck source=tests/smoke/lib-chromium-sandbox.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib-chromium-sandbox.sh"
@@ -46,8 +50,8 @@ node --input-type=module -e '
     maxPdfBytes: 4096, timeouts: { navMs: 5000, settleMs: 500, downloadMs: 5000 },
   };
   try {
-    await runLoop({ cfg, once: true, papersRoot: w + "/papers", profileDir: w + "/profile", stateDir: w + "/state",
-                    downloadDir: w + "/dl", controlDir: w + "/control" });
+    await runLoop({ cfg, once: true, papersRoot: w + "/papers", profilesDir: w + "/profiles", stateDir: w + "/state",
+                    downloadDir: w + "/dl", controlDir: w + "/control", testOnlyAllow: fx.allow });
   } finally { await fx.close(); }
   console.log("fixture requests: " + fx.log.map((e) => e.host + e.path).join(" "));
 ' "$w" > "$w/engine.log" 2>&1 &
@@ -70,12 +74,15 @@ check "status file written" test -s "$S"
 [ -s "$S" ] && sed 's/^/    | /' "$S"
 check "10.5555/ok saved"                  bash -c 'awk -F"\t" "\$1 == \"10.5555/ok\" && \$2 == \"saved\"" "$1" | grep -q .' _ "$S"
 check "10.5555/check needs-owner:check"   bash -c 'awk -F"\t" "\$1 == \"10.5555/check\" && \$2 == \"needs-owner:check\"" "$1" | grep -q .' _ "$S"
+check "10.5555/busy not-available:timeout (sandbox on), and 10.5555/good1 after it saved" bash -c '
+  awk -F"\t" "\$1 == \"10.5555/busy\" && \$2 == \"not-available:timeout\"" "$1" | grep -q . \
+    && awk -F"\t" "\$1 == \"10.5555/good1\" && \$2 == \"saved\"" "$1" | grep -q .' _ "$S"
 check "the URL line is bad-request (by line number, never echoed)" \
   bash -c 'awk -F"\t" "\$1 == \"line:3\" && \$2 == \"bad-request\"" "$1" | grep -q . && ! grep -q "https://" "$1"' _ "$S"
 check "the PDF is in the paper's folder and starts %PDF-" bash -c '
   d=$(find "$1/papers/proj" -mindepth 1 -maxdepth 1 -type d -name "doi_10_5555_ok_*"); f="$d/paper.pdf"
   echo "pdf: ${f#"$1"/}"; [ -n "$d" ] && [ "$(head -c5 "$f")" = "%PDF-" ] && [ -f "$d/metadata.md" ] \
-    && [ "$(find "$1/papers/proj" -name paper.pdf | wc -l)" = 1 ]' _ "$w"
+    && [ "$(find "$1/papers/proj" -name paper.pdf | wc -l)" = 2 ]' _ "$w"
 check "nothing left in the download temp dir" bash -c '[ -z "$(ls -A "$1/dl" 2>/dev/null)" ]' _ "$w"
 
 # ---- the owner's view (fetcher-view, as the entry point starts it when agent-up mounts a password file) ----

@@ -1,0 +1,9 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>An article that calls loopback</title></head>
+<body><p>Abstract. Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p>
+<img src="__FORBIDDEN__/files/wsloopimg.png">
+<script>
+  for (const u of ['__FORBIDDEN__/sock'.replace('http', 'ws'), '__LOCAL__/sock'.replace('http', 'ws')]) { try { new WebSocket(u); } catch (e) { /* refused */ } }
+  fetch('__LOCAL__/files/wsloopfetch', { mode: 'no-cors' }).catch(() => {});
+</script>
+</body></html>

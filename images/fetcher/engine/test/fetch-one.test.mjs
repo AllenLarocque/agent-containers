@@ -3,24 +3,25 @@ import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { openBrowser, fetchOne, resolveDoi } from '../lib/browser.mjs';
+import { fetchOne, resolveDoi, PROFILES } from '../lib/browser.mjs';
 import { runOnce, newRun } from '../fetcher.mjs';
 import { Pacer } from '../lib/pacing.mjs';
 import { folderName } from '../lib/doi.mjs';
 import { startFixtureServer, H, BIG } from './fixture-server.mjs';
-import { SANDBOX, testCfg, tempDirs, request, statusLines, allFiles } from './helpers.mjs';
+import { testCfg, tempDirs, request, statusLines, allFiles, browsersFor } from './helpers.mjs';
 
-let fx, dirs, ctx, cfg;
+let fx, dirs, browsers, ctx, cfg;
 before(async () => {
   fx = await startFixtureServer();
   dirs = tempDirs();
   cfg = testCfg(fx);
-  ctx = await openBrowser({ profileDir: dirs.profile, downloadDir: dirs.downloads, sandbox: SANDBOX });
+  browsers = browsersFor(fx, dirs);
+  ctx = await browsers.direct();          // the direct browser (a Browser; it survives restarts)
 });
-after(async () => { await ctx?.close(); await fx?.close(); });
+after(async () => { await browsers?.close(); await fx?.close(); });
 
 const startsPdf = (p) => fs.readFileSync(p).subarray(0, 5).toString() === '%PDF-';
-const tabBlank = () => assert.deepEqual(ctx.pages().map((p) => p.url()), ['about:blank']);
+const tabBlank = () => assert.deepEqual(ctx.ctx.pages().map((p) => p.url()), ['about:blank']);
 
 for (const k of ['ok', 'linkonly', 'cdn']) {
   test(`${k}: saved, a real PDF, host is the landing host`, async () => {
@@ -75,7 +76,7 @@ function loopEnv(extraCfg = {}) {
   const c = testCfg(fx, extraCfg);
   const logs = [];
   const pacer = new Pacer({ statePath: path.join(d.state, 'pacing.json'), caps: c.caps });
-  const go = (run = newRun()) => runOnce({ ctx, pacer, cfg: c, run, papersRoot: d.papers, controlDir: d.control,
+  const go = (run = newRun()) => runOnce({ browsers, pacer, cfg: c, run, papersRoot: d.papers, controlDir: d.control,
                                             downloadDir: dirs.downloads, log: (s) => logs.push(s) });
   return { d, go, logs };
 }
@@ -168,12 +169,13 @@ test('autodl through the loop leaves the temp dir empty', async () => {
   assert.deepEqual(fs.readdirSync(dirs.downloads), []);
 });
 
-test('in-fetch guard: a redirect onto a blocked host is classified but no PDF is requested', async () => {
+test('in-fetch guard: a redirect onto a blocked host is refused before that host is contacted', async () => {
   const mark = fx.log.length;
-  const r = await fetchOne(ctx, '10.5555/via1', { cfg, blocked: new Set([H.X]) });
+  const r = await fetchOne(ctx, '10.5555/via1', { cfg, navCheck: (h) => (h === H.X ? 'skipped:host-challenged' : null) });
   assert.equal(r.status, 'skipped:host-challenged');
   assert.equal(r.host, H.X);
   assert.equal(fx.log.slice(mark).filter((e) => e.path.startsWith('/pdf/')).length, 0);
+  assert.equal(fx.log.slice(mark).filter((e) => e.host === H.X).length, 0, 'the blocked host was contacted');
   tabBlank();
 });
 
@@ -201,4 +203,116 @@ test('a declared Content-Length over the cap is refused before the body arrives 
   const r = await fetchOne(ctx, '10.5555/slowpdf', { cfg });
   assert.equal(r.status, 'not-available:not-a-pdf');
   assert.ok(Date.now() - t0 < cfg.timeouts.downloadMs, `took ${Date.now() - t0} ms`);
+});
+
+// ---------------- final fix wave: a page must not hang the fetcher (B) ----------------
+const pageCases = [
+  ['busy', 'a busy loop right after load'],
+  ['busypdf', 'a busy loop on the PDF page'],
+  ['neverload', 'a page that never finishes loading'],
+  ['dialog', 'alert/confirm/prompt in a loop and a beforeunload handler'],
+];
+for (const [k, what] of pageCases) {
+  test(`${what}: not-available:timeout within the deadline, and the next paper in the run is saved`, async () => {
+    const { d, go } = loopEnv();
+    request(d.papers, 'p', 'r.txt', [`10.5555/${k}`, '10.5555/good7']);
+    const t0 = Date.now();
+    await go();
+    const took = Date.now() - t0;
+    assert.deepEqual(statusLines(d.papers, 'p', 'r.txt').map((l) => [l[0], l[1]]),
+      [[`10.5555/${k}`, 'not-available:timeout'], ['10.5555/good7', 'saved']]);
+    assert.ok(took < 30000, `took ${took} ms`);
+    tabBlank();
+  });
+}
+
+test('the per-visit deadline cuts a hung page off even when every page timeout is longer', async () => {
+  const c = testCfg(fx, { timeouts: { navMs: 20000, settleMs: 300, downloadMs: 20000 }, paperDeadlineMs: 2500 });
+  const t0 = Date.now();
+  const r = await fetchOne(ctx, '10.5555/busy', { cfg: c });
+  const took = Date.now() - t0;
+  assert.equal(r.status, 'not-available:timeout');
+  assert.ok(took < 9000, `took ${took} ms (the page call alone would wait 10 s)`);
+  const ok = await fetchOne(ctx, '10.5555/ok', { cfg });
+  assert.equal(ok.status, 'saved');
+  tabBlank();
+});
+
+// ---------------- one tab, and it goes only where the engine sends it (C) ----------------
+test('popups opened during a fetch are closed and make no request; the paper is still saved', async () => {
+  const mark = fx.log.length;
+  const r = await fetchOne(ctx, '10.5555/popup', { cfg });
+  assert.equal(r.status, 'saved');
+  assert.equal(ctx.ctx.pages().length, 1);
+  assert.deepEqual(fx.log.slice(mark).filter((e) => /^popup(win|late|blank)$/.test(e.key)), []);
+  tabBlank();
+});
+
+test('a page that moves itself to a loopback address is blocked: no request reaches it', async () => {
+  const mark = fx.log.length;
+  const r = await fetchOne(ctx, '10.5555/goloop', { cfg });
+  assert.notEqual(r.status, 'saved');
+  assert.ok(fx.log.slice(mark).some((e) => e.key === 'goloop'), 'fixture not visited');
+  assert.deepEqual(fx.log.slice(mark).filter((e) => e.host === H.F), []);
+  tabBlank();
+});
+
+test('a redirect hop to a loopback address is blocked (the guard sees redirect hops)', async () => {
+  const mark = fx.log.length;
+  const r = await fetchOne(ctx, '10.5555/redirloop', { cfg });
+  assert.notEqual(r.status, 'saved');
+  assert.ok(fx.log.slice(mark).some((e) => e.key === 'redirloop' && e.host === H.P), 'fixture not visited');
+  assert.deepEqual(fx.log.slice(mark).filter((e) => e.host === H.F), []);
+});
+
+test('WebSockets, images and fetch() to loopback addresses or localhost are blocked', async () => {
+  const mark = fx.log.length;
+  await fetchOne(ctx, '10.5555/wsloop', { cfg });
+  await new Promise((r) => setTimeout(r, 300));
+  const bad = fx.log.slice(mark).filter((e) => e.host === H.F || e.host === 'localhost' || e.key === 'websocket');
+  assert.deepEqual(bad, []);
+  assert.ok(fx.log.slice(mark).some((e) => e.key === 'wsloop'), 'fixture not visited');
+});
+
+test('a PDF link to a challenged host, or a PDF redirect onto one, is not followed: no load of that host', async () => {
+  const mark = fx.log.length;
+  const challenged = (h) => (h === H.X ? 'skipped:host-challenged' : null);
+  for (const k of ['pdfx', 'pdfxr']) {
+    const r = await fetchOne(ctx, `10.5555/${k}`, { cfg, navCheck: challenged });
+    assert.equal(r.status, 'skipped:host-challenged', k);
+  }
+  assert.deepEqual(fx.log.slice(mark).filter((e) => e.host === H.X), []);
+});
+
+test('only the engine\'s own PDF navigation can download: a page-started download is cancelled', async () => {
+  const before = new Set(fs.readdirSync(dirs.downloads));
+  const r = await fetchOne(ctx, '10.5555/autodl', { cfg });
+  assert.equal(r.status, 'not-available:no-pdf-link');
+  assert.ok(await settled(() => fs.readdirSync(dirs.downloads).every((n) => before.has(n))), 'stray download left behind');
+});
+
+// ---------------- two browser profiles (D) ----------------
+test('a direct visit and a library-routed visit use different profiles: neither sees the other\'s cookies', async () => {
+  const c = testCfg(fx, { libraryPrefix: fx.libraryPrefix });
+  const lib = await browsers.library();
+  try {
+    assert.ok(lib.profileDir.endsWith(`/${PROFILES.library}`) && ctx.profileDir.endsWith(`/${PROFILES.direct}`));
+    let mark = fx.log.length;
+    // library visit to P sets cklib; direct visit to P sets ckdirect
+    assert.equal((await fetchOne(lib, '10.5555/cklib', { cfg: c, library: true, url: `${fx.base(H.P)}/article/cklib` })).status, 'saved');
+    assert.ok(fx.log.slice(mark).some((e) => e.key === 'cklib' && e.host === H.Y), 'not library-routed');
+    mark = fx.log.length;
+    assert.equal((await fetchOne(ctx, '10.5555/ckdirect', { cfg: c, url: `${fx.base(H.P)}/article/ckdirect` })).status, 'saved');
+    const direct = fx.log.slice(mark).filter((e) => e.host === H.P);
+    assert.ok(direct.length >= 1);
+    assert.ok(direct.every((e) => !e.cookie.includes('cklib')), JSON.stringify(direct));
+    mark = fx.log.length;
+    assert.equal((await fetchOne(lib, '10.5555/cklibtwo', { cfg: c, library: true, url: `${fx.base(H.P)}/article/cklibtwo` })).status, 'saved');
+    const libv = fx.log.slice(mark).filter((e) => e.host === H.P);
+    assert.ok(libv.length >= 1 && libv.some((e) => e.cookie.includes('cklib=1')), JSON.stringify(libv));
+    assert.ok(libv.every((e) => !e.cookie.includes('ckdirect')), JSON.stringify(libv));
+  } finally {
+    await browsers.closeLibrary();
+  }
+  assert.equal(browsers.libraryOpen, false);
 });

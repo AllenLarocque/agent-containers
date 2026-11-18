@@ -6,10 +6,11 @@
 # run; the checks that keep the container contained (user, sudo, setuid inventory, file capabilities,
 # no vendor CLIs baked in) are repeated here.
 #
-# The entry point is run for real, with ONE substitution: `sudo` (used only for the firewall) is a
-# stub that succeeds, because the smoke run has no NET_ADMIN and no network policy to set. The real
-# firewall path is checked separately: without NET_ADMIN it fails and the entry point must exit with
-# nothing started.
+# The entry point is run for real, with ONE substitution: its firewall line (the only use of sudo) is
+# replaced by `true` in a temporary copy, because the smoke run has no NET_ADMIN and no network policy
+# to set. (It runs programs by absolute path under a fixed PATH, so a stub on PATH would not be used.)
+# The real firewall path is checked separately: without NET_ADMIN it fails and the entry point must
+# exit with nothing started.
 set -uo pipefail
 fail=0
 ok()   { echo "OK:   $*"; }
@@ -22,17 +23,17 @@ EP=/usr/local/bin/fetcher-entrypoint
 # The engine's own launch function (production code path) and the sandbox check page.
 sandbox_page() {
   node --input-type=module -e '
-    import { openBrowser } from "/opt/fetcher/lib/browser.mjs";
+    import { Browser } from "/opt/fetcher/lib/browser.mjs";
     import fs from "node:fs";
     const d = fs.mkdtempSync("/tmp/sbx-");
-    const ctx = await openBrowser({ profileDir: d + "/profile", downloadDir: d + "/dl" });
+    const b = await new Browser({ kind: "direct", profileDir: d + "/profile-direct", downloadDir: d + "/dl" }).launch();
     try {
-      const p = ctx.pages()[0] ?? await ctx.newPage();
+      const p = b.page;
       await p.goto("about:blank");
       await p.goto("chrome://sandbox");
       await p.waitForTimeout(500);
       console.log(await p.locator("body").innerText());
-    } finally { await ctx.close(); }'
+    } finally { await b.close(); }'
 }
 # shellcheck source=tests/smoke/lib-chromium-sandbox.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib-chromium-sandbox.sh"
@@ -85,19 +86,21 @@ check "Xvfb, x11vnc, noVNC, websockify present" bash -c 'command -v Xvfb && comm
 check "no --no-sandbox or test sandbox switch in the engine, entry point, fetcherctl or fetcher-view" \
   bash -c '! grep -rIl -e "--no-sandbox" -e FETCHER_TEST_SANDBOX -e "chromiumSandbox: *false" /opt/fetcher --exclude-dir=node_modules "$1" "$(command -v fetcherctl)" "$(command -v fetcher-view)"' _ "$EP"
 check "paths: profile and state dirs, control dir, papers root agent-owned; /etc/fetcher root-owned" bash -c '
-  for d in /home/agent/.fetcher /home/agent/.fetcher/profile /home/agent/.fetcher/state /run/fetcher /papers /tmp/fetcher-dl; do
+  for d in /home/agent/.fetcher /home/agent/.fetcher/profile-direct /home/agent/.fetcher/profile-library /home/agent/.fetcher/state /run/fetcher /papers /tmp/fetcher-dl; do
     [ -d "$d" ] && [ "$(stat -c %U "$d")" = agent ] || { echo "bad: $d"; exit 1; }; done
-  [ "$(stat -c %U:%a /etc/fetcher)" = root:755 ]'
+  [ ! -e /home/agent/.fetcher/profile ] && [ "$(stat -c %U:%a /etc/fetcher)" = root:755 ]'
 check "fetcher-entrypoint installed and executable (the image CMD)" test -x "$EP"
 
 # ---- the entry point never starts an agent ----
 # Every command line, comments dropped: no agent-init, agent-t3, agent-entrypoint, claude, codex, t3 or install-*.
 check "entry point names no agent program" bash -c '! sed "s/#.*//" "$1" | grep -nE "agent-init|agent-t3|agent-entrypoint|agent-rstudio|install-agent|(^|[^a-z0-9-])(claude|codex|t3)([^a-z0-9-]|$)"' _ "$EP"
-check "entry point: firewall first, Xvfb directly (never xvfb-run), engine last via exec" bash -c '
+check "entry point: fixed PATH first, firewall, Xvfb directly (never xvfb-run), engine last via exec, all by absolute path" bash -c '
   body=$(sed "s/#.*//" "$1" | grep -v "^[[:space:]]*$")
-  fw=$(grep -n "sudo /usr/local/bin/init-firewall.sh" <<<"$body" | head -n1 | cut -d: -f1)
-  xv=$(grep -n "Xvfb :99" <<<"$body" | head -n1 | cut -d: -f1)
-  ex=$(grep -n "^[[:space:]]*exec node /opt/fetcher/fetcher.mjs" <<<"$body" | cut -d: -f1)
+  pa=$(grep -n "^export PATH=/usr/sbin:/usr/bin:/sbin:/bin$" <<<"$body" | head -n1 | cut -d: -f1)
+  fw=$(grep -n "^/usr/bin/sudo /usr/local/bin/init-firewall.sh" <<<"$body" | head -n1 | cut -d: -f1)
+  xv=$(grep -n "^/usr/bin/Xvfb :99" <<<"$body" | head -n1 | cut -d: -f1)
+  ex=$(grep -n "^[[:space:]]*exec /usr/bin/node /opt/fetcher/fetcher.mjs" <<<"$body" | cut -d: -f1)
+  [ -n "$pa" ] && [ "$pa" -lt "$fw" ] || exit 1
   [ -n "$fw" ] && [ -n "$xv" ] && [ -n "$ex" ] && [ "$fw" -lt "$xv" ] && [ "$xv" -lt "$ex" ] && ! grep -q xvfb-run <<<"$body"
   grep -q "init-firewall.sh || " <<<"$body"' _ "$EP"
 
@@ -112,16 +115,22 @@ fw_fail_closed() {
 }
 check "entry point: the firewall failing stops it, nothing started" fw_fail_closed
 
-# The rest of the entry point, for real (firewall stubbed: see the header).
+# The rest of the entry point, for real (firewall line replaced: see the header). A fake `node` and a
+# fake `sudo` first on the inherited PATH (as an agent-owned npm folder would be) must not be used.
 stub=$(mktemp -d)
-printf '#!/bin/sh\necho "[smoke] sudo stub: firewall skipped (no NET_ADMIN in the smoke run)"\nexit 0\n' > "$stub/sudo"
-chmod +x "$stub/sudo"
+printf '#!/bin/sh\necho "[smoke] PATH stub used: $0"\nexec sleep 600\n' > "$stub/node"
+cp "$stub/node" "$stub/sudo"; chmod +x "$stub/node" "$stub/sudo"
+ep_copy=$(mktemp)
+sed 's#^/usr/bin/sudo /usr/local/bin/init-firewall.sh#true#' "$EP" > "$ep_copy"
 eplog=$(mktemp)
-PATH="$stub:$PATH" "$EP" >"$eplog" 2>&1 &
+PATH="$stub:$PATH" bash "$ep_copy" >"$eplog" 2>&1 &
 ep_pid=$!
 sleep 20
+check "the firewall line was the one replaced in the copy" bash -c '[ "$(diff "$1" "$2" | grep -c "^[<>]")" = 2 ]' _ "$EP" "$ep_copy"
 check "after 20 s the engine is still running (as the entry point's own process)" \
   bash -c 'kill -0 "$1" && grep -q "/opt/fetcher/fetcher.mjs" "/proc/$1/cmdline"' _ "$ep_pid"
+check "the engine's executable is /usr/bin/node (not a node earlier on the inherited PATH)" \
+  bash -c 'e=$(readlink "/proc/$1/exe"); echo "exe: $e"; [ "$e" = /usr/bin/node ] && ! grep -q "PATH stub used" "$2"' _ "$ep_pid" "$eplog"
 check "after 20 s Xvfb :99 is running, no TCP listener" bash -c 'pgrep -a -x Xvfb | grep -q ":99" && pgrep -a -x Xvfb | grep -q -- "-nolisten tcp"'
 # A renderer may be between pages at any one instant: poll up to ~15 s for one before judging (exit 2 =
 # nothing to judge yet; 0 or 1 is a verdict and ends the wait at once).
