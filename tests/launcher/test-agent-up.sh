@@ -78,6 +78,8 @@ case "$*" in
   "inspect -f {{range .Config.Env}}{{println .}}{{end}} "*)
     sd="$(dirname "$DLOG")"; [ ! -f "$sd/proto.$4" ] || echo "T3_PROTOCOL=$(cat "$sd/proto.$4")" ;;
   "exec -u agent "*" t3 --version") echo "0.9.9" ;;
+  "exec -u agent fetcher-agent-1 fetcherctl "*)   # fetcherctl's output: $sd/fetcherctl.out, exit code $sd/fetcherctl.rc
+    sd="$(dirname "$DLOG")"; cat "$sd/fetcherctl.out" 2>/dev/null || true; exit "$(cat "$sd/fetcherctl.rc" 2>/dev/null || echo 0)" ;;
   "ps -a --filter name=^research-agent-1\$ --format {{.Names}}")   # does a research container exist? $sd/psa.research, else none
     sd="$(dirname "$DLOG")"; cat "$sd/psa.research" 2>/dev/null || true ;;
   "ps -a --filter volume=fetcher-profile --format {{.Names}}")      # who mounts the fetcher's profile volume: $sd/psa.fvol, else nobody
@@ -1804,16 +1806,73 @@ cp "$T/fconf.bak" "$FCFG/project.conf"; printf 'FETCH_PER_HOST=12\nFETCH_PER_DAY
 check "up fetcher accepts cap overrides" fau up fetcher
 check "  ...fetcher.conf: PER_HOST, PER_DAY, LIBRARY_PER_DAY (the engine's keys), no library prefix" \
   test "$(grep -Ev '^(#|$)' "$FCFG/.generated/fetcher.conf" | tr '\n' ' ')" = "PER_HOST=12 PER_DAY=50 LIBRARY_PER_DAY=5 "
-# FETCH_VIEW_PORT: validated now, not used yet
+# FETCH_VIEW_PORT: validated; set = the owner's view (127.0.0.1 only, generated password)
 FBT3="$(sed -n "s/^T3_PORT=//p" "$FR/fb/project.conf")"
 for v in 80 abc 70000 "$FBT3" "$(sed -n 's/^RSTUDIO_PORT=//p' "$FR/fb/project.conf")"; do
   cp "$T/fconf.bak" "$FCFG/project.conf"; sed -i "s|^FETCH_VIEW_PORT=.*|FETCH_VIEW_PORT=$v|" "$FCFG/project.conf"
   refuses "up fetcher refuses FETCH_VIEW_PORT=$v" "FETCH_VIEW_PORT" fau up fetcher
 done
 cp "$T/fconf.bak" "$FCFG/project.conf"; sed -i "s|^FETCH_VIEW_PORT=.*|FETCH_VIEW_PORT=6080|" "$FCFG/project.conf"
-check "up fetcher accepts a free FETCH_VIEW_PORT" fau up fetcher
-check "  ...but publishes nothing yet (no ports in any fetcher file)" bash -c '! cat "$1/compose.yaml" "$1/.generated/fetcher.yaml" | sed "s/#.*//" | grep -q "ports"' _ "$FCFG"
+fout="$(fau up fetcher 2>&1)" && rc=0 || rc=$?
+FVP="$FCFG/.generated/view-password"
+check "up fetcher accepts a free FETCH_VIEW_PORT" test "$rc" -eq 0
+check "  ...the overlay publishes exactly 127.0.0.1:6080 -> the container's 3773 (the compose.yaml seed stays without ports)" \
+  bash -c 'test "$(sed "s/#.*//" "$1/.generated/fetcher.yaml" | grep -c "ports")" = 1 && grep -qE "^    ports: \[\"127\.0\.0\.1:6080:3773\"\]( |$)" "$1/.generated/fetcher.yaml" && ! sed "s/#.*//" "$1/compose.yaml" | grep -q ports' _ "$FCFG"
+check "  ...binds the generated password read-only at /etc/fetcher/view-password" \
+  bash -c 'grep -A3 -F "source: \"./.generated/view-password\"" "$1" | grep -q "target: \"/etc/fetcher/view-password\"" && grep -A3 -F "target: \"/etc/fetcher/view-password\"" "$1" | grep -q "read_only: true"' _ "$FY"
+check "  ...password: 8 random letters/digits, mode 600, in the mode-700 .generated" \
+  bash -c '[ "$(stat -c %a "$1")" = 600 ] && [ "$(stat -c %a "$(dirname "$1")")" = 700 ] && [[ $(cat "$1") =~ ^[A-Za-z0-9]{8}$ ]] && [ "$(wc -c < "$1")" = 8 ]' _ "$FVP"
+check "  ...up prints the view address, never the password" bash -c 'grep -qF "viewer: http://127.0.0.1:6080/vnc.html" <<<"$1" && ! grep -qF "$(cat "$2")" <<<"$1"' _ "$fout" "$FVP"
+pw1="$(cat "$FVP")"; fau up fetcher >/dev/null 2>&1 || true
+check "  ...kept across up" test "$(cat "$FVP")" = "$pw1"
+printf 'bad pass word\n' > "$FVP"
+refuses "up fetcher refuses a malformed view-password (says how to regenerate)" 'view-password must be one line of 8 printable characters.*delete it' fau up fetcher
+rm -f "$FVP"
+refuses "fetch view before the password exists refuses (says to run up)" 'no view password yet: run agent-up up fetcher' fau fetch view
+fau up fetcher >/dev/null 2>&1 || true
+check "  ...up generates a fresh one" test -s "$FVP"
+# agent-up fetch ...: docker exec fetcher-agent-1 fetcherctl ..., arguments checked first
+: > "$DLOG"; printf 'paused: no\nproject alpha: saved=1\e[31m\n' > "$T/fetcherctl.out"
+fsout="$(fau fetch status 2>&1)" && rc=0 || rc=$?
+check "fetch status: docker exec -u agent fetcher-agent-1 fetcherctl status" bash -c '[ "$1" -eq 0 ] && grep -qxF "ARGS: exec -u agent fetcher-agent-1 fetcherctl status" "$2"' _ "$rc" "$DLOG"
+check "  ...prints fetcherctl's lines without control characters, then the viewer address" \
+  bash -c 'grep -qx "project alpha: saved=1\[31m" <<<"$1" && ! grep -q $'"'"'\e'"'"' <<<"$1" && grep -qxF "viewer: http://127.0.0.1:6080/vnc.html" <<<"$1"' _ "$fsout"
+rm -f "$T/fetcherctl.out"; : > "$DLOG"
+fvout="$(fau fetch view 2>&1)" && rc=0 || rc=$?
+check "fetch view: fetcherctl view; prints the address and the password file's path, not the password" \
+  bash -c '[ "$1" -eq 0 ] && grep -qxF "ARGS: exec -u agent fetcher-agent-1 fetcherctl view" "$2" && grep -qF "http://127.0.0.1:6080/vnc.html" <<<"$3" && grep -qF "$4" <<<"$3" && ! grep -qF "$(cat "$4")" <<<"$3"' _ "$rc" "$DLOG" "$fvout" "$FVP"
+for a in "check pub.example" "check 127.0.0.6" "retry" "retry pub.example" "retry login"; do
+  : > "$DLOG"
+  # shellcheck disable=SC2086   # split on purpose: "check pub.example" is two arguments
+  fau fetch $a >/dev/null 2>&1 && rc=0 || rc=$?
+  check "fetch $a: docker exec ... fetcherctl $a" bash -c '[ "$3" -eq 0 ] && grep -qxF "ARGS: exec -u agent fetcher-agent-1 fetcherctl $2" "$1"' _ "$DLOG" "$a" "$rc"
+done
+: > "$DLOG"
+for bad in "a b;rm" "../x" "X.ORG" ""; do
+  refuses "fetch check refuses '$bad' before any docker call" 'fetch check takes one host name' fau fetch check "$bad"
+  refuses "fetch retry refuses '$bad' before any docker call" 'fetch retry takes a host name' fau fetch retry "$bad x"
+done
+refuses "fetch with an unknown subcommand prints usage" 'usage:' fau fetch nope
+refuses "fetch check with two hosts prints the check rule" 'fetch check takes one host name' fau fetch check a.org b.org
+refuses "fetch login with no LIBRARY_LINK_PREFIX refuses (names the setting)" 'no library route: set LIBRARY_LINK_PREFIX' fau fetch login
+check "  ...none of those reached docker exec" bash -c '! grep -q "fetcherctl" "$1"' _ "$DLOG"
+echo 1 > "$T/fetcherctl.rc"; echo "no paper is waiting on a check at pub.example in this run: nothing opened" > "$T/fetcherctl.out"
+refuses "fetch check: fetcherctl's refusal and exit code come through" 'nothing opened' fau fetch check pub.example
+rm -f "$T/fetcherctl.rc" "$T/fetcherctl.out"
+echo 0 > "$T/RUNNING.fetcher-agent-1"
+refuses "fetch status refuses when the fetcher is not running" 'not running.*agent-up up fetcher' fau fetch status
+rm -f "$T/RUNNING.fetcher-agent-1"
+sed -i "s|^LIBRARY_LINK_PREFIX=.*|LIBRARY_LINK_PREFIX=$PFX|" "$FCFG/project.conf"; : > "$DLOG"
+flout="$(fau fetch login 2>&1)" && rc=0 || rc=$?
+check "fetch login with a prefix: fetcherctl login; the prefix is not printed" \
+  bash -c '[ "$1" -eq 0 ] && grep -qxF "ARGS: exec -u agent fetcher-agent-1 fetcherctl login" "$2" && ! grep -q uni-secret <<<"$3" && ! grep -q uni-secret "$2"' _ "$rc" "$DLOG" "$flout"
+stout="$(fau status fetcher 2>&1)" || true
+check "status fetcher: the viewer address" grep -qF "viewer: http://127.0.0.1:6080/vnc.html" <<<"$stout"
 cp "$T/fconf.bak" "$FCFG/project.conf"
+fau up fetcher >/dev/null 2>&1 || true
+check "viewer off again: no ports, no password bind, no password file" \
+  bash -c '! sed "s/#.*//" "$1/.generated/fetcher.yaml" | grep -q "ports" && ! grep -q view-password "$1/.generated/fetcher.yaml" && [ ! -e "$1/.generated/view-password" ]' _ "$FCFG"
+refuses "fetch view with the viewer off refuses (says how to turn it on)" 'view is off: set FETCH_VIEW_PORT' fau fetch view
 # no secrets and no other profile's settings
 echo 'GH_TOKEN=op://x/y/z' > "$FCFG/project.env"
 refuses "up fetcher refuses ANY key in project.env" 'holds no secrets.*line number' fau up fetcher
@@ -1918,6 +1977,15 @@ if docker compose version >/dev/null 2>&1; then
   check "rendered fetcher: seccomp profile from the config dir; NET_ADMIN + NET_RAW; no capability dropped" \
     bash -c 'jq -e --arg s "seccomp=$2/fetcher-seccomp.json" ".services.agent.security_opt == [\$s] and ((.services.agent.cap_add|sort) == [\"NET_ADMIN\",\"NET_RAW\"]) and (.services.agent.cap_drop == null)" <<<"$1"' _ "$FJ" "$(cd "$FCFG" && pwd -P)"
   check "rendered fetcher: no ports published (not even the base image's 3773/8787)" jq -e '(.services.agent.ports // []) == [] and (.services.agent.expose // []) == []' <<<"$FJ"
+  check "rendered fetcher (viewer off): no view-password mount" bash -c '! grep -q view-password <<<"$1"' _ "$FJ"
+  sed -i "s|^FETCH_VIEW_PORT=.*|FETCH_VIEW_PORT=6080|" "$FCFG/project.conf"
+  FJV="$(faureal config fetcher --format json)"
+  check "rendered fetcher (FETCH_VIEW_PORT=6080): exactly one port, 127.0.0.1:6080 -> 3773/tcp" \
+    jq -e '[.services.agent.ports[] | {host_ip, published: (.published|tostring), target, protocol}] == [{"host_ip":"127.0.0.1","published":"6080","target":3773,"protocol":"tcp"}]' <<<"$FJV"
+  check "rendered fetcher (FETCH_VIEW_PORT=6080): the password file bound read-only at /etc/fetcher/view-password; volumes otherwise unchanged" \
+    bash -c 'jq -e --arg s "$2/.generated/view-password" "[.services.agent.volumes[] | select(.target == \"/etc/fetcher/view-password\")] == [{\"type\":\"bind\",\"source\":\$s,\"target\":\"/etc/fetcher/view-password\",\"read_only\":true,\"bind\":{\"create_host_path\":false}}]" <<<"$1" && [ "$(jq ".services.agent.volumes | length" <<<"$1")" = "$(( $(jq ".services.agent.volumes | length" <<<"$3") + 1 ))" ]' _ "$FJV" "$FCFG" "$FJ"
+  check "rendered fetcher (FETCH_VIEW_PORT=6080): the password is not in the rendered config" bash -c '! grep -qF "$(cat "$2")" <<<"$1"' _ "$FJV" "$FCFG/.generated/view-password"
+  sed -i "s|^FETCH_VIEW_PORT=.*|FETCH_VIEW_PORT=|" "$FCFG/project.conf"
   check "rendered fetcher: no environment at all (no secrets, no Claude settings, no T3)" jq -e '(.services.agent.environment // {}) == {}' <<<"$FJ"
   check "rendered fetcher: its own default network" jq -e '(.services.agent.networks | keys) == ["default"] and (.services.agent.network_mode == null)' <<<"$FJ"
   check "rendered fetcher: runs the fetcher entry point as uid 1000" jq -e '.services.agent.command == ["/usr/local/bin/fetcher-entrypoint"] and .services.agent.user == "1000:1000"' <<<"$FJ"

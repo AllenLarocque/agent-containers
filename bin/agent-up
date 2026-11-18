@@ -23,6 +23,11 @@ usage:
   agent-up shell <project>               zsh in the container as `agent`
   agent-up pair <project>                print a one-time T3 Code pairing link (valid 10 min) and the app addresses
   agent-up rstudio <project>             print the RStudio Server address, user and password (RSTUDIO=1)
+  agent-up fetch status                  the fetcher: counts per project, papers waiting on a check (by host) or the login
+  agent-up fetch view                    the address of the fetcher's browser view; pauses the fetcher while you use it
+  agent-up fetch check <host>            open the waiting paper's page on <host> in that browser (tick the check there)
+  agent-up fetch login                   open the library sign-in in that browser (LIBRARY_LINK_PREFIX)
+  agent-up fetch retry [<host>|login]    end the pause; retry the papers waiting on <host>, on the login, or all
   agent-up status|stop|down <project>
   agent-up busy --all | <project>...     is R work or an agent running? (exit 1 = busy)
   agent-up update --all | <project>...   pull main, then move projects to the newest images published from main (verified; asks before restarting a busy one)
@@ -237,7 +242,7 @@ IMAGE=fetcher
 # The research exchange root on the host (the research container's RESEARCH_DIR).
 RESEARCH_DIR=$rd
 # The owner's view of the browser (127.0.0.1 only): a free port, unique across all projects' ports; empty = off.
-# (Validated now; this version serves no viewer yet.)
+# (agent-up fetch view prints the address; the password is generated into .generated/view-password.)
 FETCH_VIEW_PORT=
 # Library route: your OpenAthens redirector prefix, exactly https://go.openathens.net/redirector/<institution>?url=
 # Empty = off. It names your institution: it stays in this file and the generated engine config; agent-up never prints it.
@@ -471,6 +476,9 @@ fetch_prefix(){ conf_get "$1/project.conf" LIBRARY_LINK_PREFIX; }   # $1 config 
 fetch_prefix_ok(){ local v LC_ALL=C; v="$(fetch_prefix "$1")"; [ -z "$v" ] || [[ $v =~ $FETCH_PREFIX_RE ]]; }   # $1 config dir: empty, or exactly the OpenAthens redirector prefix
 fetch_cap_ok(){ [ -z "$1" ] || [[ $1 =~ ^[1-9][0-9]{0,8}$ ]]; }   # $1 value: unset, or a positive whole number the engine accepts (at most 9 digits)
 fetch_route(){ if [ -z "$(fetch_prefix "$1")" ]; then echo unset; elif fetch_prefix_ok "$1"; then echo set; else echo "set but INVALID (agent-up up refuses it)"; fi; }   # $1 config dir
+fetch_view_port(){ local v; v="$(conf_get "$1/project.conf" FETCH_VIEW_PORT)"; [[ $v =~ ^[1-9][0-9]{3,4}$ ]] && [ "$v" -ge 1024 ] && [ "$v" -le 65535 ] && printf '%s' "$v"; return 0; }   # $1 config dir -> a well-formed FETCH_VIEW_PORT, or nothing (viewer off)
+fetch_view_url(){ local p; p="$(fetch_view_port "$1")"; if [ -n "$p" ]; then printf 'http://127.0.0.1:%s/vnc.html' "$p"; else printf 'off'; fi; }   # $1 config dir
+FETCH_HOST_RE='^[a-z0-9.-]{1,253}$'   # the engine's host-name pattern (images/fetcher/engine/lib/records.mjs HOST)
 fetcher_seed_seccomp(){ printf '%s' "$(cd "$SEEDS/config" && pwd -P)/fetcher-seccomp.json"; }
 check_fetcher(){ # $1 config dir; only up and config (stop/down/status must work whatever the values). Never echoes LIBRARY_LINK_PREFIX.
   local kv k v port other seed
@@ -502,6 +510,10 @@ check_fetcher(){ # $1 config dir; only up and config (stop/down/status must work
     || die "$1/fetcher-seccomp.json is missing (Chromium's sandbox needs it). Copy it from this clone: cp $seed $1/fetcher-seccomp.json"
   cmp -s "$1/fetcher-seccomp.json" "$seed" \
     || die "$1/fetcher-seccomp.json differs from the profile this launcher ships ($seed): it is stale or edited. Refresh it: cp $seed $1/fetcher-seccomp.json"
+  if [ -n "$port" ] && [ -e "$1/.generated/view-password" ]; then
+    { [ ! -L "$1/.generated/view-password" ] && [ "$(wc -l < "$1/.generated/view-password")" -le 1 ] && [[ "$(cat "$1/.generated/view-password")" =~ ^[[:graph:]]{8}$ ]]; } \
+      || die "$1/.generated/view-password must be one line of 8 printable characters, no spaces (delete it to generate a new one)"
+  fi
   [ "$(id -u)" = 1000 ] || warn "you are uid $(id -u), not 1000: the fetcher (uid 1000) cannot read its config ($1/.generated/fetcher.conf, mode 600) or write the papers folders"
 }
 fetcher_mention(){ # $1 compose.yaml (comments ignored) -> the first line that names the fetcher's profile volume or config dir; nothing: none
@@ -622,10 +634,24 @@ check_fetcher_compose(){ # $1 fetcher config dir: its compose.yaml is the seed a
 }
 write_fetcher(){ # the fetcher's overlay, engine config, firewall switch and compose env. Never refuses (stop/down render with it):
   # an invalid value is left out, and only real (non-link) papers folders are mounted.
-  local g="$1/.generated" rd p kv k v sec conf
+  local g="$1/.generated" rd p kv k v sec conf vp pw
   mkdir -p "$g"; chmod 700 "$g"
   rd="$(research_dir "$1")"; if [ -d "$rd" ]; then rd="$(cd "$rd" && pwd -P)"; fi
   sec="$(cd "$1" && pwd -P)/fetcher-seccomp.json"
+  # The owner's view: with a well-formed FETCH_VIEW_PORT, one random 8-character password (VNC's maximum; the loopback-only
+  # publish is the real control), kept across up (delete the file to rotate it). Viewer off: no password file at all.
+  vp="$(fetch_view_port "$1")"; pw="$g/view-password"
+  if [ -n "$vp" ]; then
+    if [ ! -e "$pw" ]; then
+      v="$(LC_ALL=C tr -dc 'A-Za-z0-9' < <(head -c 512 /dev/urandom))"   # (no pipe into head: SIGPIPE under pipefail)
+      [ "${#v}" -ge 8 ] || die "could not generate a password for $pw"
+      ( umask 077; printf '%s' "${v:0:8}" > "$pw.tmp" && mv "$pw.tmp" "$pw" ) || die "could not write $pw"
+    fi
+    chmod 600 "$pw"
+    { [ ! -L "$pw" ] && [ -f "$pw" ] && [ "$(wc -l < "$pw")" -le 1 ] && [[ "$(cat "$pw")" =~ ^[[:graph:]]{8}$ ]]; } || vp=""   # check_fetcher refuses it at up
+  else
+    rm -f "$pw"
+  fi
   # compose's interpolation variables: only this (project.conf, which holds the library prefix, is never given to compose)
   printf 'PROJECT=%s\n' "$(basename "$1")" > "$g/compose.env"
   echo "PROFILE=research" > "$g/profile"   # the research container's firewall: open public egress, private ranges denied
@@ -651,6 +677,10 @@ write_fetcher(){ # the fetcher's overlay, engine config, firewall switch and com
     echo "      # the engine's config (library prefix, caps)"
     bind_yaml ./.generated/fetcher.conf /etc/fetcher/config ro
     echo "      - fetcher-profile:/home/agent/.fetcher   # the browser profile (library session, bot-check clearance) and pacing state"
+    if [ -n "$vp" ]; then
+      echo "      # the owner's view: its password (fetcher-view starts x11vnc on the container's loopback + noVNC on 3773)"
+      bind_yaml ./.generated/view-password /etc/fetcher/view-password ro
+    fi
     echo "      # ONLY the papers folders of the research exchange ($rd), read-write"
     if real_dir "$rd"; then
       if real_dir "$rd/_general" && real_dir "$rd/_general/papers"; then bind_yaml "$rd/_general/papers" /papers/_general rw; fi
@@ -658,6 +688,9 @@ write_fetcher(){ # the fetcher's overlay, engine config, firewall switch and com
         real_dir "$rd/$p" && real_dir "$rd/$p/downloads" && real_dir "$rd/$p/downloads/papers" || continue
         bind_yaml "$rd/$p/downloads/papers" "/papers/$p" rw
       done < <(fetcher_projects "$rd" 2>/dev/null)
+    fi
+    if [ -n "$vp" ]; then   # the HOST's loopback only. 3773: the one inbound port base's firewall accepts (from the gateway only)
+      echo "    ports: [\"127.0.0.1:$vp:3773\"]"
     fi
     echo "volumes:"
     echo "  fetcher-profile:"
@@ -1134,7 +1167,7 @@ up_fetcher(){ # $1 config dir: no secrets, no 1Password, no T3
   env -u OP_SERVICE_ACCOUNT_TOKEN "${COMPOSE[@]}" up -d --force-recreate
   echo "agent-up: '$name' running (paper fetcher: open public egress, no agent, no secrets, papers folders only)"
   echo "agent-up: papers folders: _general $(fetcher_projects "$rd" 2>/dev/null | paste -sd' ' - || true)"
-  echo "agent-up: library route: $(fetch_route "$1"); viewer: off (this version serves none)"
+  echo "agent-up: library route: $(fetch_route "$1"); viewer: $(fetch_view_url "$1")"
   if [ -f "$CFG_ROOT/research/project.conf" ] && [ "$(research_dir "$CFG_ROOT/research")" != "$rd" ]; then
     echo "agent-up: WARNING: the research container uses RESEARCH_DIR=$(research_dir "$CFG_ROOT/research"), not $rd: the fetcher does not see its papers folders"
   fi
@@ -1584,13 +1617,45 @@ status_fetcher(){ # $1 config dir: the fetcher's settings (never the library pre
   local rd d k v kv; rd="$(research_dir "$1")"
   echo "Fetcher ($1/project.conf):"
   echo "  library route: $(fetch_route "$1")"
-  v="$(conf_get "$1/project.conf" FETCH_VIEW_PORT)"; echo "  viewer: ${v:+FETCH_VIEW_PORT=$v, }off (this version serves none)"
+  echo "  viewer: $(fetch_view_url "$1")"
   for kv in $FETCH_CAPS; do k="${kv%%=*}"; v="$(conf_get "$1/project.conf" "$k")"; echo "  $k: ${v:-default}"; done
   echo "Papers folders (on the host, $rd):"
   for d in "$rd/_general/papers" "$rd"/*/downloads/papers; do
     [ -d "$d" ] && [ ! -L "$d" ] || continue
     du -sh "$d" 2>/dev/null || echo "?	$d"
   done
+}
+cmd_fetch(){ # agent-up fetch status|view|check <host>|login|retry [<host>|login]: `docker exec fetcher-agent-1 fetcherctl ...`.
+  # Arguments are checked here and again by fetcherctl (and the engine). Output: fetcherctl's lines (built from validated
+  # status fields and fixed words; control characters dropped) plus the viewer address. Never the prefix or the password.
+  [ $# -ge 1 ] || usage
+  local sub="$1" cfg c=fetcher-agent-1 out rc=0; shift
+  case "$sub" in
+    status|view|login) [ $# -eq 0 ] || usage ;;
+    check) [ $# -eq 1 ] && [[ $1 =~ $FETCH_HOST_RE ]] || die "fetch check takes one host name (lower-case letters, digits, . and -), as agent-up fetch status lists it" ;;
+    retry) [ $# -le 1 ] || usage; [ $# -eq 0 ] || [[ $1 =~ $FETCH_HOST_RE ]] || die "fetch retry takes a host name, login, or nothing (all waiting papers)" ;;
+    *) usage ;;
+  esac
+  cfg="$(cfg_dir fetcher)"
+  [ "$(profile "$cfg")" = fetcher ] || die "$cfg is not the fetcher's config (PROFILE=fetcher)"
+  if [ "$sub" = view ] && [ -z "$(fetch_view_port "$cfg")" ]; then
+    die "the fetcher's view is off: set FETCH_VIEW_PORT in $cfg/project.conf (a free port 1024-65535), then agent-up up fetcher"
+  fi
+  [ "$sub" != view ] || [ -s "$cfg/.generated/view-password" ] || die "no view password yet: run agent-up up fetcher first"
+  [ "$sub" != login ] || [ -n "$(fetch_prefix "$cfg")" ] || die "no library route: set LIBRARY_LINK_PREFIX in $cfg/project.conf, then agent-up up fetcher"
+  is_running "$c" || die "the fetcher is not running (agent-up up fetcher)"
+  out="$(docker exec -u agent "$c" fetcherctl "$sub" "$@" </dev/null 2>&1)" || rc=$?
+  [ -z "$out" ] || printf '%s\n' "$out" | LC_ALL=C tr -cd '\11\12\40-\176'
+  case "$sub" in
+    status) echo "viewer: $(fetch_view_url "$cfg")" ;;
+    view|check|login)
+      if [ -n "$(fetch_view_port "$cfg")" ]; then
+        echo "view: $(fetch_view_url "$cfg")   (password: in $cfg/.generated/view-password; check the address bar before typing anything)"
+      else
+        echo "view: off (set FETCH_VIEW_PORT in $cfg/project.conf, then agent-up up fetcher)"
+      fi ;;
+  esac
+  return "$rc"
 }
 cmd_status(){
   if [ $# -eq 1 ]; then
@@ -1629,6 +1694,7 @@ case "$cmd" in
   shell)  cmd_shell "$@" ;;
   pair)   cmd_pair "$@" ;;
   rstudio) cmd_rstudio "$@" ;;
+  fetch)  cmd_fetch "$@" ;;
   update) cmd_update "$@" ;;
   busy)   cmd_busy "$@" ;;
   status) cmd_status "$@" ;;
