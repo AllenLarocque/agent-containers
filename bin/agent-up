@@ -37,9 +37,9 @@ USAGE
 valid_name(){ [[ $1 =~ ^[a-z0-9][a-z0-9_-]*$ ]]; }   # $1 name: what Docker Compose accepts as a project name
 normalise(){ printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9_-]/-/g; s/^[^a-z0-9]*//'; }
 conf_get(){ sed -n "s/^$2=//p" "$1" | tail -n 1; }   # $1 project.conf, $2 KEY
-next_t3_port(){ # lowest port >= 3773 not used by another project's config
+next_t3_port(){ # lowest port >= 3773 not used by any project's T3_PORT, RSTUDIO_PORT or FETCH_VIEW_PORT (all_ports)
   local p=3773 used
-  used="$(cat "$CFG_ROOT"/*/project.conf 2>/dev/null | sed -n 's/^T3_PORT=//p' | sort -u)"
+  used="$(all_ports)"
   while grep -qx "$p" <<<"$used"; do p=$((p+1)); done
   printf '%s' "$p"
 }
@@ -47,7 +47,7 @@ next_t3_port(){ # lowest port >= 3773 not used by another project's config
 all_ports(){ # every T3_PORT, RSTUDIO_PORT and FETCH_VIEW_PORT in every project's config, one per line
   cat "$CFG_ROOT"/*/project.conf 2>/dev/null | sed -n 's/^\(T3_PORT\|RSTUDIO_PORT\|FETCH_VIEW_PORT\)=//p' | sort -u
 }
-next_rstudio_port(){ # lowest port >= 8787 not used by any project's T3_PORT or RSTUDIO_PORT
+next_rstudio_port(){ # lowest port >= 8787 not used by any project's T3_PORT, RSTUDIO_PORT or FETCH_VIEW_PORT
   local p=8787 used
   used="$(all_ports)"
   while grep -qx "$p" <<<"$used"; do p=$((p+1)); done
@@ -353,6 +353,8 @@ check_t3_port(){ # only up and pair need it: stop/down must work on a config tha
     [ -f "$other" ] && [ "$other" != "$1/project.conf" ] || continue
     [ "$(conf_get "$other" T3_PORT)" != "$port" ] \
       || die "T3_PORT=$port in $1/project.conf is also used by $(basename "$(dirname "$other")"): pick another (free: $(next_t3_port))"
+    [ "$(conf_get "$other" FETCH_VIEW_PORT)" != "$port" ] \
+      || die "T3_PORT=$port in $1/project.conf is also used by $(basename "$(dirname "$other")") (FETCH_VIEW_PORT, the fetcher's view): pick another (free: $(next_t3_port))"
   done
 }
 t3_connect(){ # $1 config dir -> the T3_CONNECT value as written; absent = 0 (configs that predate it)
@@ -476,7 +478,8 @@ fetch_prefix(){ conf_get "$1/project.conf" LIBRARY_LINK_PREFIX; }   # $1 config 
 fetch_prefix_ok(){ local v LC_ALL=C; v="$(fetch_prefix "$1")"; [ -z "$v" ] || [[ $v =~ $FETCH_PREFIX_RE ]]; }   # $1 config dir: empty, or exactly the OpenAthens redirector prefix
 fetch_cap_ok(){ [ -z "$1" ] || [[ $1 =~ ^[1-9][0-9]{0,8}$ ]]; }   # $1 value: unset, or a positive whole number the engine accepts (at most 9 digits)
 fetch_route(){ if [ -z "$(fetch_prefix "$1")" ]; then echo unset; elif fetch_prefix_ok "$1"; then echo set; else echo "set but INVALID (agent-up up refuses it)"; fi; }   # $1 config dir
-fetch_view_port(){ local v; v="$(conf_get "$1/project.conf" FETCH_VIEW_PORT)"; [[ $v =~ ^[1-9][0-9]{3,4}$ ]] && [ "$v" -ge 1024 ] && [ "$v" -le 65535 ] && printf '%s' "$v"; return 0; }   # $1 config dir -> a well-formed FETCH_VIEW_PORT, or nothing (viewer off)
+fetch_view_port_ok(){ [[ $1 =~ ^[1-9][0-9]{3,4}$ ]] && [ "$1" -ge 1024 ] && [ "$1" -le 65535 ]; }   # $1 value: THE one FETCH_VIEW_PORT rule (1024-65535, no leading zero)
+fetch_view_port(){ local v; v="$(conf_get "$1/project.conf" FETCH_VIEW_PORT)"; if fetch_view_port_ok "$v"; then printf '%s' "$v"; fi; return 0; }   # $1 config dir -> a well-formed FETCH_VIEW_PORT, or nothing (viewer off)
 fetch_view_url(){ local p; p="$(fetch_view_port "$1")"; if [ -n "$p" ]; then printf 'http://127.0.0.1:%s/vnc.html' "$p"; else printf 'off'; fi; }   # $1 config dir
 FETCH_HOST_RE='^[a-z0-9.-]{1,253}$'   # the engine's host-name pattern (images/fetcher/engine/lib/records.mjs HOST)
 fetcher_seed_seccomp(){ printf '%s' "$(cd "$SEEDS/config" && pwd -P)/fetcher-seccomp.json"; }
@@ -490,8 +493,8 @@ check_fetcher(){ # $1 config dir; only up and config (stop/down/status must work
   done
   port="$(conf_get "$1/project.conf" FETCH_VIEW_PORT)"
   if [ -n "$port" ]; then
-    [[ $port =~ ^[0-9]+$ ]] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] \
-      || die "FETCH_VIEW_PORT='$port' in $1/project.conf: empty (viewer off) or a free port 1024-65535, unique across projects"
+    fetch_view_port_ok "$port" \
+      || die "FETCH_VIEW_PORT='$port' in $1/project.conf: empty (viewer off) or a free port 1024-65535 written without a leading zero, unique across projects"
     for other in "$CFG_ROOT"/*/project.conf; do
       [ -f "$other" ] && [ "$other" != "$1/project.conf" ] || continue
       for k in T3_PORT RSTUDIO_PORT FETCH_VIEW_PORT; do
@@ -602,14 +605,32 @@ real_path(){ # $1 path -> resolved (pwd -P) when it or its folder exists; else a
   elif [ -d "$(dirname "$1")" ]; then printf '%s/%s' "$(cd "$(dirname "$1")" && pwd -P)" "$(basename "$1")"
   else printf '%s' "$1"; fi
 }
+COMPOSE_ENV_FLAG=""   # probed once per run: does `docker compose config` offer --no-env-resolution? (yes|no)
+compose_env_flag_ok(){
+  local h
+  if [ -z "$COMPOSE_ENV_FLAG" ]; then
+    COMPOSE_ENV_FLAG=no
+    if h="$(env -u OP_SERVICE_ACCOUNT_TOKEN docker compose config --help </dev/null 2>/dev/null)" && grep -q -- '--no-env-resolution' <<<"$h"; then COMPOSE_ENV_FLAG=yes; fi
+  fi
+  [ "$COMPOSE_ENV_FLAG" = yes ]
+}
 canon_path(){ readlink -f -- "$1" 2>/dev/null || real_path "$1"; }   # $1 path -> every symlink and .. resolved (as far as it exists)
 check_rendered(){ # $1 config dir (not the fetcher), after prepare: what compose will REALLY run (interpolation, every file) may not
   # bind (or device-mount) a path, use a secret/config file or an env_file that equals, contains or sits inside the fetcher's config
   # dir, name the volume fetcher-profile, or borrow the fetcher container's volumes. Rendered with --no-env-resolution so env_file
   # stays visible (as `- path: /abs`) instead of being folded into environment. A path line it cannot parse is refused, not skipped.
-  local out line v fc
+  # The render sees no secret: no service-account token, no op run (project.env's op:// references are never resolved here),
+  # and the owner's ambient values of project.env's keys are unset (as in cmd_config); the fetcher's config (library prefix)
+  # is not part of a builder's or the research container's compose. So Compose's own error lines can be shown.
+  local out line v fc err k
   [ "$(profile "$1")" != fetcher ] || return 0
-  out="$(env -u OP_SERVICE_ACCOUNT_TOKEN "${COMPOSE[@]}" config --no-env-resolution </dev/null 2>/dev/null)" || die "could not render $1's compose config (see: agent-up config $(basename "$1"))"
+  compose_env_flag_ok || die "$1: agent-up checks what compose will mount with 'docker compose config --no-env-resolution', and this Docker Compose does not offer that flag (it is not in 'docker compose config --help'; $(env -u OP_SERVICE_ACCOUNT_TOKEN docker compose version </dev/null 2>/dev/null | head -n 1 || echo 'version unknown')). Install a newer Docker Compose, then retry. (The check is never skipped.)"
+  err="$(mktemp)"
+  out="$( [ ! -f "$1/project.env" ] || while IFS= read -r k; do [ -z "$k" ] || unset "$k"; done < <(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$1/project.env")
+          env -u OP_SERVICE_ACCOUNT_TOKEN "${COMPOSE[@]}" config --no-env-resolution </dev/null 2>"$err" )" \
+    || { v="$(head -n 20 "$err" | LC_ALL=C tr -cd '\11\12\40-\176' | sed 's/^/    /')"; rm -f "$err"
+         die "could not render $1's compose config for the mount check. Docker Compose said:"$'\n'"$v"; }
+  rm -f "$err"
   fc="$(cd "$CFG_ROOT" && pwd -P)/fetcher"
   while IFS= read -r line; do
     if [[ $line =~ ^[[:space:]]+(-[[:space:]]+)?(source|device|file|path):[[:space:]]*(.*)$ ]]; then
@@ -706,14 +727,14 @@ rstudio_on(){ # RSTUDIO=1 with a well-formed RSTUDIO_PORT. stop/down render with
   local port; port="$(conf_get "$1/project.conf" RSTUDIO_PORT)"
   [ "$(profile "$1")" = builder ] && [ "$(rstudio "$1")" = 1 ] && [[ $port =~ ^[0-9]+$ ]] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ]
 }
-check_rstudio_port(){ # $1 config dir: a free port, used by no other T3_PORT/RSTUDIO_PORT (nor this T3_PORT)
+check_rstudio_port(){ # $1 config dir: a free port, used by no other T3_PORT/RSTUDIO_PORT/FETCH_VIEW_PORT (nor this T3_PORT)
   local port other k; port="$(conf_get "$1/project.conf" RSTUDIO_PORT)"
   [[ $port =~ ^[0-9]+$ ]] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] \
     || die "RSTUDIO_PORT='$port' in $1/project.conf: set a free port 1024-65535, unique across projects (e.g. RSTUDIO_PORT=$(next_rstudio_port))"
   [ "$(conf_get "$1/project.conf" T3_PORT)" != "$port" ] || die "RSTUDIO_PORT=$port in $1/project.conf equals its T3_PORT: pick another (free: $(next_rstudio_port))"
   for other in "$CFG_ROOT"/*/project.conf; do
     [ -f "$other" ] && [ "$other" != "$1/project.conf" ] || continue
-    for k in T3_PORT RSTUDIO_PORT; do
+    for k in T3_PORT RSTUDIO_PORT FETCH_VIEW_PORT; do
       [ "$(conf_get "$other" "$k")" != "$port" ] \
         || die "RSTUDIO_PORT=$port in $1/project.conf is also used by $(basename "$(dirname "$other")") ($k): pick another (free: $(next_rstudio_port))"
     done

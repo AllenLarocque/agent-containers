@@ -25,6 +25,8 @@ export DISPLAY=:99
 # Only when agent-up mounted /etc/fetcher/view-password (the owner set FETCH_VIEW_PORT); otherwise nothing listens.
 # A viewer that fails to start is logged; the engine runs without it.
 if [ -e /etc/fetcher/view-password ]; then
+  # (The firewall's log above calls inbound tcp 3773 "T3 Code server": base's wording. There is no T3 here.)
+  log "in this container, inbound port 3773 (from the Docker host only) is the owner's browser view, not T3 Code"
   /usr/local/bin/fetcher-view /etc/fetcher/view-password || log "the viewer did not start: running without it"
 fi
 # ---- end of the owner's view ----

@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # The owner's view of the fetcher's display :99, started by fetcher-entrypoint ONLY when agent-up mounted a
 # password file (the owner set FETCH_VIEW_PORT). Two listeners and no more:
-#   x11vnc      127.0.0.1:5900 only (-localhost; -noipv6 -rfbportv6 -1: no ::1 listener either), password from the file's first line (VNC uses 8 characters)
-#   websockify  :3773, serving noVNC (/usr/share/novnc) and relaying to 127.0.0.1:5900. Docker publishes it to the
+#   x11vnc      127.0.0.1:5900 only (-localhost; -noipv6 -rfbportv6 -1: no ::1 listener either), password from the file's first line
+#               (VNC uses 8 characters). Locked down against X clients on :99 (the browser): -noremote (no remote-control
+#               commands over the display, e.g. "connect out"), -novncconnect (no reverse connections). -noclipboard -nosel:
+#               no clipboard or selection exchange in either direction (the owner types passwords; paste does not work).
+#   websockify  :3773, serving noVNC from /opt/fetcher/novnc (a copy of /usr/share/novnc in which every folder has an
+#               index.html that redirects to /vnc.html: websockify 0.10 has no --file-only, so this keeps it from serving
+#               directory listings) and relaying to 127.0.0.1:5900. Docker publishes it to the
 #               HOST's 127.0.0.1 only (agent-up: 127.0.0.1:<FETCH_VIEW_PORT>:3773).
 # Why 3773 and not noVNC's usual 6080: base's firewall (init-firewall.sh, which this image does not change) drops all
 # inbound traffic except tcp 3773 from the container's gateway (the Docker host side; the port T3 uses in the agent
@@ -18,7 +23,8 @@ log() { echo "[fetcher-view] $*"; }
   || { log "the password file is not one line of 8 printable characters: viewer not started"; exit 1; }
 logs=/tmp/fetcher-view; mkdir -p "$logs"; chmod 700 "$logs"
 x11vnc -display :99 -localhost -noipv6 -rfbportv6 -1 -rfbport 5900 -passwdfile "$pw" -forever -shared -noxdamage \
+  -noremote -novncconnect -noclipboard -nosel \
   -o "$logs/x11vnc.log" >/dev/null 2>&1 &
 for _ in $(seq 50); do (exec 3<>/dev/tcp/127.0.0.1/5900) 2>/dev/null && break; sleep 0.1; done
-websockify --web /usr/share/novnc 3773 127.0.0.1:5900 >"$logs/websockify.log" 2>&1 &
+websockify --web /opt/fetcher/novnc 3773 127.0.0.1:5900 >"$logs/websockify.log" 2>&1 &
 log "viewer started (noVNC on port 3773; VNC on the container's loopback only)"

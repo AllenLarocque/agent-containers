@@ -86,8 +86,14 @@ case "$*" in
     sd="$(dirname "$DLOG")"; cat "$sd/psa.fvol" 2>/dev/null || true ;;
   "inspect -f {{range .Mounts}}"*)                                   # a container's bind sources: $sd/mounts.<c>
     sd="$(dirname "$DLOG")"; cat "$sd/mounts.${*: -1}" 2>/dev/null || true ;;
+  "compose config --help")                                           # NO_ENV_FLAG: a Compose without config --no-env-resolution
+    sd="$(dirname "$DLOG")"; echo "      --no-interpolate          Don't interpolate environment variables"
+    [ -f "$sd/NO_ENV_FLAG" ] || echo "      --no-env-resolution       Don't resolve service env files" ;;
+  "compose version") echo "Docker Compose version v0.0-stub" ;;
   "compose "*" config"|"compose "*" config --no-env-resolution")      # what compose renders for a project: $sd/rendered.<p>, else nothing
-    sd="$(dirname "$DLOG")"; pn="$*"; pn="${pn#*-p }"; pn="${pn%% *}"; cat "$sd/rendered.$pn" 2>/dev/null || true ;;
+    sd="$(dirname "$DLOG")"; pn="$*"; pn="${pn#*-p }"; pn="${pn%% *}"
+    if [ -f "$sd/RENDER_FAIL" ]; then echo "service \"agent\" refers to undefined volume nope: invalid compose project" >&2; echo "GH_TOKEN=${GH_TOKEN-<unset>}" >&2; exit 1; fi
+    cat "$sd/rendered.$pn" 2>/dev/null || true ;;
   "compose "*" up -d"*)   # a test can make one project's `up` fail, or move its protocol marker
     sd="$(dirname "$DLOG")"; pn="$*"; pn="${pn#*-p }"; pn="${pn%% *}"
     [ ! -f "$sd/UPFAIL.$pn" ] || exit 1
@@ -1825,6 +1831,23 @@ check "  ...password: 8 random letters/digits, mode 600, in the mode-700 .genera
 check "  ...up prints the view address, never the password" bash -c 'grep -qF "viewer: http://127.0.0.1:6080/vnc.html" <<<"$1" && ! grep -qF "$(cat "$2")" <<<"$1"' _ "$fout" "$FVP"
 pw1="$(cat "$FVP")"; fau up fetcher >/dev/null 2>&1 || true
 check "  ...kept across up" test "$(cat "$FVP")" = "$pw1"
+# the viewer's port is taken for every other project: T3_PORT, RSTUDIO_PORT and the next free T3 port all avoid it
+cp "$FR/fb/project.conf" "$T/fbconf.bak"
+sed -i "s|^T3_PORT=.*|T3_PORT=6080|" "$FR/fb/project.conf"
+refuses "up of a builder whose T3_PORT is the fetcher's FETCH_VIEW_PORT refuses" "T3_PORT=6080 .*also used by fetcher \\(FETCH_VIEW_PORT" fau up fb
+cp "$T/fbconf.bak" "$FR/fb/project.conf"; sed -i "s|^RSTUDIO=.*|RSTUDIO=1|; s|^RSTUDIO_PORT=.*|RSTUDIO_PORT=6080|" "$FR/fb/project.conf"
+refuses "up of a builder whose RSTUDIO_PORT is the fetcher's FETCH_VIEW_PORT refuses" "RSTUDIO_PORT=6080 .*also used by fetcher \\(FETCH_VIEW_PORT\\)" fau up fb
+cp "$T/fbconf.bak" "$FR/fb/project.conf"
+nt3=3773; while cat "$FR"/*/project.conf | sed -n 's/^\(T3_PORT\|RSTUDIO_PORT\)=//p' | grep -qx "$nt3"; do nt3=$((nt3+1)); done
+sed -i "s|^FETCH_VIEW_PORT=.*|FETCH_VIEW_PORT=$nt3|" "$FCFG/project.conf"; mkdir -p "$T/fzproj"
+fau init "$T/fzproj" --name fz >/dev/null 2>&1 || true
+check "init of a new builder does not hand out the fetcher's FETCH_VIEW_PORT ($nt3) as its T3_PORT" \
+  bash -c 'v=$(sed -n "s/^T3_PORT=//p" "$1"); [ -n "$v" ] && [ "$v" != "$2" ]' _ "$FR/fz/project.conf" "$nt3"
+rm -rf "$FR/fz"; sed -i "s|^FETCH_VIEW_PORT=.*|FETCH_VIEW_PORT=6080|" "$FCFG/project.conf"
+sed -i "s|^FETCH_VIEW_PORT=.*|FETCH_VIEW_PORT=01024|" "$FCFG/project.conf"
+refuses "up fetcher refuses FETCH_VIEW_PORT=01024 (a leading zero), says so" "FETCH_VIEW_PORT='01024'.*without a leading zero" fau up fetcher
+refuses "config fetcher refuses it too" "without a leading zero" fau config fetcher
+sed -i "s|^FETCH_VIEW_PORT=.*|FETCH_VIEW_PORT=6080|" "$FCFG/project.conf"
 printf 'bad pass word\n' > "$FVP"
 refuses "up fetcher refuses a malformed view-password (says how to regenerate)" 'view-password must be one line of 8 printable characters.*delete it' fau up fetcher
 rm -f "$FVP"
@@ -1937,6 +1960,18 @@ for bad in "secrets:\n  s:\n    name: fb_s\n    file: $FRR/fetcher/.generated/fe
 done
 printf 'services:\n  agent:\n    secrets:\n      - source: s1\n    env_file:\n      - path: %s/e.env\nsecrets:\n  s1:\n    file: %s/s.txt\n' "$T/fproj" "$T/fproj" > "$T/rendered.fb"
 check "up of a builder with a secret file and env_file away from the fetcher succeeds" fau up fb
+# the mount check needs `docker compose config --no-env-resolution`: probed, never skipped; Compose's own error is shown
+: > "$T/NO_ENV_FLAG"; : > "$DLOG"
+refuses "up of a builder refuses on a Docker Compose without config --no-env-resolution (names the flag and the fix)" \
+  "no-env-resolution.*does not offer that flag.*v0.0-stub.*newer Docker Compose.*never skipped" fau up fb
+check "  ...it probed with docker compose config --help and started nothing" bash -c 'grep -qxF "ARGS: compose config --help" "$1" && ! grep -q " up -d" "$1"' _ "$DLOG"
+rm -f "$T/NO_ENV_FLAG"; : > "$T/RENDER_FAIL"
+FAMB=(GH_TOKEN=ambient-secret-77)
+fmsg="$(fau up fb 2>&1)" && rc=0 || rc=$?
+FAMB=()
+check "up of a builder whose render fails shows Compose's own error lines, never an ambient project.env value" \
+  bash -c 'grep -q "^GH_TOKEN=" "$3" && [ "$1" -ne 0 ] && grep -qF "Docker Compose said:" <<<"$2" && grep -qF "refers to undefined volume nope" <<<"$2" && grep -qF "GH_TOKEN=<unset>" <<<"$2" && ! grep -q ambient-secret-77 <<<"$2"' _ "$rc" "$fmsg" "$FR/fb/project.env"
+rm -f "$T/RENDER_FAIL"
 printf 'services:\n  agent:\n    volumes:\n      - type: bind\n        source: %s\n' "$T/fproj" > "$T/rendered.fb"; : > "$DLOG"
 check "up of a builder whose rendered binds keep away from the fetcher succeeds" fau up fb
 check "  ...the render was not given the service-account token" bash -c 'grep -A2 -E "^ARGS: compose .* -p fb config --no-env-resolution$" "$1" | grep -qx "OPTOK: <unset>"' _ "$DLOG"

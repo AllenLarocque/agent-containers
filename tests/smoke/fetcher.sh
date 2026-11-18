@@ -80,7 +80,7 @@ check "production dependencies only: no test files, no dev tooling" bash -c '
 check "Chromium for exactly the pinned Playwright revision" bash -c '
   rev=$(jq -r ".browsers[] | select(.name == \"chromium\") | .revision" /opt/fetcher/node_modules/playwright-core/browsers.json)
   echo "revision $rev"; [ -x "$PLAYWRIGHT_BROWSERS_PATH/chromium-$rev/chrome-linux64/chrome" ]'
-check "Xvfb, x11vnc, noVNC, websockify present" bash -c 'command -v Xvfb && command -v x11vnc && command -v websockify && test -f /usr/share/novnc/vnc.html'
+check "Xvfb, x11vnc, noVNC, websockify present" bash -c 'command -v Xvfb && command -v x11vnc && command -v websockify && test -f /usr/share/novnc/vnc.html && test -f /opt/fetcher/novnc/vnc.html && test -f /opt/fetcher/novnc/index.html'
 # (Playwright's library under node_modules contains the string: it is what chromiumSandbox: false adds.)
 check "no --no-sandbox or test sandbox switch in the engine, entry point, fetcherctl or fetcher-view" \
   bash -c '! grep -rIl -e "--no-sandbox" -e FETCHER_TEST_SANDBOX -e "chromiumSandbox: *false" /opt/fetcher --exclude-dir=node_modules "$1" "$(command -v fetcherctl)" "$(command -v fetcher-view)"' _ "$EP"

@@ -17,6 +17,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       xvfb x11vnc novnc websockify \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# noVNC for the owner's view, served from a copy in which every folder has an index.html redirecting to /vnc.html, so
+# websockify (0.10: no --file-only) never serves a directory listing.
+RUN cp -rL /usr/share/novnc /opt/fetcher-novnc-tmp \
+    && find /opt/fetcher-novnc-tmp -type d ! -exec test -e '{}/index.html' ';' \
+         -exec sh -c 'printf "%s\n" "<!doctype html><meta http-equiv=\"refresh\" content=\"0; url=/vnc.html\">" > "$1/index.html"' _ '{}' ';' \
+    && mkdir -p /opt/fetcher && mv /opt/fetcher-novnc-tmp /opt/fetcher/novnc && chmod -R a+rX,go-w /opt/fetcher/novnc
+
 # The engine's dependencies: exactly the committed lockfile (integrity-checked by npm), production only,
 # no install scripts. The Playwright version pinned in package.json is the only version.
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright

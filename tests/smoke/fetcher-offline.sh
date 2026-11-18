@@ -101,6 +101,15 @@ check "viewer: the VNC server requires its password (security types offered: 2 o
     else if (sent && buf.length >= 1 && buf.length >= 1 + buf[0]) {
       const types = [...buf.subarray(1, 1 + buf[0])]; done(types.length > 0 && types.every((t) => t === 2), "security types: " + types.join(",")); } });
   s.on("error", (e) => done(false, String(e))); setTimeout(() => done(false, "timeout"), 5000);'
+check "viewer: x11vnc runs with -localhost -noremote -novncconnect -noclipboard -nosel and a password file, never -nopw" bash -c '
+  c=$(tr "\0" " " < "/proc/$(pgrep -x x11vnc | head -n1)/cmdline"); echo "$c"
+  for o in -localhost -noremote -novncconnect -noclipboard -nosel; do grep -qE -- "(^| )$o( |$)" <<<"$c" || exit 1; done
+  grep -qE -- " -(passwdfile|rfbauth) " <<<"$c" && ! grep -qE -- "(^| )-nopw( |$)" <<<"$c"'
+check "viewer: x11vnc does not answer remote-control queries over the display (x11vnc -Q ping)" bash -c '
+  out=$(timeout 15 x11vnc -display :99 -Q ping 2>/dev/null); echo "answer: [$out]"; ! grep -q "ans=ping" <<<"$out"'
+check "viewer: no directory listings (/ and /app/ redirect to vnc.html); /vnc.html answers" bash -c '
+  for u in / /app/ /core/; do b=$(curl -fsS -m 5 "http://127.0.0.1:3773$u") || exit 1; ! grep -qi "directory listing" <<<"$b" && grep -q "url=/vnc.html" <<<"$b" || { echo "$u: $b" | head -n 3; exit 1; }; done
+  curl -fsS -m 5 http://127.0.0.1:3773/vnc.html | grep -qi "<title>noVNC"'
 check "viewer: the password is in no log and on no command line" bash -c '
   ! grep -rq "Ab3dE6g[H]" /tmp/fetcher-view "$1/view.log" && ! grep -qa "Ab3dE6g[H]" /proc/[0-9]*/cmdline' _ "$w"
 pkill -x x11vnc; pkill -f "[w]ebsockify"; sleep 1

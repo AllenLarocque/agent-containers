@@ -171,12 +171,12 @@ test('ownerTarget: from the run only; check by host; login needs the prefix and 
   r.results.set('10.5555/a', { status: 'skipped:host-challenged', host: 'x.org', hop: 'x.org' });
   r.results.set('10.5555/b', { status: 'needs-owner:check', host: 'p.org', hop: 'p.org', checkHost: 'cdn.org' });
   r.results.set('10.5555/c', { status: 'needs-owner:login', host: 'q.org', landingUrl: 'https://q.org/article/c' });
-  assert.deepEqual(ownerTarget({ kind: 'check', host: 'cdn.org' }, r, cfg), { url: 'https://doi.org/10.5555/b', what: 'check cdn.org' });
+  assert.deepEqual(ownerTarget({ kind: 'check', host: 'cdn.org' }, r, cfg), { url: 'https://doi.org/10.5555/b', what: 'check cdn.org', expect: 'cdn.org' });
   assert.deepEqual(ownerTarget({ kind: 'check', host: 'x.org' }, r, cfg), { reply: 'nothing-waiting check x.org' });
   assert.deepEqual(ownerTarget({ kind: 'login' }, r, cfg), { reply: 'no-prefix login' });
   const pfx = 'https://go.openathens.net/redirector/u?url=';
   assert.deepEqual(ownerTarget({ kind: 'login' }, r, { ...cfg, libraryPrefix: pfx }),
-    { url: `${pfx}${encodeURIComponent('https://q.org/article/c')}`, what: 'login' });
+    { url: `${pfx}${encodeURIComponent('https://q.org/article/c')}`, what: 'login', publisher: 'q.org' });
   r.results.get('10.5555/c').landingUrl = 'javascript:alert(1)';
   assert.deepEqual(ownerTarget({ kind: 'login' }, r, { ...cfg, libraryPrefix: pfx }), { reply: 'nothing-waiting login' });
 });
@@ -279,7 +279,7 @@ test('library login page: prefix + the landing URL of the first login-waiting pa
   await go(r);
   const res = await c.done;
   assert.equal(res.code, 0, res.err);
-  assert.match(res.out, /opened the library sign-in .*Check the address bar.*retry login/);
+  assert.match(res.out, /opened the library sign-in .*Check the address bar.*agent-up fetch retry login/);
   const lib = since(fx, mark).filter((e) => e.host === H.Y);
   assert.equal(lib.length, 1);
   assert.equal(new URL(lib[0].path, 'http://x').searchParams.get('url'), `${fx.base(H.P)}/article/paywall2`);
@@ -336,4 +336,67 @@ test('check on hosts A and B; owner passes A; retry A saves A\'s papers, B\'s st
   } finally {
     await fx2.close();
   }
+});
+
+// ---------------- where an owner page lands is checked before it is left open ----------------
+// The run is built by hand (as attempt() would leave it), so each landing case is exact.
+async function openWith(results, req, extraCfg = {}) {
+  const { d, go, logs } = env(extraCfg);
+  const r = newRun();
+  for (const [doi, v] of results) r.results.set(doi, v);
+  const c = ctl(req, d, { waitMs: 15000, now: () => Date.now(), configPath: (() => {
+    const f = path.join(d.base, 'fetcher.conf'); fs.writeFileSync(f, 'LIBRARY_PREFIX=https://go.openathens.net/redirector/uni.example?url=\n'); return f; })() });
+  await go(r);
+  return { d, logs, res: await c.done, url: visible() };
+}
+
+test('login: the library link lands on the login host -> left open, paused', async () => {
+  const { d, res } = await openWith([['10.5555/paywall2', { status: 'needs-owner:login', host: H.P, hop: H.P,
+    landingUrl: `${fx.base(H.P)}/article/paywall2` }]], ['login'], { libraryPrefix: fx.libraryPrefix });
+  assert.equal(res.code, 0, res.err);
+  assert.equal(new URL(visible()).hostname, H.L);
+  assert.equal(read(d, 'reply'), 'opened login\n');
+  assert.equal(pauseState(d.control, Date.now()), 'paused');
+});
+
+test('login: the library link lands on another host (a look-alike) -> tab blanked, not-a-login-page, no pause', async () => {
+  const { d, res, logs } = await openWith([['10.5555/good1', { status: 'needs-owner:login', host: H.P, hop: H.P,
+    landingUrl: `${fx.base(H.X)}/article/good1` }]], ['login'], { libraryPrefix: fx.libraryPrefix });
+  assert.equal(res.code, 1);
+  assert.match(res.err, /did not land on a library sign-in page .*nothing left open/);
+  assert.ok(!res.err.includes('http') && !res.err.includes(H.X), res.err);
+  assert.equal(visible(), 'about:blank');
+  assert.equal(read(d, 'reply'), 'not-a-login-page login\n');
+  assert.equal(fs.existsSync(path.join(d.control, 'pause')), false);
+  assert.ok(logs.includes('owner page not left open: not-a-login-page login'), logs.join('\n'));
+});
+
+test('login: straight through to the paper\'s publisher -> already-signed-in, tab blanked, told to retry login', async () => {
+  const { d, res } = await openWith([['10.5555/paywall', { status: 'needs-owner:login', host: H.P, hop: H.P,
+    landingUrl: `${fx.base(H.P)}/article/paywall` }]], ['login'], { libraryPrefix: fx.libraryPrefix });
+  assert.equal(res.code, 0, res.err);
+  assert.match(res.out, /already signed in.*agent-up fetch retry login/);
+  assert.equal(visible(), 'about:blank');
+  assert.equal(read(d, 'reply'), 'already-signed-in login\n');
+  assert.equal(fs.existsSync(path.join(d.control, 'pause')), false);
+});
+
+test('check <host>: the landing page is on another host -> tab blanked, wrong-host, no pause', async () => {
+  // good1 resolves to the publisher 127.0.0.2, but the run says it waits on a check at 127.0.0.6
+  const { d, res } = await openWith([['10.5555/good1', { status: 'needs-owner:check', host: H.X, hop: H.X, checkHost: H.X }]],
+    ['check', H.X]);
+  assert.equal(res.code, 1);
+  assert.match(res.err, new RegExp(`did not land on ${H.X.replaceAll('.', '\\.')} .*nothing left open`));
+  assert.equal(visible(), 'about:blank');
+  assert.equal(read(d, 'reply'), `wrong-host check ${H.X}\n`);
+  assert.equal(fs.existsSync(path.join(d.control, 'pause')), false);
+});
+
+test('check <host>: a host that no longer challenges shows its landing page on <host> -> left open', async () => {
+  const { d, res } = await openWith([['10.5555/good2', { status: 'needs-owner:check', host: H.P, hop: H.P, checkHost: H.P }]],
+    ['check', H.P]);
+  assert.equal(res.code, 0, res.err);
+  assert.equal(visible(), `${fx.base(H.P)}/article/good2`);
+  assert.equal(read(d, 'reply'), `opened check ${H.P}\n`);
+  assert.equal(pauseState(d.control, Date.now()), 'paused');
 });
