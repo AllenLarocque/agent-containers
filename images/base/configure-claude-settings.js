@@ -59,8 +59,10 @@ json.permissions = Object.assign({}, json.permissions, { defaultMode: 'bypassPer
 // Paper discovery: the paper-search MCP server (images/research/paper-tools/python.txt), registered
 // for the research container only (the one whose profile file says PROFILE=research). Its Sci-Hub
 // tools are denied by name in every container (owner decision: no shadow libraries; use_scihub is never
-// set). tests/smoke/research-offline.sh fails if any tool the server serves that mentions Sci-Hub is
-// missing from this list, so a version bump that adds or renames one cannot slip through.
+// set). The research image also ships this list as root-owned Claude managed settings
+// (images/research/claude-managed-settings.json). tests/smoke/research-offline.sh fails if the two
+// lists differ, or if any tool the server serves that mentions Sci-Hub is missing from either, so a
+// version bump that adds or renames one cannot slip through.
 const PAPER_SEARCH = '/opt/paper-tools/venv/bin/paper-search-mcp';
 const PAPER_SEARCH_DENY = ['download_scihub', 'download_with_fallback'].map((t) => `mcp__paper-search__${t}`);
 const profileFile = process.env.AGENT_PROFILE_FILE || '/etc/firewall/profile';  // override: smoke tests only

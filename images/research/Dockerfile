@@ -19,4 +19,10 @@ RUN /opt/paper-tools/src/install.sh /opt/paper-tools/src
 # install-grobid.sh appends to the MANIFEST that install.sh writes, so it runs after it.
 ARG GROBID_IMAGE
 RUN /opt/paper-tools/src/install-grobid.sh "$GROBID_IMAGE"
+# Claude Code managed settings (Linux path; no user or project setting overrides them): deny the
+# paper-search Sci-Hub tools, the same list images/base/configure-claude-settings.js writes (the
+# offline smoke checks both). Root-owned, so the agent cannot edit it or add a managed-settings.d
+# drop-in; agent-up bind-mounts /etc/claude-code/CLAUDE.md beside it.
+COPY claude-managed-settings.json /etc/claude-code/managed-settings.json
+RUN chown -R root:root /etc/claude-code && chmod 0755 /etc/claude-code && chmod 0644 /etc/claude-code/managed-settings.json
 USER agent

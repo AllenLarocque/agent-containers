@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "deny": [
+      "mcp__paper-search__download_scihub",
+      "mcp__paper-search__download_with_fallback"
+    ]
+  }
+}

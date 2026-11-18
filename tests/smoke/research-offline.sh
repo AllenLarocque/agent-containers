@@ -204,16 +204,35 @@ paper_search_registered_research() {  # the registered server starts offline and
   [ "$n" -ge 30 ] && jq -e 'map(.name) | index("search_arxiv") and index("download_arxiv")' "$pc/tools.json" >/dev/null
 }
 # Keyed on behaviour, not on one name (Review Focus 1): EVERY served tool whose definition (name,
-# description or parameters) mentions Sci-Hub must be denied to Claude by name.
-scihub_tools_denied() {
+# description or parameters) mentions Sci-Hub must be denied to Claude by name, in <settings file>.
+# These checks read the settings only: whether Claude refuses a denied MCP call under bypassPermissions
+# needs a signed-in session, so it is checked with the owner after merge (plan acceptance list).
+denies_scihub_tools() {  # denies_scihub_tools <settings file>
   local t found=0
   while IFS= read -r t; do
     found=1; echo "Sci-Hub tool: $t"
-    jq -e --arg r "mcp__paper-search__$t" '.permissions.deny // [] | index($r)' "$pc/r/settings.json" >/dev/null \
-      || { echo "NOT denied: mcp__paper-search__$t"; return 1; }
+    jq -e --arg r "mcp__paper-search__$t" '.permissions.deny // [] | index($r)' "$1" >/dev/null \
+      || { echo "NOT denied in $1: mcp__paper-search__$t"; return 1; }
   done < <(jq -r '.[] | select(tostring | test("sci.?hub"; "i")) | .name' "$pc/tools.json")
   # None found means the enumeration broke, or upstream dropped Sci-Hub (then update this check).
   [ "$found" -eq 1 ]
+}
+scihub_tools_denied() { denies_scihub_tools "$pc/r/settings.json"; }
+# The same denial in Claude Code's managed settings, which no user setting overrides; the image ships it
+# root-owned so the agent cannot edit it, nor add a drop-in beside it. Its paper-search deny list must
+# equal the one configure-claude-settings.js writes.
+MS=/etc/claude-code/managed-settings.json
+managed_settings_deny() {
+  [ -f "$MS" ] || { echo "no $MS"; return 1; }
+  [ "$(stat -c %U:%a "$MS")" = root:644 ] || { echo "$MS is $(stat -c %U:%a "$MS"), want root:644"; return 1; }
+  [ "$(stat -c %U /etc/claude-code)" = root ] && [ ! -w /etc/claude-code ] || { echo "/etc/claude-code writable by $(id -un)"; return 1; }
+  [ ! -w "$MS" ] || { echo "$MS writable by $(id -un)"; return 1; }
+  jq -e . "$MS" >/dev/null || { echo "$MS does not parse"; return 1; }
+  denies_scihub_tools "$MS" || return 1
+  local a b
+  a=$(jq -r '.permissions.deny[] | select(startswith("mcp__paper-search__"))' "$MS" | sort)
+  b=$(jq -r '.permissions.deny[] | select(startswith("mcp__paper-search__"))' "$pc/r/settings.json" | sort)
+  [ "$a" = "$b" ] || { echo "managed: $a"; echo "settings: $b"; return 1; }
 }
 scihub_not_enabled() {  # nothing switches Sci-Hub on: not the environment, the registration or an allow rule
   if grep -Eiq 'sci.?hub' <<< "$(env)"; then echo "environment mentions Sci-Hub"; return 1; fi
@@ -222,7 +241,8 @@ scihub_not_enabled() {  # nothing switches Sci-Hub on: not the environment, the 
     || { echo "an allow rule names the server or Sci-Hub"; return 1; }
 }
 contact_email_passed() {  # Unpaywall gets RESEARCH_CONTACT_EMAIL when set; unset, the server still starts (Review Focus 2)
-  grep -q UNPAYWALL "$pc/r.err" || { echo "unset: no Unpaywall warning on stderr"; return 1; }
+  (unset RESEARCH_CONTACT_EMAIL; list_tools "$pc/r" "$pc/u.err") >/dev/null || { tail -n 20 "$pc/u.err"; return 1; }
+  grep -q UNPAYWALL "$pc/u.err" || { echo "unset: no Unpaywall warning on stderr"; return 1; }
   RESEARCH_CONTACT_EMAIL=papers+research@relay.example list_tools "$pc/r" "$pc/e.err" >/dev/null || { tail -n 20 "$pc/e.err"; return 1; }
   if grep -q UNPAYWALL "$pc/e.err"; then echo "set: the server still says the Unpaywall email is missing"; return 1; fi
 }
@@ -262,6 +282,7 @@ check "grobid stop"                                 grobid_stop
 check "paper-search-mcp installed (import + entry point)"           paper_search_installed
 check "paper-search registered for research, starts offline"        paper_search_registered_research
 check "every tool that mentions Sci-Hub is denied"                  scihub_tools_denied
+check "managed settings: root-owned, deny every Sci-Hub tool, same list" managed_settings_deny
 check "nothing enables Sci-Hub"                                     scihub_not_enabled
 check "RESEARCH_CONTACT_EMAIL reaches Unpaywall; unset still starts" contact_email_passed
 check "paper-search NOT registered for builders"                    paper_search_not_builder
