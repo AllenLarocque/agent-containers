@@ -7,8 +7,14 @@ import path from 'node:path';
 import { writeFileInside } from './safe-write.mjs';
 
 export const DEFAULT_CAPS = Object.freeze({
-  gapMs: 25000, hostGapMs: 60000, perHost: 30, perDay: 100, libraryPerDay: 20, resolverPerDay: 300,
+  gapMs: 90000, hostGapMs: 300000, perHost: 10, perDay: 100, libraryPerDay: 20, resolverPerDay: 300,
 });
+
+// The gap between two visits applies to a publisher's whole site, not one host name: its hosts
+// (onlinelibrary.example.com, journals.onlinelibrary.example.com) sit behind one front door.
+// The last two labels stand in for the site; where that is too broad (co.uk) the fetcher is
+// only slower.
+export const siteOf = (host) => String(host).split('.').slice(-2).join('.');
 
 const day = (ms) => new Date(ms).toISOString().slice(0, 10);
 const count = (v) => Number.isSafeInteger(v) && v >= 0;
@@ -99,8 +105,10 @@ export class Pacer {
     // A stored time in the future (bad clock, bad file) counts as now, and no wait ever
     // exceeds its gap.
     const left = (last, gap) => (last === undefined ? 0 : Math.min(gap, Math.max(0, gap - (now - Math.min(last, now)))));
-    return Math.max(left(this.state.lastAny || undefined, this.caps.gapMs),
-                    left(this.state.lastHost.get(host), this.caps.hostGapMs));
+    const site = siteOf(host);
+    let last;
+    for (const [h, t] of this.state.lastHost) if (siteOf(h) === site && (last === undefined || t > last)) last = t;
+    return Math.max(left(this.state.lastAny || undefined, this.caps.gapMs), left(last, this.caps.hostGapMs));
   }
 
   // Resolver lookups (doi.org) are paced on their own terms: a per-day cap of their own

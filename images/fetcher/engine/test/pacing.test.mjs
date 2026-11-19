@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Pacer } from '../lib/pacing.mjs';
+import { Pacer, siteOf } from '../lib/pacing.mjs';
 
 const DAY = 86400000;
 const T0 = Date.UTC(2026, 10, 16, 12, 0, 0);
@@ -21,9 +21,9 @@ test('fresh pacer allows everything and waits nothing', () => {
   assert.equal(p.waitMs('a.com'), 0);
 });
 
-test('30 on one host -> host-cap; other host still fine', () => {
+test('10 on one host -> host-cap; other host still fine', () => {
   const { p, clock } = setup();
-  for (let i = 0; i < 30; i++) { p.record('a.com', false); clock.t += 1000; }
+  for (let i = 0; i < 10; i++) { p.record('a.com', false); clock.t += 1000; }
   assert.equal(p.check('a.com', false), 'skipped:host-cap');
   assert.equal(p.check('b.com', false), null);
 });
@@ -43,7 +43,7 @@ test('20 library-routed -> library-cap only for library papers', () => {
 
 test('next UTC day resets the counts', () => {
   const { p, clock } = setup();
-  for (let i = 0; i < 30; i++) p.record('a.com', true);
+  for (let i = 0; i < 10; i++) p.record('a.com', true);
   for (let i = 0; i < 70; i++) p.record(`h${i}.com`, false);
   assert.equal(p.check('a.com', false), 'skipped:host-cap');
   clock.t = Date.UTC(2026, 10, 17, 0, 0, 0);
@@ -55,32 +55,32 @@ test('next UTC day resets the counts', () => {
 test('the day rolls at UTC midnight, not 24 h after the first record', () => {
   const { p, clock } = setup();
   clock.t = Date.UTC(2026, 10, 16, 23, 59, 59);
-  for (let i = 0; i < 30; i++) p.record('a.com', false);
+  for (let i = 0; i < 10; i++) p.record('a.com', false);
   assert.equal(p.check('a.com', false), 'skipped:host-cap');
   clock.t += 1000;
   assert.equal(p.check('a.com', false), null);
 });
 
-test('waitMs: 60 s on the same host, 25 s for another, counting down', () => {
+test('waitMs: 5 min on the same host, 90 s for another, counting down', () => {
   const { p, clock } = setup();
   p.record('a.com', false);
-  assert.equal(p.waitMs('a.com'), 60000);
-  assert.equal(p.waitMs('b.com'), 25000);
+  assert.equal(p.waitMs('a.com'), 300000);
+  assert.equal(p.waitMs('b.com'), 90000);
   clock.t += 10000;
-  assert.equal(p.waitMs('a.com'), 50000);
-  assert.equal(p.waitMs('b.com'), 15000);
-  clock.t += 100000;
+  assert.equal(p.waitMs('a.com'), 290000);
+  assert.equal(p.waitMs('b.com'), 80000);
+  clock.t += 300000;
   assert.equal(p.waitMs('a.com'), 0);
 });
 
 test('state persists across a new Pacer, including recent timing', () => {
   const { p, make, clock } = setup();
-  for (let i = 0; i < 30; i++) p.record('a.com', true);
+  for (let i = 0; i < 10; i++) p.record('a.com', true);
   const q = make();
   assert.equal(q.check('a.com', false), 'skipped:host-cap');
-  assert.equal(q.waitMs('a.com'), 60000);
+  assert.equal(q.waitMs('a.com'), 300000);
   clock.t += 5000;
-  assert.equal(q.waitMs('b.com'), 20000);
+  assert.equal(q.waitMs('b.com'), 85000);
 });
 
 test('garbage or malformed state starts at zero and is rewritten', () => {
@@ -95,7 +95,7 @@ test('garbage or malformed state starts at zero and is rewritten', () => {
     assert.equal(q.waitMs('a.com'), 0);
     q.record('a.com', false);
     assert.doesNotThrow(() => JSON.parse(fs.readFileSync(statePath, 'utf8')));
-    assert.equal(make().waitMs('a.com'), 60000);
+    assert.equal(make().waitMs('a.com'), 300000);
   }
 });
 
@@ -131,17 +131,17 @@ test('a stored lastAny far in the future never stalls beyond the gap', () => {
   fs.writeFileSync(statePath, JSON.stringify({ date: '2026-11-16', total: 1, library: 0, hosts: { 'a.com': 1 },
     lastAny: future, lastHost: { 'a.com': future } }));
   const q = make();
-  assert.ok(q.waitMs('a.com') <= 60000);
-  assert.ok(q.waitMs('b.com') <= 25000);
+  assert.ok(q.waitMs('a.com') <= 300000);
+  assert.ok(q.waitMs('b.com') <= 90000);
 });
 
 test('clock stepping back across UTC midnight keeps the day\'s counts', () => {
   const { p, clock } = setup();
   clock.t = Date.UTC(2026, 10, 17, 0, 0, 10);
-  for (let i = 0; i < 30; i++) p.record('a.com', false);
+  for (let i = 0; i < 10; i++) p.record('a.com', false);
   clock.t = Date.UTC(2026, 10, 16, 23, 59, 50);
   assert.equal(p.check('a.com', false), 'skipped:host-cap');
-  assert.ok(p.waitMs('a.com') <= 60000);
+  assert.ok(p.waitMs('a.com') <= 300000);
   clock.t = Date.UTC(2026, 10, 17, 0, 1, 0);
   assert.equal(p.check('a.com', false), 'skipped:host-cap');
   clock.t = Date.UTC(2026, 10, 18, 0, 0, 1);
@@ -210,4 +210,26 @@ test('hostCap/recordHost: a landing host counts toward its own per-host cap and 
   assert.equal(p.state.total, 0);
   assert.ok(p.waitMs('land.org') > 0);
   assert.equal(make().hostCap('land.org'), 'skipped:host-cap', 'persisted');
+});
+
+// ---- slower, site-wide pacing (2026-11-18) ----
+test('the host gap covers a publisher\'s whole site, not one host name', () => {
+  const { p, clock } = setup();
+  p.record('onlinelibrary.wiley.example', false);
+  assert.equal(siteOf('besjournals.onlinelibrary.wiley.example'), 'wiley.example');
+  assert.equal(p.waitMs('besjournals.onlinelibrary.wiley.example'), 300000);
+  assert.equal(p.waitMs('wiley.example'), 300000);
+  assert.equal(p.waitMs('notwiley.example'), 90000);
+  clock.t += 100000;
+  p.recordHost('nph.onlinelibrary.wiley.example');           // a later hop on the same site restarts the gap
+  assert.equal(p.waitMs('onlinelibrary.wiley.example'), 300000);
+  clock.t += 300000;
+  assert.equal(p.waitMs('besjournals.onlinelibrary.wiley.example'), 0);
+});
+
+test('the per-host daily cap still counts each host name on its own', () => {
+  const { p, clock } = setup();
+  for (let i = 0; i < 10; i++) { p.record('a.pub.example', false); clock.t += 1000; }
+  assert.equal(p.check('a.pub.example', false), 'skipped:host-cap');
+  assert.equal(p.check('b.pub.example', false), null);
 });

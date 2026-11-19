@@ -64,9 +64,9 @@ const within = (p, ms) => {
     .finally(() => clearTimeout(timer));
 };
 
-// Make Chromium download PDFs instead of opening its viewer, keeping any other prefs the
+// Make Chromium download PDFs instead of opening its viewer and never keep typed passwords, keeping any other prefs the
 // persistent profile already has. The profile volume is the fetcher's own.
-function setPdfPref(profileDir) {
+function setPrefs(profileDir) {
   const p = path.join(profileDir, 'Default', 'Preferences');
   fs.mkdirSync(path.dirname(p), { recursive: true });
   let prefs = {};
@@ -74,6 +74,11 @@ function setPdfPref(profileDir) {
   if (prefs === null || typeof prefs !== 'object' || Array.isArray(prefs)) prefs = {};
   prefs.plugins = { ...(prefs.plugins ?? {}), always_open_pdf_externally: true };
   prefs.download = { ...(prefs.download ?? {}), prompt_for_download: false };
+  // Nothing the owner types (the library password) is ever offered for saving or kept for autofill.
+  prefs.credentials_enable_service = false;
+  prefs.credentials_enable_autosignin = false;
+  prefs.profile = { ...(prefs.profile ?? {}), password_manager_enabled: false, password_manager_leak_detection: false };
+  prefs.autofill = { ...(prefs.autofill ?? {}), enabled: false, profile_enabled: false, credit_card_enabled: false };
   fs.writeFileSync(p, JSON.stringify(prefs));
 }
 
@@ -121,7 +126,7 @@ export class Browser {
   forbidden(url) { return forbiddenUrl(url, this.allow); }
 
   async launch() {
-    setPdfPref(this.profileDir);
+    setPrefs(this.profileDir);
     fs.mkdirSync(this.downloadDir, { recursive: true });
     const ctx = await chromium.launchPersistentContext(this.profileDir, {
       headless: false,
@@ -130,7 +135,12 @@ export class Browser {
       downloadsPath: this.downloadDir,
       viewport: { width: 1280, height: 900 },
       serviceWorkers: 'block',
-      args: ['--window-position=0,0'],
+      // The owner's decision (2026-11-18): the browser does not announce that a program drives it,
+      // so a check the owner ticks in the view can pass. The engine itself still never touches a
+      // check. Without --enable-automation Chromium would offer to save what the owner types, so
+      // that is switched off in the profile (setPrefs).
+      ignoreDefaultArgs: ['--enable-automation'],
+      args: ['--window-position=0,0', '--disable-blink-features=AutomationControlled'],
     });
     this.ctx = ctx;
     this.mode = { kind: 'idle' };
