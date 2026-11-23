@@ -11,7 +11,9 @@ GitHub UI paths below are as of 2026-11 and may move; if a label differs, look f
 2. It makes one change on that branch and opens a pull request into `allen-dev`. Where the repo has checks, it waits for them to pass.
 3. It **squash-merges** the PR itself. (Squash turns the branch's commits into one commit on `allen-dev`, so the history stays short.) GitHub deletes the branch at merge time.
 4. It never commits to `allen-dev` directly and never rewrites its history. You may commit to `allen-dev` directly.
-5. If a repo has no `allen-dev`, the agent pushes its branch, opens the PR against the default branch and waits for you.
+5. If a repo has no `allen-dev`: on a repo that is not a fork, the agent pushes its branch, opens the PR against the default branch and waits for you; on a fork, it stops and asks you.
+6. If a push or a merge is refused by a repository rule, the agent stops and tells you. It does not try another route.
+7. Every `gh pr` command the agent runs names the repo (`--repo <owner>/<repo>`, the repo of `origin`), so a PR never lands on upstream or on another repo by accident.
 
 What you see: a stream of small, merged PRs into `allen-dev`, and a default branch that has not moved.
 
@@ -34,7 +36,7 @@ A **fork** is your copy of someone else's repo. The original is **upstream**. On
 
 ### Sending a change upstream
 
-Each upstream PR comes from its own `upstream/<topic>` branch on your fork. The agent cuts it from the mirror and puts in only the commits for that one change. If changes are too entangled to separate, the agent sends a snapshot cut from `allen-dev` instead. `allen-dev` itself is never the source of an upstream PR, because it keeps moving.
+Each upstream PR comes from its own `upstream/<topic>` branch on your fork. The agent cuts it from the mirror of upstream's target branch (for example `origin/development`), never from `allen-dev`, and puts in only the commits for that one change. The branch is never merged in your fork. If changes are too entangled to separate, the agent stops and tells you; sending a snapshot cut from `allen-dev` instead is your decision. `allen-dev` itself is never the source of an upstream PR, because it keeps moving.
 
 1. Ask the agent to prepare the change for upstream.
 2. It pushes `upstream/<topic>` and gives you a link to GitHub's compare page on the upstream repo, with the title and description already filled in. The link looks like `https://github.com/<upstream-owner>/<repo>/compare/<base>...<you>:<branch>?expand=1&title=...&body=...`.
@@ -50,13 +52,13 @@ Do this when you want upstream's new work in your line.
 
 1. Update the mirror: on your fork's page, **Sync fork → Update branch**.
 2. Ask the agent to bring the mirror into `allen-dev`. It pushes a branch `sync/<date-or-topic>` that merges the mirror into `allen-dev`, and opens a PR from it into `allen-dev`.
-3. Check the PR page for conflicts and for green checks, then let the agent squash-merge it, or merge it yourself.
+3. Check the PR page for conflicts and for green checks, then let the agent merge it, or merge it yourself. A sync PR is merged with a **merge commit**, never squashed, so upstream's own commits stay recognisable in `allen-dev`'s history and the next sync merges cleanly.
 
-You see the upstream changes appear on `allen-dev` as one commit, and the `sync/` branch disappear.
+You see the upstream commits appear on `allen-dev` under one merge commit, and the `sync/` branch disappear.
 
 ## Deleting branches
 
 - A branch merged into `allen-dev` is deleted by GitHub at merge time (the repo setting "Automatically delete head branches").
 - An `upstream/` branch is kept until upstream merges or closes the PR made from it. The fork check lists the ones that can go.
-- `allen-dev` and the mirrors are never deleted.
+- The mirrors are fenced, so the agent cannot delete them.
 - The agent decides by the PR's state, not by `git branch --merged` (after a squash, git reports the branch as unmerged). It never deletes a branch whose PR is not merged without asking you.

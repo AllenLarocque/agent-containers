@@ -190,7 +190,7 @@ Without `--migrate`, a `protect-fork` in the old shape is reported (`warn` namin
 2. `expect_refusal "branch outside the free names"` on `git push origin HEAD:refs/heads/verify-fence-not-free`.
 3. `expect_refusal "create a tag"` on `git push origin HEAD:refs/tags/verify-fence-tag`.
 4. Push the same commit as `chore/verify-fence` (must succeed), open a PR into `$def`, and `expect_refusal "merge a PR into $def"` on `gh pr merge --squash`; then close that PR.
-5. When `allen-dev` exists on the remote: a second empty commit on `origin/allen-dev` pushed as `chore/verify-fence-dev`, a PR into `allen-dev`, wait for checks with today's retry loop, `gh pr merge --squash --delete-branch` must succeed. A direct push to `allen-dev` is not tested: no rule forbids it; only the agent's instructions do. When `allen-dev` is missing: `say` that the working-branch check was skipped.
+5. When `allen-dev` exists on the remote: a second empty commit on `origin/allen-dev` pushed as `chore/verify-fence-dev`, a PR into `allen-dev`, wait for checks with today's retry loop, `gh pr merge --squash --delete-branch` must succeed. A direct push to `allen-dev` is not part of verify. When `allen-dev` is missing: `say` that the working-branch check was skipped.
 6. Delete `chore/verify-fence` on the remote. End with `say "FENCE VERIFIED on $VTARGET"`.
 
 Refusal pattern for steps 1 to 4: `GH013|repository rule|rule violations|protected`. Step 4's exact GitHub wording is not known; the first live run (rollout, not this plan) records it.

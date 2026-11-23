@@ -64,7 +64,8 @@ mirror:
   on it.
 - Work goes upstream as small PRs, each from an `upstream/<topic>` branch on the fork: cut from
   the mirror, carrying only the commits for one change. When changes are too entangled to
-  separate, a snapshot cut from `allen-dev` is sent instead. `allen-dev` itself is never the head
+  separate, the agent stops and asks; the owner may send a snapshot cut from `allen-dev` instead.
+  `allen-dev` itself is never the head
   of an upstream PR, because it keeps moving.
 - **The agent drafts, the owner sends.** When asked, the agent pushes the `upstream/<topic>` branch
   and gives the owner a link to GitHub's compare page on the upstream repo with the title and
@@ -98,8 +99,11 @@ and refuses a repo with no commits. `--no-working-branch` skips it.
 - The admin role is repository role id 5. The machine user is a collaborator with Write, never an
   admin, so the bypass never applies to it; the owner is the only admin.
 - Merging a PR is an update of the target branch, so the fence also stops the agent merging into
-  any fenced branch, the default branch included. **This must be proven by `agent-new verify` on
-  a real repo before any `protect-main` is removed.**
+  any fenced branch, the default branch included. The owner runs `agent-new verify` before
+  retiring a main gate.
+- `agent-new protect` sets up only repositories the signed-in owner owns and administers, and
+  refuses a repository whose default branch is `allen-dev` or starts with a free prefix (that
+  branch would be outside the fence).
 - These are the same two rulesets the owner made by hand as `protect-fork` and
   `protect-fork-tags`, with a wider `exclude` list and a name that says what they do.
 
@@ -109,7 +113,7 @@ and refuses a repo with no commits. `--no-working-branch` skips it.
   (`delete_branch_on_merge`), so a branch merged into `allen-dev` is deleted at merge time.
 - An `upstream/` branch is kept until upstream merges or closes its PR. The fork check lists the
   ones that can go.
-- `allen-dev` and the mirrors are never deleted; the fence stops the agent.
+- The mirrors are fenced, so the agent cannot delete them.
 - The agent decides by the PR's state, never by `git branch --merged` (after a squash git reports
   the branch as unmerged), and never deletes a branch whose PR is not merged without asking.
 
@@ -119,27 +123,32 @@ and refuses a repo with no commits. `--no-working-branch` skips it.
   repos, where it mostly requires a `gitleaks` check those repos have no workflow for. It **stays
   where `--main-gate` is given** (`agent-containers`: `agent-new protect --main-gate`), because a merge to `main` there publishes the images every project
   runs.
-- **`CODEOWNERS`**: it only decides whose approval counts under `protect-main`. `agent-new` does
-  not add it. The project template (`project-template/repo/.github/CODEOWNERS`) still ships it and
-  `agent-up init` still copies it into a project, and existing files are left in place.
-- **A ruleset on the working branch**: none. That the agent uses small squashed PRs is asked for
-  in its instructions, not enforced.
+- **`CODEOWNERS`**: it only decides whose approval counts under `protect-main`. `agent-new protect`
+  does not add it. The project template (`project-template/repo/.github/CODEOWNERS`) still ships
+  it, `agent-up init` copies it into a new project and `agent-new project` commits that copy with
+  the owner's name filled in; existing files are left in place.
 
 ### Existing rulesets, and `--migrate`
 
 Without `--migrate`, `agent-new protect` creates what is missing and refuses to touch anything
-that exists and differs. With `--migrate` it also does exactly these, and nothing else:
+that exists and differs. A `protect-fork` in exactly the hand-made shape is left in place, and no
+`agent-fence` is created beside it, so that a later `--migrate` can still convert it; the tool
+warns and sets up the rest. With `--migrate` it also does exactly these, and nothing else:
 
 - a `protect-fork` in exactly the owner's hand-made shape (rules creation, update, deletion,
   non_fast_forward; include `~ALL`; exclude `fix/**` and `feature/**`; admin bypass always) is
-  renamed `agent-fence` and given the free names above;
-- a `protect-fork-tags` in exactly the hand-made shape is renamed `agent-fence-tags`;
-- a ruleset named `protect-main` or `main` on the default branch is deleted, but only after the
-  fence exists on that repo, and never together with `--main-gate` (which is how `agent-containers`
-  keeps its gate).
+  renamed `agent-fence` and given the free names above (the old and the new list are printed);
+- a `protect-fork-tags` in exactly the hand-made shape is renamed `agent-fence-tags`.
 
-Deleting `protect-main` is the one step here that removes a protection, so `--migrate` prints
-what it will delete and asks for confirmation per repo at a terminal.
+Both are checked before either is changed: if one exists in any other shape, neither is touched.
+
+Retiring the main gate is a separate step, `--retire-main-gate`, run after `agent-new verify` has
+passed on that repo: `protect --migrate`, then `verify`, then `protect --retire-main-gate`. It
+looks up `protect-main` and `main` each by its exact name, and offers to delete one only if it is
+a branch ruleset on exactly the default branch, after the fence is in place in the same run. It
+prints the ruleset, asks `delete ruleset '<name>' on <repo>? [y/N]`, accepts only an answer typed
+at a terminal, and reads the ruleset again just before deleting it. It is never combined with
+`--main-gate` (which is how `agent-containers` keeps its gate).
 
 ### Several repos in one run
 
@@ -150,15 +159,23 @@ project's vault holds a token for the same machine user, used only to accept the
 
 ### Verification
 
-`agent-new verify`, as the machine user, on a repo with the fence:
+`agent-new verify` first reads the repository's rulesets as the owner: `agent-fence` and
+`agent-fence-tags` must equal their templates (and `protect-main` with `--main-gate`), and no
+`protect-fork` or `protect-fork-tags` may be left. Then the owner creates a throwaway branch and
+tag named `verify-fence-<run id>` at the default branch's head, and, as the machine user:
 
-- a push to the default branch is rejected by the rule;
-- a PR into the default branch cannot be merged by the machine user;
-- creating a branch outside the free names, and creating a tag, are rejected;
-- a free-named branch can be pushed, and a PR from it into `allen-dev` can be squash-merged.
+- a fast-forward push to that branch, a force-push of unrelated history to it and its deletion
+  are refused;
+- creating a new branch outside the free names, and a new tag, are refused;
+- moving and deleting the throwaway tag are refused;
+- a free-named branch can be pushed, and a PR from it into the throwaway branch cannot be merged;
+- a PR into `allen-dev` can be squash-merged.
 
-It deletes the branches it made. The last check leaves one empty commit on `allen-dev`.
-On `agent-containers` today's `protect-main` checks still run.
+The default branch is never pushed to or merged into in these checks; a wrongly accepted attempt
+changes only a throwaway ref. The owner removes everything the run created; anything that cannot
+be removed is listed and the run ends without a clean success. The last check leaves one empty
+commit on `allen-dev`. With `--main-gate` (`agent-containers`), the `protect-main` checks run
+after the fence checks.
 
 ### What the agent is told
 
@@ -167,22 +184,32 @@ A builder has no owner-controlled instruction file today unless research is on. 
 the research instructions use; when research is on, `builder-research.md` is appended when the
 file is generated. The research profile's own instructions are unchanged. Its content:
 
-- Work on a branch named `<prefix>/<short-name>` with a free prefix, started from the current
-  `allen-dev`.
-- Keep each PR to one change. Open it against `allen-dev` and squash-merge it yourself. Where the
-  repo has checks, merge only when they are green.
+- Name the repository (`--repo`, the repository of `origin`) in every `gh pr` command, and check
+  that the PR URLs gh prints are on it.
+- Work on a branch named `<prefix>/<short-name>` with a free prefix. `fix`, `feature`, `chore`,
+  `docs`, `test`, `ci`, `refactor`, `perf`, `revert` and `experiment` branches start from the
+  current `allen-dev` and are squash-merged into it.
+- `sync/<name>`, only when the owner asks: it merges the fork's copy of the upstream branch into
+  `allen-dev`, and its PR is merged with a merge commit, never squashed.
+- `upstream/<topic>`, only when the owner asks: cut from the fork's copy of the upstream
+  repository's target branch, never from `allen-dev`; one change; never merged in the fork; the
+  owner gets the link.
+- Keep each PR to one change. Where the repo has checks, merge only when they are green.
 - Never push to `allen-dev` directly, and never rewrite its history.
 - Never open a PR to any other branch unless the owner asks for it, and never merge one. Never
-  open a PR on a repo the owner does not own: prepare the `upstream/` branch and the link.
+  open a PR on a repo the owner does not own.
 - Never delete a branch whose PR is not merged without asking the owner.
-- If the repo has no `allen-dev`, push the branch, open the PR against the default branch and
-  wait for the owner.
+- If the repo has no `allen-dev`: on a repo that is not a fork, open the PR against the default
+  branch and wait for the owner; on a fork, stop and ask.
+- If a push or a merge is rejected by a repository rule, stop and tell the owner; do not try
+  another route.
 
 ### Runbook
 
 `docs/runbooks/machine-user-and-rulesets.md` is rewritten around the fence: what the two rulesets
 do, the free names, the workflow above including the fork steps, where `protect-main` still
-applies and why, and the `--migrate` procedure.
+applies and why, the `--migrate` and `--retire-main-gate` procedure, and what `verify` creates and
+removes.
 
 ## Left to the builder
 

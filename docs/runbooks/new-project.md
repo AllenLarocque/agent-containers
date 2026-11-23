@@ -49,11 +49,11 @@ MACHINE_USER=<machine-user-login>
    service account, host token). `project.env` already names the vault `agent-<project>`.
 4. **Machine user, "set up" half (before `agent-up up`):**
    [machine-user-and-rulesets.md](machine-user-and-rulesets.md) steps 2 to 5, or
-   `agent-new protect <owner>/<repo> --vault agent-<project>`. That one command invites the machine
-   user, creates the two fence rulesets (`agent-fence`, `agent-fence-tags`), creates the working
-   branch `allen-dev` and turns on automatic deletion of merged branches. An existing repo that
-   still has the older rulesets is moved over with `--migrate`, following the rollout order in that
-   runbook.
+   `agent-new protect <owner>/<repo> --vault agent-<project>`. That one command creates the two fence
+   rulesets (`agent-fence`, `agent-fence-tags`), creates the working branch `allen-dev`, turns on
+   automatic deletion of merged branches, and invites the machine user last. It sets up only repos
+   you own. An existing repo that still has the older rulesets is moved over with `--migrate`, then
+   `verify`, then `--retire-main-gate`, following the rollout order in that runbook.
    - In the project repo: replace `@OWNER` in `.github/CODEOWNERS`, then commit it together with
      `.github/workflows/gitleaks.yml` and `.gitignore`. (The fence does not use `CODEOWNERS`; it
      only matters on a repo with the main gate, which is `agent-containers`.)
@@ -82,8 +82,9 @@ MACHINE_USER=<machine-user-login>
    **this** project's token itself (see the vault runbook).
 8. **Machine user, "verify the fence" (after `agent-up up`):** run `agent-new verify <project>`
    (or follow [machine-user-and-rulesets.md](machine-user-and-rulesets.md) step 6.1 by hand inside
-   `agent-up shell <project>`). It tries the forbidden pushes and merges as the machine user and
-   should end with `FENCE VERIFIED`. Don't start real work until it does. The agent's daily
+   `agent-up shell <project>`). It tries the forbidden pushes and merges as the machine user, on a
+   throwaway branch and tag it creates and removes, and should end with `FENCE VERIFIED on
+   <owner>/<repo>`. Don't start real work until it does. The agent's daily
    routine on `allen-dev` is in [branch-workflow.md](branch-workflow.md).
 9. **Attach and work:**
    - VS Code: **Dev Containers: Attach to Running Container…** → `<project>-agent-1`, then open
