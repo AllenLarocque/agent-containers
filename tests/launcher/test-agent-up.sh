@@ -356,6 +356,13 @@ check "builder.md: --repo on every gh pr, sync/ by merge commit, upstream/ from 
     && grep -qF "merge commit, never squashed" "$f" && grep -qF "origin/development" "$f" && grep -qF "never from \`allen-dev\`" "$f" \
     && grep -qF "On a fork, stop and ask the owner." "$f" && grep -qF "rejected by a repository rule, stop and tell the owner" "$f" \
     && grep -qF "Do not try another route." "$f"' _ "$BI"
+check "builder.md: origin/allen-dev after git fetch origin, sync/ from the branch the owner names and merged by the owner, a non-owned origin stops, no-allen-dev starts from the default branch" \
+  bash -c 'f="$1"; grep -qF "\`git fetch origin\`" "$f" && grep -qF "\`origin/allen-dev\`" "$f" \
+    && grep -qF "the branch the owner names (the fork'"'"'s copy of an upstream branch, for example \`origin/development\`)" "$f" \
+    && grep -qF "Do not fetch from the upstream repository yourself." "$f" && grep -qF "The owner merges the sync pull request" "$f" \
+    && grep -qF "If \`origin\` is not a repository the owner owns, stop and ask the owner." "$f" \
+    && grep -qF "start the branch from the default branch" "$f" && grep -qF "any branch other than \`allen-dev\`" "$f" \
+    && ! grep -qF "pull request to any other branch" "$f"' _ "$BI"
 RSO="$CFG/.generated/rstudio.yaml"
 check "RSTUDIO=0: the RStudio overlay adds nothing" bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent: {}")" ]' _ "$RSO"
 check "  ...no RStudio switch file and no password generated" bash -c '[ ! -e "$1/rstudio" ] && [ ! -e "$1/rstudio-password" ]' _ "$CFG/.generated"
