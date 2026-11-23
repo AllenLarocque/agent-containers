@@ -847,28 +847,6 @@ verify_work_branch(){ # when the working branch exists: a PR into it is squash-m
   st="$(gh_read "the state of PR #$n on $VREPO" pr view "$n" -R "$VREPO" --json state --jq .state)"
   [ "$st" = MERGED ] || die "verify: the PR into $WORK_BRANCH (#$n) is '$st' after the merge, not MERGED"
   say "OK (merged as expected): PR #$n into $WORK_BRANCH, squashed, its branch deleted (it leaves one empty commit on $WORK_BRANCH)"
-  verify_work_branch_rules
-}
-verify_work_branch_rules(){ # the machine user can neither delete the working branch nor rewrite it
-  local parent
-  VWB_SHA="$(RUN_IN "git fetch -q $VURL refs/heads/$WORK_BRANCH && git rev-parse FETCH_HEAD" 2>/dev/null)" || VWB_SHA=""
-  parent="$(RUN_IN 'git rev-parse FETCH_HEAD~1' 2>/dev/null)" || parent=""
-  [[ $VWB_SHA =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] && [[ $parent =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] \
-    || die "verify: could not read $WORK_BRANCH's head and its parent (got: '$VWB_SHA' '$parent')"
-  VON_ACCEPT=restore_work_branch
-  expect_refusal "delete $WORK_BRANCH"     "$FENCE_RE" "git push $VURL --delete refs/heads/$WORK_BRANCH"
-  # a rewind by one commit, and only if the branch is still where it was read: if it were wrongly
-  # accepted, it would drop only verify's own commit, and it is put back at once
-  expect_refusal "force-push $WORK_BRANCH" "$FENCE_RE" "git push --force-with-lease=refs/heads/$WORK_BRANCH:$VWB_SHA $VURL $parent:refs/heads/$WORK_BRANCH"
-  VON_ACCEPT=""
-}
-restore_work_branch(){ # a delete or force-push of the working branch was accepted: as the owner, put it back where it was
-  if gh api -X PATCH "repos/$VREPO/git/refs/heads/$WORK_BRANCH" -f sha="$VWB_SHA" -F force=true >/dev/null 2>&1 \
-     || gh api -X POST "repos/$VREPO/git/refs" -f ref="refs/heads/$WORK_BRANCH" -f sha="$VWB_SHA" >/dev/null 2>&1; then
-    VDIE_EXTRA="$WORK_BRANCH was put back at $VWB_SHA"
-  else
-    VDIE_EXTRA="$WORK_BRANCH could NOT be put back: as yourself, run: gh api -X POST repos/$VREPO/git/refs -f ref=refs/heads/$WORK_BRANCH -f sha=$VWB_SHA (if the branch still exists: gh api -X PATCH repos/$VREPO/git/refs/heads/$WORK_BRANCH -f sha=$VWB_SHA -F force=true)"
-  fi
 }
 
 gate_restore_hint(){ # an attempt on the default branch was accepted: what is now on it

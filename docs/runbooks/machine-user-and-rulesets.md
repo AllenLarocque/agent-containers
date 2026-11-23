@@ -53,6 +53,14 @@ The list limits the agent only. You may name your own branches anything.
 
 A third ruleset, `agent-working-branch`, applies to `allen-dev` alone. It forbids deleting the branch and force-pushing it, and **nobody bypasses it, you included**: commits are added to `allen-dev` (by merging PRs, or by your own fast-forward pushes), never removed. It also keeps `allen-dev` in place when you merge a promotion PR from it, which "Automatically delete head branches" would otherwise delete.
 
+## Resetting `allen-dev`
+
+Nobody can force-push or delete `allen-dev`, you included. To reset it on purpose:
+
+1. Repo → Settings → Rules → Rulesets → `agent-working-branch` → **Delete ruleset** (delete it; do not just disable it).
+2. Reset the branch as you need (for example, force-push it to the commit you want).
+3. Re-run `agent-new protect <owner>/<repo>`. It recreates `agent-working-branch`.
+
 ## Branch deletion
 
 `agent-new protect` turns on the repo setting **Automatically delete head branches**: when a PR is merged, GitHub deletes its source branch. A branch merged into `allen-dev` therefore disappears at merge time. An `upstream/` branch is kept until the original repo merges or closes the PR made from it. `allen-dev` cannot be deleted (its ruleset), and the mirrors are fenced.
@@ -127,7 +135,7 @@ Run it after `protect`. With a project name it works in that project's running c
 1. **As you, before anything is pushed:** it reads the rulesets. `agent-fence` and `agent-fence-tags` must equal their templates (and `agent-working-branch` when `allen-dev` exists, and `protect-main` with `--main-gate`), and no `protect-fork` or `protect-fork-tags` may be left (migrate first). Otherwise it stops.
 2. **As you:** it creates a throwaway branch and a throwaway tag, both named `zz-agent-new-verify-<run id>`, at the head of the default branch. The run id is the time, the process number and a random number. It first checks that no ref of that name exists, and removes only refs it created.
 3. **As the machine user, each of these must be refused by a rule:** a fast-forward push to the throwaway branch; a force-push that rewinds it to the default head's parent (an unrelated commit when the head has no parent); deleting it; creating a new branch outside the allowed names; creating a new tag; moving the throwaway tag; deleting it; and merging (through GitHub's API) a PR from `chore/verify-fence-<run id>` into the throwaway branch. The push of `chore/verify-fence-<run id>` itself must succeed.
-4. **If `allen-dev` exists:** a PR from `chore/verify-fence-<run id>-dev` into `allen-dev`, waiting for its checks, then a squash merge that must succeed and must leave the PR merged. If the PR reports no checks after the tool's retries, it merges without them and says so. Then, as the machine user, deleting `allen-dev` and force-pushing it must both be refused. The force-push attempt would only rewind `allen-dev` by verify's own commit, and only if nothing else landed meanwhile; if either attempt went through, the tool puts `allen-dev` back where it was, as you, before it stops.
+4. **If `allen-dev` exists:** a PR from `chore/verify-fence-<run id>-dev` into `allen-dev`, waiting for its checks, then a squash merge that must succeed and must leave the PR merged. If the PR reports no checks after the tool's retries, it merges without them and says so. (`allen-dev` itself is never deleted or force-pushed by verify: its ruleset is proved by the comparison in check 1.)
 5. **As you:** it closes the refused PR and deletes the throwaway branch, the throwaway tag and the `chore/` branches.
 
 The default branch is never pushed to or merged into in these checks; if an attempt is wrongly accepted, only a throwaway ref changes. Every push goes to `https://github.com/<owner>/<repo>.git`, so origin must be an https URL whose push URL names the same repo. With a project name, the container must work on the project's repo.

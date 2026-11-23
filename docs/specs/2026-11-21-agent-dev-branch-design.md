@@ -180,9 +180,10 @@ exists), and, as the machine user:
 - creating a new branch outside the free names, and a new tag, are refused;
 - moving and deleting the throwaway tag are refused;
 - a free-named branch can be pushed, and a PR from it into the throwaway branch cannot be merged;
-- a PR into `allen-dev` can be squash-merged;
-- deleting `allen-dev` and force-pushing it are refused (if either went through, the owner puts
-  `allen-dev` back where it was before the run stops).
+- a PR into `allen-dev` can be squash-merged.
+
+`agent-working-branch` is proved by the comparison with its template before any push; verify never
+deletes or force-pushes `allen-dev` itself.
 
 The default branch is never pushed to or merged into in these checks; a wrongly accepted attempt
 changes only a throwaway ref. The owner removes everything the run created; anything that cannot
