@@ -30,7 +30,7 @@ usage(){
 usage:
   agent-new project <folder> [--image base|gis|bio] [--public] [--no-research]
                              [--t3 publish|1|0] [--token-from <vault>] [--machine-user <user>]
-  agent-new protect <owner>/<repo> [--machine-user <user>] [--vault <op-vault>] [--require <check>]...
+  agent-new protect <owner>/<repo>... [--machine-user <user>] [--vault <op-vault>] [--require <check>]...
                              [--main-gate] [--no-working-branch] [--migrate]
   agent-new verify  <project> | <owner>/<repo> [--vault <op-vault>]
 Runs AS THE OWNER. The runbooks in docs/runbooks/ remain the reference procedure.
@@ -525,8 +525,24 @@ migrate_main_gate(){ # $1 owner/repo: with --migrate and no --main-gate, offer t
     esac
   done
 }
-cmd_protect(){
+cmd_protect(){ # one repo, signed in to 1Password first when --vault asks for it
   [ -z "$VAULT" ] || op_ready   # only --vault reads 1Password (the machine user's token)
+  protect_repo "$1"
+}
+cmd_protect_many(){ # $@ owner/repo...: each repo in its own subshell, so a die ends only that repo
+  local r rc ok=() bad=()
+  [ -z "$VAULT" ] || op_ready
+  for r in "$@"; do
+    # errexit is switched off around the subshell and on again inside it: a subshell run under || or if
+    # would otherwise ignore errexit; stdin stays the terminal for confirm
+    set +e; ( set -e; protect_repo "$r" ); rc=$?; set -e
+    if [ "$rc" -eq 0 ]; then ok+=("$r"); else bad+=("$r"); fi
+  done
+  for r in "${ok[@]:-}"; do [ -z "$r" ] || say "protect: ok $r"; done
+  for r in "${bad[@]:-}"; do [ -z "$r" ] || say "protect: FAILED $r"; done
+  [ "${#bad[@]}" -eq 0 ]
+}
+protect_repo(){
   protect_collaborator "$1"
   migrate_fence "$1"
   ensure_ruleset "$1" agent-fence
@@ -665,8 +681,9 @@ set -- "${args[@]:-}"
 
 case "$sub" in
   project) [ $# -eq 1 ] && [ -n "$1" ] || usage; cmd_project "$1" ;;
-  protect) [ $# -eq 1 ] || usage; [[ "$1" == */* ]] || die "protect wants <owner>/<repo>"
-           preflight_owner >/dev/null; cmd_protect "$1" ;;
+  protect) [ $# -ge 1 ] || usage
+           for r in "$@"; do [[ "$r" == */* ]] || die "protect wants <owner>/<repo> (got: $r)"; done
+           preflight_owner >/dev/null; cmd_protect_many "$@" ;;
   verify)  [ $# -eq 1 ] || usage; cmd_verify "$1" ;;
   *) usage ;;
 esac

@@ -39,7 +39,8 @@ case "$*" in
   api\ -X\ PUT\ repos/*/collaborators/*) touch "$STATE/invited" ;;
   "api /user/repository_invitations --jq"*) [ -n "${GH_TOKEN:-}" ] || exit 1; [ -f "$STATE/invited" ] && echo 42 ;;
   "api -X PATCH /user/repository_invitations/42") [ -n "${GH_TOKEN:-}" ] || exit 1; touch "$STATE/collab" ;;
-  "api repos/"*"/rulesets --jq"*) [ -f "$STATE/rulesets-list-fail" ] && { echo "HTTP 403: upgrade to Pro" >&2; exit 1; }; [ -f "$STATE/rulesets-stderr" ] && echo "warning: stray stderr line" >&2
+  "api repos/"*"/rulesets --jq"*) [ -f "$STATE/fail-repo" ] && [ "$2" = "repos/$(cat "$STATE/fail-repo")/rulesets" ] && { echo "HTTP 403: no admin on this repo" >&2; exit 1; }
+    [ -f "$STATE/rulesets-list-fail" ] && { echo "HTTP 403: upgrade to Pro" >&2; exit 1; }; [ -f "$STATE/rulesets-stderr" ] && echo "warning: stray stderr line" >&2
     # answers per ruleset name: the name is the first .name=="..." in the --jq argument
     # (a template name may be followed by `or .name=="main"`: answer for every name in the selector, first hit wins)
     for rn in $(grep -o '\.name==\"[^\"]*\"' <<<"$*" | sed 's/^[^"]*"//; s/"$//'); do
@@ -432,6 +433,34 @@ migstate; fencepair; echo "${FENCE_NORM/'refs/heads/sync/**,'/}" > "$STATE/rules
 echo 7 > "$STATE/ruleset-id-protect-main"; echo "$EXPECT_NORM" > "$STATE/ruleset-norm-protect-main"
 refuses "--migrate, fence differs from template: refused" 'refusing to modify' runc y protect allen/repo1 --vault agent-p1 --migrate
 check "  no DELETE"                                       test ! -f "$STATE/ruleset-deleted"
+
+echo "== fence: several repos =="
+newstate; touch "$STATE/collab" "$STATE/has-allen-dev"; echo a/two > "$STATE/fail-repo"
+OUT=$(run protect a/one a/two a/three --vault agent-p1 2>&1); rc=$?
+check "three repos, the second failing: exit non-zero"     test "$rc" -ne 0
+check "  first repo's fence POSTed"                         grep -q 'POST repos/a/one/rulesets' "$GHLOG"
+check "  third repo's fence POSTed"                         grep -q 'POST repos/a/three/rulesets' "$GHLOG"
+check "  second repo got no POST"                           bash -c '! grep -q "POST repos/a/two/" "$1"' _ "$GHLOG"
+check "  protect: ok a/one"                                 grep -q '^agent-new: protect: ok a/one$' <<<"$OUT"
+check "  protect: ok a/three"                               grep -q '^agent-new: protect: ok a/three$' <<<"$OUT"
+check "  protect: FAILED a/two"                             grep -q '^agent-new: protect: FAILED a/two$' <<<"$OUT"
+check "  exactly one FAILED line"                           test "$(grep -c 'protect: FAILED' <<<"$OUT")" -eq 1
+newstate; touch "$STATE/collab" "$STATE/has-allen-dev"
+OUT=$(run protect a/one a/two a/three --vault agent-p1 2>&1); rc=$?
+check "three repos all fine: exit 0"                        test "$rc" -eq 0
+check "  three protect: ok lines"                           test "$(grep -c 'protect: ok' <<<"$OUT")" -eq 3
+check "  no FAILED line"                                    bash -c '! grep -q "protect: FAILED" <<<"$1"' _ "$OUT"
+check "  op read ran once for three repos"                  test "$(grep -c '^OP: read' "$OPLOG")" -le 1
+newstate
+refuses "protect a/b notarepo: refused"                     'protect wants <owner>/<repo>' run protect a/b notarepo
+check "  no gh call for a/b"                                bash -c '! grep -q "a/b" "$1"' _ "$GHLOG"
+newstate; touch "$STATE/collab" "$STATE/has-allen-dev"
+OUT=$(run protect a/solo --vault agent-p1 2>&1); rc=$?
+check "one repo: exit 0"                                    test "$rc" -eq 0
+check "  one protect: ok line"                              test "$(grep -c 'protect: ok' <<<"$OUT")" -eq 1
+newstate; touch "$STATE/collab" "$STATE/has-allen-dev"; echo a/solo > "$STATE/fail-repo"
+OUT=$(run protect a/solo --vault agent-p1 2>&1); rc=$?
+check "one repo failing: exit non-zero"                     test "$rc" -ne 0
 
 echo "== task 4: verify =="
 export AGENT_NEW_CHECK_TRIES=2 AGENT_NEW_CHECK_SLEEP=0
