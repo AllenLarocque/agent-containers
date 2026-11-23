@@ -1,153 +1,153 @@
-# An integration branch the agent merges into (`agent-dev`), and looser branch names
+# A shared working branch (`allen-dev`) and one fence around the agent
 
-Date: 2026-11-21. Status: draft for the owner's approval.
+Date: 2026-11-21, rewritten 2026-11-23 after discussion with the owner. Status: draft for the
+owner's approval.
 
 ## Intent
 
 The agent runs unattended for long stretches. Today every pull request targets the default branch
 and waits for the owner, so the agent builds each new piece of work on top of unmerged work and
-the owner ends up approving one large PR. The owner wants small, clean PRs without having to stop
-mid-work to approve each one, and is happy to keep curating the default branch by hand. (Owner,
-2026-11-21: "That will also enforce upon me better testing and release schedule.")
+the owner ends up approving one large PR. The owner wants small, clean changes without stopping
+mid-work to approve each one, and is happy to keep deciding by hand what reaches the default
+branch.
 
-Two side problems go with it. Setting a repo up for the agent is tedious, one repo at a time. And
-the hand-made `protect-fork` ruleset on many repos allows only `fix/**` and `feature/**` branch
-names, which the owner finds too narrow.
+The owner also finds the present GitHub set-up too complex to reason about (four kinds of
+ruleset, `CODEOWNERS`, different shapes on different repos) and wants to start simpler. (Owner,
+2026-11-23: "I'd like to start simpler since this system is too complex for my current
+understanding of GitHub.")
 
 ## Goals
 
-- The agent can land a small PR by itself, on a branch that is not the default branch, once the
-  repo's checks are green.
-- The owner promotes that branch to the default branch when they choose, with one PR, and the
-  default branch's history shows each small PR as its own commit.
+- One rule a person can hold in their head: the agent writes only to its own branches and the
+  working branch; only the owner changes anything else.
+- The agent can land small changes on the working branch by itself.
+- The owner promotes the working branch when they choose.
 - One `agent-new protect` run sets a repo up completely, and one run can take several repos.
-- More branch names are allowed, without making upstream-mirrored branches on a fork writable.
+- More branch names are allowed than `fix/**` and `feature/**`.
 
 ## Non-goals and anti-goals
 
-- The agent never gets a way to change the default branch without the owner's approval.
-  `protect-main` is not weakened in any way.
-- The agent must not be able to write to a fork's upstream-mirrored branches (`development`,
-  `dev`, `master`, or any other name upstream uses), nor to tags.
+- The agent never gets a way to change a default branch, an upstream-mirrored branch or a tag.
 - No organisation-level rulesets, no GitHub App, no change of token type.
-- No automatic promotion, and no schedule for it. Promotion is the owner's act.
-- `agent-new` keeps its rule of never silently changing a ruleset that differs from its template.
+- No automatic promotion. Promotion is the owner's act.
+- Only the repos of the projects configured in agent-containers are touched now. The owner's
+  other repos keep what they have until they are moved in, one at a time.
+- `agent-new` keeps its rule of never silently changing a ruleset that differs from a template.
 
 ## Approaches
 
-1. **Integration branch (chosen by the owner).** A long-lived branch the agent merges its own PRs
-   into; the owner promotes it. Costs one extra ruleset per repo, and the branch holds unreviewed
-   code until promoted.
-2. **Stacked PRs.** Each small PR sits on the previous one's branch and nothing merges until the
-   owner approves. No new permissions, but the owner still approves every PR one by one, and a
-   stack is fiddly when an early PR changes.
-3. **The agent merges to the default branch for low-risk classes of change.** Rejected: the owner
-   wants to keep curating the default branch, and the classes cannot be enforced.
+1. **A shared working branch behind a single fence (chosen by the owner).**
+2. Stacked PRs that all wait for the owner. Rejected: the owner still approves every PR.
+3. The agent merges to the default branch for low-risk changes. Rejected: the owner wants to keep
+   curating the default branch.
 
-For branch names, two options were put to the owner, who has not yet chosen; this design takes
-the first as the author's call:
-
-- **A wider list of free prefixes (taken).** Upstream branches stay protected whatever their name.
-- Any name except a protected list. Freer, but an upstream branch with an unusual name would be
-  writable.
+An earlier draft of this design had four rulesets per repo. The owner asked for a simpler system;
+the reasoning for what was dropped is under "What is dropped".
 
 ## Design
 
-### The branch
+### The workflow
 
-- Its name is `agent-dev` on every repo. *Author's call.* A fixed name that no upstream uses
-  avoids colliding with a fork's `dev` or `development`, which is a mirror in some of the owner's
-  forks and the owner's working line (even the default branch) in others.
-- It is promoted to the repo's default branch, whatever that is called.
-- `agent-new protect` creates it from the default branch's head when it does not exist. An
-  existing `agent-dev` is left as it is, whatever it contains. A repo with no commits is refused.
-- `--no-agent-dev` skips the branch and `protect-agent-dev`. It is for a fork kept only to send
-  changes upstream, where the agent's work should never collect on the fork. *Author's call.*
+1. The agent and the owner both work on `allen-dev`. The agent makes each change on a branch with
+   a free prefix and merges it into `allen-dev` by a small squashed PR; the owner may commit to
+   `allen-dev` directly.
+2. When the owner is satisfied, they merge `allen-dev` into their own line on that repo: the
+   default branch on a repo they own outright; on a fork, the branch that corresponds to the
+   upstream branch they send work to (`development` or `main`).
+3. On a fork, when the owner is confident in how it runs, they open the PR to the upstream repo
+   from that branch. After upstream merges it, they sync the fork's branch from upstream and merge
+   it back into `allen-dev`.
 
-### Rulesets
+The branch is named `allen-dev` on every repo (owner's choice, 2026-11-23). `agent-new protect`
+creates it from the default branch's head when it does not exist, leaves an existing one alone,
+and refuses a repo with no commits. `--no-working-branch` skips it.
 
-`agent-new protect <owner>/<repo>` ends with these on the repo. The admin role is repository role
-id 5, as in today's template. The machine user is a collaborator with Write, never an admin, so no
-bypass below applies to it; the owner is the only admin.
+### The fence: two rulesets, on every agent repo, fork or not
 
 | Ruleset | Applies to | Rules | Admin bypass |
 |---|---|---|---|
-| `protect-main` | default branch | unchanged from today's template | pull requests only |
-| `protect-agent-dev` (new) | `refs/heads/agent-dev` | no deletion; no force push; pull request required with 0 approvals, no code-owner review, merge method squash only; the same required checks as `protect-main` | always |
-| `protect-fork` | all branches except the free names below | no creation, update or deletion; no force push | always |
-| `protect-fork-tags` | all tags | no creation, update or deletion | always |
+| `agent-fence` | all branches except the free names | no creation, update or deletion; no force push | always |
+| `agent-fence-tags` | all tags | no creation, update or deletion | always |
 
-- **Free names** (the `exclude` list of `protect-fork`): `refs/heads/agent-dev` and
+- **Free names** (the `exclude` list of `agent-fence`): `refs/heads/allen-dev` and
   `refs/heads/<p>/**` for `<p>` in `fix`, `feature`, `feat`, `chore`, `docs`, `test`, `ci`,
-  `refactor`.
-- **Which repos get `protect-fork` and `protect-fork-tags`:** forks, and any repo (fork or not)
-  that already has either ruleset; a missing one of the pair is then created. A flag `--restrict-branches` asks for them on a non-fork. *Author's
-  call:* on a repo the owner owns outright there is no mirror to protect.
-- **Where the required checks come from:** the `--require` flags of the run, exactly as for
-  `protect-main` today, and the same list goes into both rulesets. Nothing is read from the live
-  `protect-main`.
-- **Required checks when the repo has none:** `protect-agent-dev` then carries no status-check
-  rule, and the agent can merge as soon as the PR exists. This is accepted: the branch is not the
-  one anyone runs from, and the owner reviews at promotion.
-- **Squash into `agent-dev`, merge commit into the default branch.** Each small PR becomes one
-  commit on `agent-dev`; promoting with a merge commit carries those commits to the default
-  branch unchanged. If the owner squashes a promotion instead, `agent-dev` and the default branch
-  diverge; the runbook says how to reset `agent-dev` (the admin bypass allows it).
+  `refactor`. *Author's call; the owner has not yet chosen between this and "any name except a
+  protected list".*
+- The admin role is repository role id 5. The machine user is a collaborator with Write, never an
+  admin, so the bypass never applies to it; the owner is the only admin.
+- Merging a PR is an update of the target branch, so the fence also stops the agent merging into
+  any fenced branch, the default branch included. **This must be proven by `agent-new verify` on
+  a real repo before any `protect-main` is removed.**
+- These are the same two rulesets the owner made by hand as `protect-fork` and
+  `protect-fork-tags`, with a wider `exclude` list and a name that says what they do.
 
-### Existing rulesets
+### What is dropped
 
-- An existing `protect-main` that differs from the template: refused, as today.
-- An existing `protect-fork` in exactly the old hand-made shape (same rules and bypass, `exclude`
-  equal to `fix/**` and `feature/**` only): `agent-new protect` reports the difference and stops,
-  unless `--migrate` is given, in which case it replaces the `exclude` list with the free names
-  above. Any other difference is refused whether or not `--migrate` is given. `--migrate` changes
-  nothing else; missing rulesets are created with or without it.
-- An existing `protect-agent-dev` or `protect-fork-tags` that differs from the template: refused.
+- **`protect-main`**: with the fence, it restrains only the owner. It is removed from the science
+  repos, where it mostly requires a `gitleaks` check those repos have no workflow for. It **stays
+  on `agent-containers`**, because a merge to `main` there publishes the images every project
+  runs. Accepted costs elsewhere: the fence is the only barrier, the owner's own stray or forced
+  push to a default branch is not caught, and nothing requires green checks before promotion.
+- **`CODEOWNERS`**: it only decides whose approval counts under `protect-main`. It is not added
+  anywhere. Existing files are left in place.
+- **A ruleset on the working branch**: none. That the agent uses small squashed PRs is asked for
+  in its instructions, not enforced.
+
+### Existing rulesets, and `--migrate`
+
+Without `--migrate`, `agent-new protect` creates what is missing and refuses to touch anything
+that exists and differs. With `--migrate` it also does exactly these, and nothing else:
+
+- a `protect-fork` in exactly the owner's hand-made shape (rules creation, update, deletion,
+  non_fast_forward; include `~ALL`; exclude `fix/**` and `feature/**`; admin bypass always) is
+  renamed `agent-fence` and given the free names above;
+- a `protect-fork-tags` in exactly the hand-made shape is renamed `agent-fence-tags`;
+- a ruleset named `protect-main` or `main` on the default branch is deleted, but only after the
+  fence exists on that repo, and never on `agent-containers`.
+
+Deleting `protect-main` is the one step here that removes a protection, so `--migrate` prints
+what it will delete and asks for confirmation per repo at a terminal.
 
 ### Several repos in one run
 
-`agent-new protect <owner>/<repo>...` takes one or more repos and handles them in order. A failure
-on one repo is reported and the run goes on to the next; the exit status is non-zero if any repo
-failed, and the last lines list which succeeded and which did not. `--vault`, `--require`,
-`--migrate`, `--restrict-branches` and `--no-agent-dev` apply to every repo named in the run. One
-`--vault` serves all of them: every project's vault holds a token for the same machine user, and
-the token is used only to accept the invitations.
+`agent-new protect <owner>/<repo>...` takes one or more repos in order. A failure on one is
+reported and the run continues; the exit status is non-zero if any failed, and the last lines list
+which succeeded. Flags apply to every repo named. One `--vault` serves all of them: every
+project's vault holds a token for the same machine user, used only to accept the invitations.
 
 ### Verification
 
-`agent-new verify` keeps today's checks on the default branch and adds, as the machine user:
+`agent-new verify`, as the machine user, on a repo with the fence:
 
-- a PR into `agent-dev` from a free-named branch can be opened and squash-merged (after checks,
-  where the repo has any);
-- a direct push to `agent-dev` is rejected by the rule;
-- creating a branch outside the free names is rejected, on a repo that has `protect-fork`.
+- a push to the default branch is rejected by the rule;
+- a PR into the default branch cannot be merged by the machine user;
+- creating a branch outside the free names, and creating a tag, are rejected;
+- a free-named branch can be pushed, and a PR from it into `allen-dev` can be squash-merged.
 
-The verification PR adds an empty commit to `agent-dev`. *Author's call:* acceptable, because it
-is the only way to prove the merge path works. Verify waits for checks the way it does today,
-deletes the branches it made, skips the `agent-dev` checks on a repo without that branch, and
-skips the free-name check on a repo without `protect-fork`.
+It deletes the branches it made. The last check leaves one empty commit on `allen-dev`.
+On `agent-containers` today's `protect-main` checks still run.
 
 ### What the agent is told
 
 A builder has no owner-controlled instruction file today unless research is on. This adds
-`project-template/instructions/builder.md`, mounted read-only for every builder at the same two
-paths the research instructions use; when research is on, `builder-research.md` is appended to it
-when the file is generated. The research profile's own instructions are unchanged. Its content:
+`project-template/instructions/builder.md`, mounted read-only for every builder at the two paths
+the research instructions use; when research is on, `builder-research.md` is appended when the
+file is generated. The research profile's own instructions are unchanged. Its content:
 
-- Work on a branch named `<prefix>/<short-name>` with a free prefix.
-- Keep each PR to one change. Open it against `agent-dev` and squash-merge it yourself when the
-  checks are green. Do not merge a PR with failing or pending checks.
-- Start each new piece of work from the current `agent-dev`.
-- Never open a PR to the default branch, except the promotion PR (`agent-dev` into the default
-  branch) when the owner asks for it. Never merge that one.
-- If the repo has no `agent-dev`, push the branch, open the PR against the default branch and
-  wait for the owner. Never push to any other existing branch.
+- Work on a branch named `<prefix>/<short-name>` with a free prefix, started from the current
+  `allen-dev`.
+- Keep each PR to one change. Open it against `allen-dev` and squash-merge it yourself. Where the
+  repo has checks, merge only when they are green.
+- Never push to `allen-dev` directly, and never rewrite its history.
+- Never open a PR to any other branch unless the owner asks for it, and never merge one.
+- If the repo has no `allen-dev`, push the branch, open the PR against the default branch and
+  wait for the owner.
 
 ### Runbook
 
-`docs/runbooks/machine-user-and-rulesets.md` gains the three rulesets, the free names, the
-promotion steps (open the `agent-dev` PR, review the list of squashed commits, choose "Create a
-merge commit"), and the reset procedure after an accidental squash.
+`docs/runbooks/machine-user-and-rulesets.md` is rewritten around the fence: what the two rulesets
+do, the free names, the workflow above including the fork steps, where `protect-main` still
+applies and why, and the `--migrate` procedure.
 
 ## Left to the builder
 
