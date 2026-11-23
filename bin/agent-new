@@ -31,6 +31,7 @@ usage:
   agent-new project <folder> [--image base|gis|bio] [--public] [--no-research]
                              [--t3 publish|1|0] [--token-from <vault>] [--machine-user <user>]
   agent-new protect <owner>/<repo> [--machine-user <user>] [--vault <op-vault>] [--require <check>]...
+                             [--main-gate] [--no-working-branch]
   agent-new verify  <project> | <owner>/<repo> [--vault <op-vault>]
 Runs AS THE OWNER. The runbooks in docs/runbooks/ remain the reference procedure.
 USAGE
@@ -47,6 +48,7 @@ ts_port(){ # $1 project.conf -> the Tailscale Serve HTTPS port (override or form
 }
 normalise(){ printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9_-]/-/g; s/^[^a-z0-9]*//'; }
 
+MAIN_GATE=0 WORK_BRANCH_ON=1
 MACHINE_USER_FLAG="" VAULT="" IMAGE="" VISIBILITY=private RESEARCH=1 T3MODE=publish TOKEN_FROM=""
 REQUIRE_CHECKS=(gitleaks)
 
@@ -408,10 +410,11 @@ re-running resumes from here."
   head -n1 <<<"$out"
 }
 ensure_ruleset(){ # $1 owner/repo, $2 template name: create when absent, skip when equal, refuse when different
-  local repo="$1" name="$2" id have
+  local repo="$1" name="$2" id have ref=""
+  [ "$name" != protect-main ] || ref="machine-user-and-rulesets.md step 4"
   id="$(ruleset_id "$repo" "$name")"
   if [ -z "$id" ]; then
-    say "creating ruleset $name on $repo (machine-user-and-rulesets.md step 4)"
+    say "creating ruleset $name on $repo${ref:+ ($ref)}"
     ruleset_json "$name" | gh api -X POST "repos/$repo/rulesets" --input - >/dev/null
     return
   fi
@@ -424,7 +427,6 @@ ensure_ruleset(){ # $1 owner/repo, $2 template name: create when absent, skip wh
     die "ruleset $name on $repo differs from the template: refusing to modify it (never weaken). Edit it in the GitHub UI if the difference is intended."
   fi
 }
-protect_ruleset(){ ensure_ruleset "$1" protect-main; } # $1 owner/repo
 protect_warnings(){ # $1 owner/repo
   local repo="$1"
   gh api "repos/$repo/contents/.github/CODEOWNERS" >/dev/null 2>&1 \
@@ -434,13 +436,38 @@ protect_warnings(){ # $1 owner/repo
   [ "$(gh api "repos/$repo/actions/permissions/workflow" --jq .can_approve_pull_request_reviews 2>/dev/null)" = true ] \
     && warn "$repo lets Actions approve PRs: turn it OFF (Settings -> Actions -> General, runbook step 2.3)" || true
 }
+protect_work_branch(){ # $1 owner/repo: create the working branch from the default branch's head unless it exists
+  local repo="$1" default sha
+  if gh api "repos/$repo/branches/$WORK_BRANCH" >/dev/null 2>&1; then
+    skip "branch $WORK_BRANCH exists on $repo"
+    return
+  fi
+  default="$(gh api "repos/$repo" --jq .default_branch)"
+  sha="$(gh api "repos/$repo/git/ref/heads/$default" --jq .object.sha 2>/dev/null)" && [ -n "$sha" ] \
+    || die "$repo has no commits: nothing to branch $WORK_BRANCH from"
+  say "creating branch $WORK_BRANCH on $repo from $default"
+  gh api -X POST "repos/$repo/git/refs" -f ref="refs/heads/$WORK_BRANCH" -f sha="$sha" >/dev/null
+}
+protect_autodelete(){ # $1 owner/repo: merged PR branches delete themselves
+  local repo="$1"
+  if [ "$(gh api "repos/$repo" --jq .delete_branch_on_merge)" = true ]; then
+    skip "$repo already deletes merged branches"
+  else
+    say "turning on delete_branch_on_merge for $repo"
+    gh api -X PATCH "repos/$repo" -F delete_branch_on_merge=true >/dev/null
+  fi
+}
 cmd_protect(){
   [ -z "$VAULT" ] || op_ready   # only --vault reads 1Password (the machine user's token)
   protect_collaborator "$1"
   ensure_ruleset "$1" agent-fence
   ensure_ruleset "$1" agent-fence-tags
-  protect_ruleset "$1"
-  protect_warnings "$1"
+  [ "$WORK_BRANCH_ON" -eq 0 ] || protect_work_branch "$1"
+  protect_autodelete "$1"
+  if [ "$MAIN_GATE" -eq 1 ]; then
+    ensure_ruleset "$1" protect-main
+    protect_warnings "$1"
+  fi
   say "protect: done ($1)"
 }
 
@@ -557,6 +584,8 @@ while [ $# -gt 0 ]; do case "$1" in
   --t3)           case "${2:?}" in publish|1|0) T3MODE="$2" ;; *) die "--t3 must be publish, 1 or 0 (got: $2)" ;; esac; shift 2 ;;
   --token-from)   TOKEN_FROM="${2:?}"; shift 2 ;;
   --require)      REQUIRE_CHECKS+=("${2:?}"); shift 2 ;;
+  --main-gate)    MAIN_GATE=1; shift ;;
+  --no-working-branch) WORK_BRANCH_ON=0; shift ;;
   -*)             usage ;;
   *)              args+=("$1"); shift ;;
 esac; done

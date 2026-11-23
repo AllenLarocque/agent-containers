@@ -41,8 +41,10 @@ case "$*" in
   "api -X PATCH /user/repository_invitations/42") [ -n "${GH_TOKEN:-}" ] || exit 1; touch "$STATE/collab" ;;
   "api repos/"*"/rulesets --jq"*) [ -f "$STATE/rulesets-list-fail" ] && { echo "HTTP 403: upgrade to Pro" >&2; exit 1; }; [ -f "$STATE/rulesets-stderr" ] && echo "warning: stray stderr line" >&2
     # answers per ruleset name: the name is the first .name=="..." in the --jq argument
-    rn="$(sed -n 's/^[^=]*\.name==\"\([^\"]*\)\".*/\1/p' <<<"$*" | head -n1)"
-    cat "$STATE/ruleset-id-$rn" 2>/dev/null; : ;;
+    # (a template name may be followed by `or .name=="main"`: answer for every name in the selector, first hit wins)
+    for rn in $(grep -o '\.name==\"[^\"]*\"' <<<"$*" | sed 's/^[^"]*"//; s/"$//'); do
+      [ -s "$STATE/ruleset-id-$rn" ] && { cat "$STATE/ruleset-id-$rn"; break; }
+    done; : ;;
   "api -X POST repos/"*"/rulesets --input -") body="$(cat)"; rn="$(sed -n 's/.*"name": *"\([^"]*\)".*/\1/p' <<<"$body" | head -n1)"
     printf '%s\n' "$body" > "$STATE/ruleset-posted-$rn" ;;
   "api repos/"*"/rulesets/"[789]" --jq"*) case "$2" in */7) rn=protect-main ;; */8) rn=agent-fence ;; *) rn=agent-fence-tags ;; esac
@@ -50,6 +52,13 @@ case "$*" in
   "api repos/"*"/contents/.github/CODEOWNERS") [ -f "$STATE/has-codeowners" ] ;;
   "api repos/"*"/contents/.github/workflows/gitleaks.yml") [ -f "$STATE/has-gitleaks" ] ;;
   "api repos/"*"/actions/permissions/workflow --jq .can_approve_pull_request_reviews") cat "$STATE/actions-approve" 2>/dev/null || echo false ;;
+  "api repos/"*"/branches/allen-dev") [ -f "$STATE/has-allen-dev" ] ;;
+  "api repos/"*"/git/ref/heads/"*" --jq .object.sha") [ -f "$STATE/no-commits" ] && { echo "HTTP 409: Git Repository is empty." >&2; exit 1; }
+    echo "sha-of-${2##*/heads/}" ;;
+  "api -X POST repos/"*"/git/refs -f ref="*) echo "$*" > "$STATE/ref-posted" ;;
+  "api -X PATCH repos/"*" -F delete_branch_on_merge=true") touch "$STATE/autodelete-patched" ;;
+  "api repos/"*" --jq .default_branch") cat "$STATE/default-branch" 2>/dev/null || echo main ;;
+  "api repos/"*" --jq .delete_branch_on_merge") cat "$STATE/autodelete" 2>/dev/null || echo false ;;
   "repo view "*) [ -f "$STATE/repo-exists" ] ;;
   "repo create "*)
     touch "$STATE/repo-exists"; mkdir -p "$STATE/created"
@@ -204,43 +213,43 @@ check "no --vault: WARNING to accept manually" grep -q 'WARNING.*accept the invi
 echo "== task 3: protect / ruleset + warnings =="
 EXPECT_NORM='branch|active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:false|gitleaks|refs:~DEFAULT_BRANCH/|strict:false|merge,rebase,squash'
 newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
-check "no ruleset: POSTs one"              run protect allen/repo1 --vault agent-p1
+check "no ruleset: POSTs one"              run protect allen/repo1 --vault agent-p1 --main-gate
 check "  posted JSON names protect-main"   grep -q '"name": *"protect-main"' "$STATE/ruleset-posted-protect-main"
 check "  bypass: admin, PRs only"          grep -q '"bypass_mode": *"pull_request"' "$STATE/ruleset-posted-protect-main"
 check "  required check gitleaks"          grep -q '"context": *"gitleaks"' "$STATE/ruleset-posted-protect-main"
 check "  no last-push approval (owner may approve after editing the branch)" grep -q '"require_last_push_approval": *false' "$STATE/ruleset-posted-protect-main"
 newstate; touch "$STATE/collab" "$STATE/rulesets-list-fail"
-refuses "rulesets list fails -> loud die" 'could not list rulesets' run protect allen/repo1 --vault agent-p1
+refuses "rulesets list fails -> loud die" 'could not list rulesets' run protect allen/repo1 --vault agent-p1 --main-gate
 newstate; touch "$STATE/collab" "$STATE/rulesets-list-fail"
-refuses "  includes gh output" 'upgrade to Pro' run protect allen/repo1 --vault agent-p1
+refuses "  includes gh output" 'upgrade to Pro' run protect allen/repo1 --vault agent-p1 --main-gate
 newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
 echo 7 > "$STATE/ruleset-id-protect-main"; echo "$EXPECT_NORM" > "$STATE/ruleset-norm-protect-main"
-check "identical ruleset -> SKIP"          run protect allen/repo1 --vault agent-p1
+check "identical ruleset -> SKIP"          run protect allen/repo1 --vault agent-p1 --main-gate
 check "  nothing POSTed"                   test ! -f "$STATE/ruleset-posted-protect-main"
 newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks" "$STATE/rulesets-stderr"
 echo 7 > "$STATE/ruleset-id-protect-main"; echo "$EXPECT_NORM" > "$STATE/ruleset-norm-protect-main"
-check "stray gh stderr on success is not the id" run protect allen/repo1 --vault agent-p1
+check "stray gh stderr on success is not the id" run protect allen/repo1 --vault agent-p1 --main-gate
 check "  still matched ruleset 7 (SKIP, no POST)" test ! -f "$STATE/ruleset-posted-protect-main"
 newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
 echo 7 > "$STATE/ruleset-id-protect-main"; echo 'branch|active|RepositoryRole:5:always|deletion|pr:0:false:false:false|' > "$STATE/ruleset-norm-protect-main"
-refuses "divergent ruleset -> refuse, no write" 'refusing to modify' run protect allen/repo1 --vault agent-p1
+refuses "divergent ruleset -> refuse, no write" 'refusing to modify' run protect allen/repo1 --vault agent-p1 --main-gate
 check "  nothing POSTed on refusal"        test ! -f "$STATE/ruleset-posted-protect-main"
 newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
 echo 7 > "$STATE/ruleset-id-protect-main"
 echo 'branch|active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:false|gitleaks|refs:~DEFAULT_BRANCH/refs/heads/main|strict:false|merge,rebase,squash' > "$STATE/ruleset-norm-protect-main"
-refuses "conditions-only drift -> refuse, no write" 'refusing to modify' run protect allen/repo1 --vault agent-p1
+refuses "conditions-only drift -> refuse, no write" 'refusing to modify' run protect allen/repo1 --vault agent-p1 --main-gate
 newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
 echo 7 > "$STATE/ruleset-id-protect-main"; echo "${EXPECT_NORM/pr:1:true:true:false/pr:1:true:true:true}" > "$STATE/ruleset-norm-protect-main"
-refuses "older ruleset with last-push approval -> drift reported, no write" 'refusing to modify' run protect allen/repo1 --vault agent-p1
+refuses "older ruleset with last-push approval -> drift reported, no write" 'refusing to modify' run protect allen/repo1 --vault agent-p1 --main-gate
 check "  nothing POSTed on last-push drift" test ! -f "$STATE/ruleset-posted-protect-main"
 check "  nothing POSTed on conditions drift" test ! -f "$STATE/ruleset-posted-protect-main"
 newstate; touch "$STATE/collab"; echo true > "$STATE/actions-approve"
-OUT=$(run protect allen/repo1 --vault agent-p1 2>&1)
+OUT=$(run protect allen/repo1 --vault agent-p1 --main-gate 2>&1)
 check "warns: no CODEOWNERS"               grep -q 'WARNING.*CODEOWNERS' <<<"$OUT"
 check "warns: no gitleaks workflow"        grep -q 'WARNING.*gitleaks workflow' <<<"$OUT"
 check "warns: Actions can approve PRs"     grep -q 'WARNING.*approve' <<<"$OUT"
 newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
-check "--require build-test accepted"      run protect allen/repo1 --vault agent-p1 --require build-test
+check "--require build-test accepted"      run protect allen/repo1 --vault agent-p1 --main-gate --require build-test
 check "  build-test present in posted JSON" grep -q '"context": *"build-test"' "$STATE/ruleset-posted-protect-main"
 check "  gitleaks still present too"       grep -q '"context": *"gitleaks"' "$STATE/ruleset-posted-protect-main"
 
@@ -248,7 +257,7 @@ echo "== fence: templates =="
 FENCE_NORM='branch|active|RepositoryRole:5:always|creation,deletion,non_fast_forward,update|pr:-||refs:~ALL/refs/heads/allen-dev,refs/heads/chore/**,refs/heads/ci/**,refs/heads/docs/**,refs/heads/experiment/**,refs/heads/feature/**,refs/heads/fix/**,refs/heads/perf/**,refs/heads/refactor/**,refs/heads/revert/**,refs/heads/sync/**,refs/heads/test/**,refs/heads/upstream/**|strict:-|'
 TAGS_NORM='tag|active|RepositoryRole:5:always|creation,deletion,update|pr:-||refs:~ALL/|strict:-|'
 newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
-check "no fence: protect succeeds"            run protect allen/repo1 --vault agent-p1
+check "no fence: protect succeeds"            run protect allen/repo1 --vault agent-p1 --main-gate
 check "  agent-fence POSTed"                  test -s "$STATE/ruleset-posted-agent-fence"
 check "  agent-fence-tags POSTed"             test -s "$STATE/ruleset-posted-agent-fence-tags"
 check "  three POSTs: both fences and protect-main"                     test "$(grep -c 'POST repos/allen/repo1/rulesets' "$GHLOG")" -eq 3
@@ -281,13 +290,53 @@ check "live fences equal the templates: SKIP" grep -q 'SKIP.*agent-fence' <<<"$O
 check "  fence not POSTed"                    test ! -f "$STATE/ruleset-posted-agent-fence"
 check "  tags not POSTed"                     test ! -f "$STATE/ruleset-posted-agent-fence-tags"
 newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
-echo 8 > "$STATE/ruleset-id-agent-fence"; echo "${FENCE_NORM/refs\/heads\/sync\/**,/}" > "$STATE/ruleset-norm-agent-fence"
+echo 8 > "$STATE/ruleset-id-agent-fence"; echo "${FENCE_NORM/'refs/heads/sync/**,'/}" > "$STATE/ruleset-norm-agent-fence"
 refuses "fence missing one exclude -> refuse" 'refusing to modify' run protect allen/repo1 --vault agent-p1
 check "  nothing POSTed on refusal"           test ! -f "$STATE/ruleset-posted-agent-fence"
 newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
 echo 8 > "$STATE/ruleset-id-agent-fence"; echo "$TAGS_NORM" > "$STATE/ruleset-norm-agent-fence"
 refuses "tag ruleset named agent-fence -> refuse" 'refusing to modify' run protect allen/repo1 --vault agent-p1
 check "  nothing POSTed for the tag mix-up"   test ! -f "$STATE/ruleset-posted-agent-fence"
+
+check "  the cut removed exactly the one entry" test "$(( ${#FENCE_NORM} - $(wc -c < <(printf '%s' "${FENCE_NORM/'refs/heads/sync/**,'/}")) ))" -eq "$(printf '%s' 'refs/heads/sync/**,' | wc -c)"
+newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
+echo 7 > "$STATE/ruleset-id-main"; echo "$EXPECT_NORM" > "$STATE/ruleset-norm-protect-main"
+OUT=$(run protect allen/repo1 --vault agent-p1 --main-gate 2>&1)
+check "live ruleset named main counts as protect-main: SKIP" grep -q 'SKIP.*ruleset protect-main' <<<"$OUT"
+check "  protect-main not POSTed"             test ! -f "$STATE/ruleset-posted-protect-main"
+check "  creation message cites the runbook only for protect-main" bash -c '! grep -q "creating ruleset agent-fence.*machine-user" <<<"$1" && grep -q "creating ruleset agent-fence on" <<<"$1"' _ "$OUT"
+
+echo "== fence: protect =="
+newstate; touch "$STATE/collab"; echo master > "$STATE/default-branch"
+OUT=$(run protect allen/repo1 --vault agent-p1 2>&1)
+check "fresh repo, default master: fence pair posted"  test -s "$STATE/ruleset-posted-agent-fence" -a -s "$STATE/ruleset-posted-agent-fence-tags"
+check "  allen-dev created from the head of master"    grep -q 'ref=refs/heads/allen-dev -f sha=sha-of-master' "$STATE/ref-posted"
+check "  auto-delete PATCHed"                          test -f "$STATE/autodelete-patched"
+check "  no protect-main POST without --main-gate"     test ! -f "$STATE/ruleset-posted-protect-main"
+check "  no CODEOWNERS warning without --main-gate"    bash -c '! grep -q CODEOWNERS <<<"$1"' _ "$OUT"
+check "  fence posted before the branch is created"    bash -c 'a=$(grep -n "POST repos/allen/repo1/rulesets" "$1" | head -n1 | cut -d: -f1); b=$(grep -n "POST repos/allen/repo1/git/refs" "$1" | cut -d: -f1); [ "$a" -lt "$b" ]' _ "$GHLOG"
+newstate; touch "$STATE/collab" "$STATE/has-allen-dev"
+OUT=$(run protect allen/repo1 --vault agent-p1 2>&1)
+check "allen-dev exists: SKIP"                         grep -q 'SKIP.*allen-dev' <<<"$OUT"
+check "  no POST to git/refs"                          bash -c '! grep -q "git/refs" "$1"' _ "$GHLOG"
+newstate; touch "$STATE/collab"; echo true > "$STATE/autodelete"
+OUT=$(run protect allen/repo1 --vault agent-p1 2>&1)
+check "auto-delete already true: SKIP"                 grep -q 'SKIP.*merged branches' <<<"$OUT"
+check "  no PATCH"                                     test ! -f "$STATE/autodelete-patched"
+newstate; touch "$STATE/collab"
+check "--no-working-branch accepted"                   run protect allen/repo1 --vault agent-p1 --no-working-branch
+check "  no call to branches/allen-dev"                bash -c '! grep -q "branches/allen-dev" "$1"' _ "$GHLOG"
+check "  no call to git/refs"                          bash -c '! grep -q "git/ref" "$1"' _ "$GHLOG"
+newstate; touch "$STATE/collab"
+OUT=$(run protect allen/repo1 --vault agent-p1 --main-gate 2>&1)
+check "--main-gate: protect-main posted"               grep -q '"name": *"protect-main"' "$STATE/ruleset-posted-protect-main"
+check "  with the gitleaks check"                      grep -q '"context": *"gitleaks"' "$STATE/ruleset-posted-protect-main"
+check "  missing CODEOWNERS warning appears"           grep -q 'WARNING.*CODEOWNERS' <<<"$OUT"
+newstate; touch "$STATE/collab" "$STATE/rulesets-list-fail"
+refuses "ruleset list fails: refused" 'could not list rulesets' run protect allen/repo1 --vault agent-p1
+check "  no POST to git/refs"                          bash -c '! grep -q "git/refs" "$1"' _ "$GHLOG"
+newstate; touch "$STATE/collab" "$STATE/no-commits"
+refuses "repo with no commits: refused" 'no commits' run protect allen/repo1 --vault agent-p1
 
 echo "== task 4: verify =="
 export AGENT_NEW_CHECK_TRIES=2 AGENT_NEW_CHECK_SLEEP=0
@@ -546,8 +595,8 @@ rm -rf "$PROJHOME/InhTok" "$CFGROOT/inhtok"
 newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
 LIVE_NORM='branch|active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:false|R-CMD-check+gitleaks|refs:~DEFAULT_BRANCH/|strict:false|merge,rebase,squash'
 touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"; echo 7 > "$STATE/ruleset-id-protect-main"; echo "$LIVE_NORM" > "$STATE/ruleset-norm-protect-main"
-check "--require R-CMD-check matches C-sorted norm (default locale)" run protect allen/repo1 --vault agent-p1 --require R-CMD-check
-check "  and under en_US.utf8" env LC_ALL=en_US.utf8 HOME="$H" AGENT_CONTAINERS_CONFIG="$CFGROOT" PATH="$T/bin:$PATH" "$AN" protect allen/repo1 --vault agent-p1 --require R-CMD-check
+check "--require R-CMD-check matches C-sorted norm (default locale)" run protect allen/repo1 --vault agent-p1 --require R-CMD-check --main-gate
+check "  and under en_US.utf8" env LC_ALL=en_US.utf8 HOME="$H" AGENT_CONTAINERS_CONFIG="$CFGROOT" PATH="$T/bin:$PATH" "$AN" protect allen/repo1 --vault agent-p1 --require R-CMD-check --main-gate
 check "  nothing POSTed" test ! -f "$STATE/ruleset-posted-protect-main"
 
 newstate
