@@ -314,7 +314,7 @@ protect_collaborator(){ # $1 owner/repo
   fi
 }
 
-NORM_JQ='[.enforcement,
+NORM_JQ='[.target, .enforcement,
  (.bypass_actors | map("\(.actor_type):\(.actor_id):\(.bypass_mode)") | sort | join(",")),
  (.rules | map(.type) | sort | join(",")),
  ((.rules[] | select(.type=="pull_request") | .parameters |
@@ -325,11 +325,21 @@ NORM_JQ='[.enforcement,
  ((.rules[] | select(.type=="pull_request") | .parameters.allowed_merge_methods | sort | join(",")) // "")
 ] | join("|")'
 
+FREE_PREFIXES=(fix feature chore docs test ci refactor perf revert upstream sync experiment)
+WORK_BRANCH=allen-dev
+
 checks_sorted(){ printf '%s\n' "${REQUIRE_CHECKS[@]}" | LC_ALL=C sort -u; }
-ruleset_json(){
+fence_excludes(){ # the branch names the fence leaves free, as a JSON list body
+  local out="\"refs/heads/$WORK_BRANCH\"" p
+  for p in "${FREE_PREFIXES[@]}"; do out+=", \"refs/heads/$p/**\""; done
+  printf '%s' "$out"
+}
+ruleset_json(){ # $1 protect-main | agent-fence | agent-fence-tags
   local checks="" c
-  while IFS= read -r c; do checks+="{\"context\": \"$c\"},"; done < <(checks_sorted)
-  cat <<JSON
+  case "$1" in
+    protect-main)
+      while IFS= read -r c; do checks+="{\"context\": \"$c\"},"; done < <(checks_sorted)
+      cat <<JSON
 {
   "name": "protect-main", "target": "branch", "enforcement": "active",
   "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}],
@@ -348,34 +358,62 @@ ruleset_json(){
   ]
 }
 JSON
+      ;;
+    agent-fence)
+      cat <<JSON
+{
+  "name": "agent-fence", "target": "branch", "enforcement": "active",
+  "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}],
+  "conditions": {"ref_name": {"include": ["~ALL"], "exclude": [$(fence_excludes)]}},
+  "rules": [{"type": "creation"}, {"type": "update"}, {"type": "deletion"}, {"type": "non_fast_forward"}]
 }
-ruleset_norm_expected(){
-  printf 'active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:false|%s|refs:~DEFAULT_BRANCH/|strict:false|merge,rebase,squash' \
-    "$(checks_sorted | paste -sd+ -)"
+JSON
+      ;;
+    agent-fence-tags)
+      cat <<'JSON'
+{
+  "name": "agent-fence-tags", "target": "tag", "enforcement": "active",
+  "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}],
+  "conditions": {"ref_name": {"include": ["~ALL"], "exclude": []}},
+  "rules": [{"type": "creation"}, {"type": "update"}, {"type": "deletion"}]
 }
-protect_ruleset(){ # $1 owner/repo
-  local repo="$1" id have
-  local out rc=0 errf; errf="$(mktemp)"
+JSON
+      ;;
+    *) die "no ruleset template named $1" ;;
+  esac
+}
+ruleset_norm_expected(){ # $1 template name; the same projection NORM_JQ makes of a live ruleset
+  ruleset_json "$1" | jq -r "$NORM_JQ" | tr -d '\n'
+}
+ruleset_id(){ # $1 owner/repo, $2 ruleset name: prints the id, or nothing when there is none
+  local repo="$1" name="$2" out rc=0 errf sel; errf="$(mktemp)"
+  sel=".name==\"$name\""
+  [ "$name" != protect-main ] || sel="$sel or .name==\"main\""   # a ruleset named main is the same gate
   # stdout only is parsed (a stray stderr line must not become the id); stderr shown on failure
-  out="$(gh api "repos/$repo/rulesets" --jq '.[] | select(.name=="protect-main") | .id' 2>"$errf")" || rc=$?
+  out="$(gh api "repos/$repo/rulesets" --jq ".[] | select($sel) | .id" 2>"$errf")" || rc=$?
   [ "$rc" -eq 0 ] || die "could not list rulesets on $repo (needs admin; private repos on GitHub Free have no rulesets): $out$(cat "$errf"; rm -f "$errf")
 re-running resumes from here."
   rm -f "$errf"
-  id="$(head -n1 <<<"$out")"
+  head -n1 <<<"$out"
+}
+ensure_ruleset(){ # $1 owner/repo, $2 template name: create when absent, skip when equal, refuse when different
+  local repo="$1" name="$2" id have
+  id="$(ruleset_id "$repo" "$name")"
   if [ -z "$id" ]; then
-    say "creating ruleset protect-main on $repo (machine-user-and-rulesets.md step 4)"
-    ruleset_json | gh api -X POST "repos/$repo/rulesets" --input - >/dev/null
+    say "creating ruleset $name on $repo (machine-user-and-rulesets.md step 4)"
+    ruleset_json "$name" | gh api -X POST "repos/$repo/rulesets" --input - >/dev/null
     return
   fi
   have="$(gh api "repos/$repo/rulesets/$id" --jq "$NORM_JQ")"
-  if [ "$have" = "$(ruleset_norm_expected)" ]; then
-    skip "ruleset protect-main on $repo matches the template"
+  if [ "$have" = "$(ruleset_norm_expected "$name")" ]; then
+    skip "ruleset $name on $repo matches the template"
   else
     warn "live:     $have"
-    warn "template: $(ruleset_norm_expected)"
-    die "ruleset protect-main on $repo differs from the template: refusing to modify it (never weaken). Edit it in the GitHub UI if the difference is intended."
+    warn "template: $(ruleset_norm_expected "$name")"
+    die "ruleset $name on $repo differs from the template: refusing to modify it (never weaken). Edit it in the GitHub UI if the difference is intended."
   fi
 }
+protect_ruleset(){ ensure_ruleset "$1" protect-main; } # $1 owner/repo
 protect_warnings(){ # $1 owner/repo
   local repo="$1"
   gh api "repos/$repo/contents/.github/CODEOWNERS" >/dev/null 2>&1 \
@@ -388,6 +426,8 @@ protect_warnings(){ # $1 owner/repo
 cmd_protect(){
   [ -z "$VAULT" ] || op_ready   # only --vault reads 1Password (the machine user's token)
   protect_collaborator "$1"
+  ensure_ruleset "$1" agent-fence
+  ensure_ruleset "$1" agent-fence-tags
   protect_ruleset "$1"
   protect_warnings "$1"
   say "protect: done ($1)"
