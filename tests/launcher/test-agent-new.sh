@@ -270,7 +270,7 @@ check "no --vault: invite happens"           test -f "$STATE/invited"
 check "no --vault: WARNING to accept manually" grep -q 'WARNING.*accept the invitation' <<<"$OUT"
 
 echo "== task 3: protect / ruleset + warnings =="
-EXPECT_NORM='branch|active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:false|gitleaks|refs:~DEFAULT_BRANCH/|strict:false|merge,rebase,squash'
+EXPECT_NORM='branch|active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:false|gitleaks|refs:~DEFAULT_BRANCH/|strict:false|merge,rebase,squash|upd:-'
 newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
 check "no ruleset: POSTs one"              run protect allen/repo1 --vault agent-p1 --main-gate
 check "  posted JSON names protect-main"   grep -q '"name": *"protect-main"' "$STATE/ruleset-posted-protect-main"
@@ -295,7 +295,7 @@ refuses "divergent ruleset -> refuse, no write" 'refusing to modify' run protect
 check "  nothing POSTed on refusal"        test ! -f "$STATE/ruleset-posted-protect-main"
 newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
 echo 7 > "$STATE/ruleset-id-protect-main"
-echo 'branch|active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:false|gitleaks|refs:~DEFAULT_BRANCH/refs/heads/main|strict:false|merge,rebase,squash' > "$STATE/ruleset-norm-protect-main"
+echo 'branch|active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:false|gitleaks|refs:~DEFAULT_BRANCH/refs/heads/main|strict:false|merge,rebase,squash|upd:-' > "$STATE/ruleset-norm-protect-main"
 refuses "conditions-only drift -> refuse, no write" 'refusing to modify' run protect allen/repo1 --vault agent-p1 --main-gate
 newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
 echo 7 > "$STATE/ruleset-id-protect-main"; echo "${EXPECT_NORM/pr:1:true:true:false/pr:1:true:true:true}" > "$STATE/ruleset-norm-protect-main"
@@ -313,8 +313,8 @@ check "  build-test present in posted JSON" grep -q '"context": *"build-test"' "
 check "  gitleaks still present too"       grep -q '"context": *"gitleaks"' "$STATE/ruleset-posted-protect-main"
 
 echo "== fence: templates =="
-FENCE_NORM='branch|active|RepositoryRole:5:always|creation,deletion,non_fast_forward,update|pr:-||refs:~ALL/refs/heads/allen-dev,refs/heads/chore/**,refs/heads/ci/**,refs/heads/docs/**,refs/heads/experiment/**,refs/heads/feature/**,refs/heads/fix/**,refs/heads/perf/**,refs/heads/refactor/**,refs/heads/revert/**,refs/heads/sync/**,refs/heads/test/**,refs/heads/upstream/**|strict:-|'
-TAGS_NORM='tag|active|RepositoryRole:5:always|creation,deletion,update|pr:-||refs:~ALL/|strict:-|'
+FENCE_NORM='branch|active|RepositoryRole:5:always|creation,deletion,non_fast_forward,update|pr:-||refs:~ALL/refs/heads/allen-dev,refs/heads/chore/**,refs/heads/ci/**,refs/heads/docs/**,refs/heads/experiment/**,refs/heads/feature/**,refs/heads/fix/**,refs/heads/perf/**,refs/heads/refactor/**,refs/heads/revert/**,refs/heads/sync/**,refs/heads/test/**,refs/heads/upstream/**|strict:-||upd:false'
+TAGS_NORM='tag|active|RepositoryRole:5:always|creation,deletion,update|pr:-||refs:~ALL/|strict:-||upd:false'
 newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
 check "no fence: protect succeeds"            run protect allen/repo1 --vault agent-p1 --main-gate
 check "  agent-fence POSTed"                  test -s "$STATE/ruleset-posted-agent-fence"
@@ -403,84 +403,137 @@ OUT=$(run protect allen/repo1 --vault agent-p1 2>&1) || true
 check "  and it is not blamed on an empty repo"           bash -c '! grep -q "has no commits" <<<"$1"' _ "$OUT"
 
 echo "== fence: migrate =="
-OLD_FORK='branch|active|RepositoryRole:5:always|creation,deletion,non_fast_forward,update|pr:-||refs:~ALL/refs/heads/feature/**,refs/heads/fix/**|strict:-|'
-OLD_FORK_TAGS='tag|active|RepositoryRole:5:always|creation,deletion,update|pr:-||refs:~ALL/|strict:-|'
-runc(){ AGENT_NEW_CONFIRM="$1" run "${@:2}"; }   # run with the confirm seam answered y or n
+OLD_FORK='branch|active|RepositoryRole:5:always|creation,deletion,non_fast_forward,update|pr:-||refs:~ALL/refs/heads/feature/**,refs/heads/fix/**|strict:-||upd:false'
+OLD_FORK_TAGS='tag|active|RepositoryRole:5:always|creation,deletion,update|pr:-||refs:~ALL/|strict:-||upd:false'
 migstate(){ newstate; touch "$STATE/collab" "$STATE/has-allen-dev"; }
 fencepair(){ echo 8 > "$STATE/ruleset-id-agent-fence"; echo "$FENCE_NORM" > "$STATE/ruleset-norm-agent-fence"
   echo 9 > "$STATE/ruleset-id-agent-fence-tags"; echo "$TAGS_NORM" > "$STATE/ruleset-norm-agent-fence-tags"; }
-migstate; echo 4 > "$STATE/ruleset-id-protect-fork"; echo "$OLD_FORK" > "$STATE/ruleset-norm-protect-fork"
-check "old protect-fork + --migrate: protect succeeds"  run protect allen/repo1 --vault agent-p1 --migrate
+oldfork(){ echo 4 > "$STATE/ruleset-id-protect-fork"; echo "${1:-$OLD_FORK}" > "$STATE/ruleset-norm-protect-fork"; }
+oldtags(){ echo 5 > "$STATE/ruleset-id-protect-fork-tags"; echo "${1:-$OLD_FORK_TAGS}" > "$STATE/ruleset-norm-protect-fork-tags"; }
+NOPUT='api -X PUT repos/allen/repo1/rulesets'
+migstate; oldfork
+OUT=$(run protect allen/repo1 --vault agent-p1 --migrate 2>&1); rc=$?
+check "old protect-fork + --migrate: protect succeeds"  test "$rc" -eq 0
 check "  one PUT, to its id"                             test "$(grep -c 'api -X PUT repos/allen/repo1/rulesets/' "$GHLOG")" -eq 1
 check "  the PUT went to ruleset 4"                      grep -q 'api -X PUT repos/allen/repo1/rulesets/4 ' "$GHLOG"
 check "  its body names agent-fence"                     grep -q '"name": *"agent-fence"' "$STATE/ruleset-put-4"
 check "  agent-fence not POSTed beside it"               test ! -f "$STATE/ruleset-posted-agent-fence"
-migstate; echo 5 > "$STATE/ruleset-id-protect-fork-tags"; echo "$OLD_FORK_TAGS" > "$STATE/ruleset-norm-protect-fork-tags"
+check "  prints the free names before"                   grep -qx 'agent-new:   free names before: fix/\*\*, feature/\*\*' <<<"$OUT"
+check "  ...and after"                                   grep -qx 'agent-new:   free names after:  allen-dev, fix/\*\*, feature/\*\*, chore/\*\*, docs/\*\*, test/\*\*, ci/\*\*, refactor/\*\*, perf/\*\*, revert/\*\*, upstream/\*\*, sync/\*\*, experiment/\*\*' <<<"$OUT"
+: > "$GHLOG"
+check "  a second --migrate run changes nothing"         run protect allen/repo1 --vault agent-p1 --migrate
+check "  ...(no POST, PUT, PATCH or DELETE)"             lacks "$GHLOG" 'api -X (POST|PUT|PATCH|DELETE) '
+migstate; oldtags
 check "old protect-fork-tags + --migrate: succeeds"     run protect allen/repo1 --vault agent-p1 --migrate
 check "  PUT to its id naming agent-fence-tags"          grep -q '"name": *"agent-fence-tags"' "$STATE/ruleset-put-5"
 check "  agent-fence-tags not POSTed"                    test ! -f "$STATE/ruleset-posted-agent-fence-tags"
-migstate; echo 4 > "$STATE/ruleset-id-protect-fork"; echo "${OLD_FORK/'refs/heads/fix/**'/'refs/heads/extra/**,refs/heads/fix/**'}" > "$STATE/ruleset-norm-protect-fork"
+migstate; oldfork "${OLD_FORK/'refs/heads/fix/**'/'refs/heads/extra/**,refs/heads/fix/**'}"
 refuses "protect-fork with a third exclude + --migrate: refused" 'refusing to modify' run protect allen/repo1 --vault agent-p1 --migrate
-check "  no PUT"                                         bash -c '! grep -q "api -X PUT repos/allen/repo1/rulesets" "$1"' _ "$GHLOG"
-migstate; echo 5 > "$STATE/ruleset-id-protect-fork-tags"; echo "${OLD_FORK_TAGS/'refs:~ALL/'/'refs:~ALL/refs/tags/x'}" > "$STATE/ruleset-norm-protect-fork-tags"
+check "  no PUT"                                         lacks "$GHLOG" "$NOPUT"
+migstate; oldtags "${OLD_FORK_TAGS/'refs:~ALL/'/'refs:~ALL/refs/tags/x'}"
 refuses "altered protect-fork-tags + --migrate: refused" 'refusing to modify' run protect allen/repo1 --vault agent-p1 --migrate
-check "  no PUT"                                         bash -c '! grep -q "api -X PUT repos/allen/repo1/rulesets" "$1"' _ "$GHLOG"
-migstate; echo 4 > "$STATE/ruleset-id-protect-fork"; echo "$OLD_FORK" > "$STATE/ruleset-norm-protect-fork"
+check "  no PUT"                                         lacks "$GHLOG" "$NOPUT"
+migstate; oldfork; oldtags "${OLD_FORK_TAGS/'creation,deletion,update'/'deletion,update'}"
+refuses "protect-fork in the old shape, protect-fork-tags altered + --migrate: refused" 'protect-fork-tags on allen/repo1 is not the shape --migrate renames' run protect allen/repo1 --vault agent-p1 --migrate
+check "  neither is changed (both checked before the first PUT)" lacks "$GHLOG" "$NOPUT"
+migstate; oldfork "${OLD_FORK/'upd:false'/'upd:true'}"
+refuses "old protect-fork whose update rule allows fetch-and-merge + --migrate: refused" 'refusing to modify' run protect allen/repo1 --vault agent-p1 --migrate
+migstate; oldfork
 OUT=$(run protect allen/repo1 --vault agent-p1 2>&1); rc=$?
 check "old protect-fork without --migrate: exits 0"        test "$rc" -eq 0
-check "old protect-fork without --migrate: warning names --migrate" grep -q 'WARNING.*--migrate' <<<"$OUT"
+check "  warning names --migrate"                         grep -q 'WARNING.*older, narrower.*--migrate' <<<"$OUT"
 check "  warning says the agent is still limited to fix/ and feature/" grep -q 'WARNING.*fix/.*feature/' <<<"$OUT"
-check "  no PUT"                                         bash -c '! grep -q "api -X PUT repos/allen/repo1/rulesets" "$1"' _ "$GHLOG"
-check "  the new fence is created beside it"             test -s "$STATE/ruleset-posted-agent-fence"
-for mig in "" --migrate; do
-  migstate; fencepair; echo 4 > "$STATE/ruleset-id-protect-fork"; echo "$OLD_FORK" > "$STATE/ruleset-norm-protect-fork"
-  echo 5 > "$STATE/ruleset-id-protect-fork-tags"; echo "$OLD_FORK_TAGS" > "$STATE/ruleset-norm-protect-fork-tags"
-  OUT=$(run protect allen/repo1 --vault agent-p1 $mig 2>&1); rc=$?
-  check "agent-fence and protect-fork both exist (${mig:-no flag}): protect exits 0" test "$rc" -eq 0
+check "  no PUT"                                          lacks "$GHLOG" "$NOPUT"
+check "  no agent-fence created beside it (a later --migrate stays possible)" test ! -f "$STATE/ruleset-posted-agent-fence"
+check "  agent-fence-tags is still created"               test -s "$STATE/ruleset-posted-agent-fence-tags"
+check "  the rest still runs (auto-delete)"               test -f "$STATE/autodelete-patched"
+for mig in none --migrate; do
+  margs=(); [ "$mig" = none ] || margs=("$mig")
+  migstate; fencepair; oldfork; oldtags
+  OUT=$(run protect allen/repo1 --vault agent-p1 "${margs[@]}" 2>&1); rc=$?
+  check "agent-fence and protect-fork both exist ($mig): protect exits 0" test "$rc" -eq 0
   check "  warns protect-fork must be removed by hand"   grep -q 'WARNING.*protect-fork.*by hand' <<<"$OUT"
   check "  warns protect-fork-tags must be removed by hand" grep -q 'WARNING.*protect-fork-tags.*by hand' <<<"$OUT"
-  check "  no PUT"                                       bash -c '! grep -q "api -X PUT repos/allen/repo1/rulesets" "$1"' _ "$GHLOG"
+  check "  no PUT"                                       lacks "$GHLOG" "$NOPUT"
 done
-# retiring the main gate
-migstate; fencepair; echo 7 > "$STATE/ruleset-id-protect-main"; echo "$EXPECT_NORM" > "$STATE/ruleset-norm-protect-main"
-OUT=$(AGENT_NEW_CONFIRM=y run protect allen/repo1 --vault agent-p1 --migrate 2>&1); rc=$?
-check "protect-main + --migrate + yes: exits 0"         test "$rc" -eq 0
-check "  prints the normalised form and asks"            grep -q "delete ruleset 'protect-main' on allen/repo1? \[y/N\]" <<<"$OUT"
+
+echo "== fence: retiring the main gate =="
+# a pseudo-terminal: confirm takes its answer only from a terminal; $1 is what is typed (printf format)
+runtty(){ local typed="$1"; shift
+  printf "$typed" | HOME="$H" AGENT_CONTAINERS_CONFIG="$CFGROOT" PATH="$T/bin:$PATH" SHELL=/bin/bash \
+    script -qec "$(printf '%q ' "$AN" "$@")" /dev/null | tr -d '\r'; return "${PIPESTATUS[1]}"; }
+pmjson(){ # $1 name, $2 include list, $3 exclude list, $4 target: a main-gate ruleset as GitHub returns it
+  printf '{"id": 0, "name": "%s", "target": "%s", "enforcement": "active", "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}], "conditions": {"ref_name": {"include": %s, "exclude": %s}}, "rules": [{"type": "deletion"}, {"type": "non_fast_forward"}]}\n' \
+    "$1" "${4:-branch}" "${2:-[\"~DEFAULT_BRANCH\"]}" "${3:-[]}"; }
+gate(){ echo "$2" > "$STATE/ruleset-id-$1"; pmjson "$1" "${@:3}" > "$STATE/ruleset-json-$1"; }   # $1 name, $2 id, then pmjson's $2..
+retstate(){ migstate; fencepair; }
+retstate; gate protect-main 7
+OUT=$(runtty 'y\n' protect allen/repo1 --vault agent-p1 --retire-main-gate); rc=$?
+check "protect-main + --retire-main-gate, typed y at a terminal: exits 0" test "$rc" -eq 0
+check "  prints the ruleset and asks"                     grep -q "delete ruleset 'protect-main' on allen/repo1? \[y/N\]" <<<"$OUT"
 check "  exactly one DELETE, of its id"                   test "$(cat "$STATE/ruleset-deleted")" = 7
 check "  DELETE comes after the fence calls"              bash -c 'a=$(grep -n "rulesets/9 --jq" "$1" | head -n1 | cut -d: -f1); b=$(grep -n "api -X DELETE" "$1" | cut -d: -f1); [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]' _ "$GHLOG"
-migstate; fencepair; echo 7 > "$STATE/ruleset-id-protect-main"; echo "$EXPECT_NORM" > "$STATE/ruleset-norm-protect-main"
-check "same with AGENT_NEW_CONFIRM=n: exit 0"             runc n protect allen/repo1 --vault agent-p1 --migrate
-check "  no DELETE"                                       test ! -f "$STATE/ruleset-deleted"
-migstate; fencepair; echo 7 > "$STATE/ruleset-id-protect-main"; echo "$EXPECT_NORM" > "$STATE/ruleset-norm-protect-main"
-OUT=$(run protect allen/repo1 --vault agent-p1 --migrate </dev/null 2>&1); rc=$?
-check "no seam, stdin not a terminal: exit 0"             test "$rc" -eq 0
+check "  the ruleset is read again right before the DELETE" bash -c 'tail -n4 "$1" | head -n3 | grep -q "rulesets/7 --jq .name" && tail -n2 "$1" | grep -q "api -X DELETE repos/allen/repo1/rulesets/7"' _ "$(grep -v collaborators "$GHLOG" > "$T/ghlog.nocollab"; echo "$T/ghlog.nocollab")"
+for typed in 'n\n' '' 'yes please\n'; do
+  retstate; gate protect-main 7
+  OUT=$(runtty "$typed" protect allen/repo1 --vault agent-p1 --retire-main-gate); rc=$?
+  check "typed '${typed%\\n}' at the terminal: exit 0, nothing deleted" bash -c '[ "$1" -eq 0 ] && [ ! -f "$2" ]' _ "$rc" "$STATE/ruleset-deleted"
+done
+retstate; gate protect-main 7
+OUT=$(run protect allen/repo1 --vault agent-p1 --retire-main-gate </dev/null 2>&1); rc=$?
+check "stdin not a terminal: exit 0"                      test "$rc" -eq 0
 check "  no DELETE"                                       test ! -f "$STATE/ruleset-deleted"
 check "  warns NOT deleted"                               grep -q 'WARNING.*NOT deleted' <<<"$OUT"
-migstate; fencepair; echo 7 > "$STATE/ruleset-id-protect-main"; echo "$EXPECT_NORM" > "$STATE/ruleset-norm-protect-main"
-check "--migrate --main-gate: succeeds"                   runc y protect allen/repo1 --vault agent-p1 --migrate --main-gate
-check "  no DELETE"                                       test ! -f "$STATE/ruleset-deleted"
-migstate; fencepair; echo 7 > "$STATE/ruleset-id-main"; echo "$EXPECT_NORM" > "$STATE/ruleset-norm-main"
-OUT=$(AGENT_NEW_CONFIRM=y run protect allen/repo1 --vault agent-p1 --migrate 2>&1); rc=$?
-check "  exits 0"                                          test "$rc" -eq 0
-check "ruleset named main: treated as protect-main"       test "$(cat "$STATE/ruleset-deleted")" = 7
+retstate; gate protect-main 7
+OUT=$(printf 'y\n' | run protect allen/repo1 --vault agent-p1 --retire-main-gate 2>&1); rc=$?
+check "y piped in (not a terminal): nothing deleted"      bash -c '[ "$1" -eq 0 ] && [ ! -f "$2" ]' _ "$rc" "$STATE/ruleset-deleted"
+retstate; gate protect-main 7
+OUT=$(AGENT_NEW_CONFIRM=y run protect allen/repo1 --vault agent-p1 --retire-main-gate </dev/null 2>&1)
+check "AGENT_NEW_CONFIRM=y in the environment answers nothing" test ! -f "$STATE/ruleset-deleted"
+retstate; gate protect-main 7
+refuses "--retire-main-gate with --main-gate: usage error" 'cannot be used together' run protect allen/repo1 --vault agent-p1 --retire-main-gate --main-gate
+check "  no gh call"                                      bash -c '[ ! -s "$1" ]' _ "$GHLOG"
+retstate; gate main 6
+OUT=$(runtty 'y\n' protect allen/repo1 --vault agent-p1 --retire-main-gate); rc=$?
+check "ruleset named main: offered and deleted"           bash -c '[ "$1" -eq 0 ] && [ "$(cat "$2")" = 6 ]' _ "$rc" "$STATE/ruleset-deleted"
 check "  prompt names it main"                            grep -q "delete ruleset 'main' on allen/repo1" <<<"$OUT"
-migstate; fencepair; echo 7 > "$STATE/ruleset-id-protect-main"
-echo 'branch|active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:false|gitleaks|refs:~DEFAULT_BRANCH/refs/heads/x|strict:false|merge,rebase,squash' > "$STATE/ruleset-norm-protect-main"
-OUT=$(AGENT_NEW_CONFIRM=y run protect allen/repo1 --vault agent-p1 --migrate 2>&1); rc=$?
-check "  exits 0"                                          test "$rc" -eq 0
-check "protect-main with other conditions: left alone"    test ! -f "$STATE/ruleset-deleted"
-check "  and warned about"                                grep -q 'WARNING.*protect-main' <<<"$OUT"
-migstate; fencepair; echo 7 > "$STATE/ruleset-id-protect-main"; echo "$EXPECT_NORM" > "$STATE/ruleset-norm-protect-main"
-OUT=$(AGENT_NEW_CONFIRM=y run protect allen/repo1 --vault agent-p1 2>&1); rc=$?
-check "  exits 0"                                          test "$rc" -eq 0
-check "protect-main without --migrate: never deleted"     test ! -f "$STATE/ruleset-deleted"
-migstate; touch "$STATE/rulesets-list-fail"
-refuses "--migrate, fence cannot be created (list fails)" 'could not list rulesets' runc y protect allen/repo1 --vault agent-p1 --migrate
-check "  no DELETE"                                       bash -c '! grep -q "api -X DELETE" "$1"' _ "$GHLOG"
-migstate; fencepair; echo "${FENCE_NORM/'refs/heads/sync/**,'/}" > "$STATE/ruleset-norm-agent-fence"
-echo 7 > "$STATE/ruleset-id-protect-main"; echo "$EXPECT_NORM" > "$STATE/ruleset-norm-protect-main"
-refuses "--migrate, fence differs from template: refused" 'refusing to modify' runc y protect allen/repo1 --vault agent-p1 --migrate
-check "  no DELETE"                                       test ! -f "$STATE/ruleset-deleted"
+retstate; gate protect-main 7; gate main 6
+OUT=$(runtty 'n\ny\n' protect allen/repo1 --vault agent-p1 --retire-main-gate); rc=$?
+check "protect-main and main both present: each asked separately" bash -c '[ "$(grep -c "delete ruleset" <<<"$1")" -eq 2 ] && grep -q "delete ruleset .protect-main." <<<"$1" && grep -q "delete ruleset .main." <<<"$1"' _ "$OUT"
+check "  n for protect-main, y for main: only main deleted" bash -c '[ "$1" -eq 0 ] && [ "$(cat "$2")" = 6 ]' _ "$rc" "$STATE/ruleset-deleted"
+for bad in 'include ["~DEFAULT_BRANCH","refs/heads/x"]' 'exclude ["refs/heads/x"]' 'target tag' 'include ["refs/heads/main"]'; do
+  retstate
+  case "$bad" in include*) gate protect-main 7 "${bad#include }" ;; exclude*) gate protect-main 7 '["~DEFAULT_BRANCH"]' "${bad#exclude }" ;; *) gate protect-main 7 '["~DEFAULT_BRANCH"]' '[]' tag ;; esac
+  OUT=$(runtty 'y\n' protect allen/repo1 --vault agent-p1 --retire-main-gate); rc=$?
+  check "protect-main with $bad: left alone, warned"     bash -c '[ "$1" -eq 0 ] && [ ! -f "$2" ] && grep -q "WARNING: ruleset protect-main on allen/repo1 does not apply to just the default branch" <<<"$3" && ! grep -q "delete ruleset" <<<"$3"' _ "$rc" "$STATE/ruleset-deleted" "$OUT"
+done
+retstate; gate protect-main 7
+OUT=$(runtty 'y\n' protect allen/repo1 --vault agent-p1 --migrate); rc=$?
+check "--migrate alone never offers to delete the main gate" bash -c '[ "$1" -eq 0 ] && [ ! -f "$2" ] && ! grep -q "delete ruleset" <<<"$3"' _ "$rc" "$STATE/ruleset-deleted" "$OUT"
+retstate; gate protect-main 7
+OUT=$(runtty 'y\n' protect allen/repo1 --vault agent-p1); rc=$?
+check "no flag: never deleted"                            bash -c '[ "$1" -eq 0 ] && [ ! -f "$2" ]' _ "$rc" "$STATE/ruleset-deleted"
+migstate; gate protect-main 7; touch "$STATE/rulesets-list-fail"
+OUT=$(runtty 'y\n' protect allen/repo1 --vault agent-p1 --retire-main-gate); rc=$?
+check "--retire-main-gate, fence cannot be created: refused, no DELETE" bash -c '[ "$1" -ne 0 ] && grep -q "could not list rulesets" <<<"$2" && ! grep -q "api -X DELETE" "$3"' _ "$rc" "$OUT" "$GHLOG"
+retstate; echo "${FENCE_NORM/'refs/heads/sync/**,'/}" > "$STATE/ruleset-norm-agent-fence"; gate protect-main 7
+OUT=$(runtty 'y\n' protect allen/repo1 --vault agent-p1 --retire-main-gate); rc=$?
+check "--retire-main-gate, fence differs from template: refused, no DELETE" bash -c '[ "$1" -ne 0 ] && grep -q "refusing to modify" <<<"$2" && [ ! -f "$3" ]' _ "$rc" "$OUT" "$STATE/ruleset-deleted"
+migstate; oldfork; gate protect-main 7
+OUT=$(runtty 'y\n' protect allen/repo1 --vault agent-p1 --retire-main-gate); rc=$?
+check "--retire-main-gate while the old protect-fork stands in for the fence: not retired" bash -c '[ "$1" -eq 0 ] && [ ! -f "$2" ] && grep -q "WARNING: .*not retiring the main gate" <<<"$3"' _ "$rc" "$STATE/ruleset-deleted" "$OUT"
+newstate; touch "$STATE/collab" "$STATE/has-allen-dev"
+OUT=$(run protect allen/one allen/two --vault agent-p1 --retire-main-gate </dev/null 2>&1)
+check "--retire-main-gate with two repos: warned once that it applies to each" test "$(grep -c 'WARNING: --retire-main-gate applies to every repo named' <<<"$OUT")" -eq 1
+newstate; touch "$STATE/collab" "$STATE/has-allen-dev"
+OUT=$(run protect allen/one allen/two --vault agent-p1 --main-gate 2>&1)
+check "--main-gate with two repos: warned once"           test "$(grep -c 'WARNING: --main-gate applies to every repo named' <<<"$OUT")" -eq 1
+newstate; touch "$STATE/collab" "$STATE/has-allen-dev"
+OUT=$(run protect allen/one --vault agent-p1 --main-gate 2>&1)
+check "--main-gate with one repo: no such warning"        bash -c '! grep -q "applies to every repo" <<<"$1"' _ "$OUT"
+newstate; touch "$STATE/collab" "$STATE/has-allen-dev"
+OUT=$(run protect allen/one --vault agent-p1 --require build-test 2>&1); rc=$?
+check "--require without --main-gate: warned that it is ignored" bash -c '[ "$1" -eq 0 ] && grep -q "WARNING: --require is ignored without --main-gate" <<<"$2"' _ "$rc" "$OUT"
 
 echo "== fence: several repos =="
 newstate; touch "$STATE/collab" "$STATE/has-allen-dev"; echo allen/two > "$STATE/fail-repo"
@@ -1031,7 +1084,7 @@ unset AGENT_NEW_STOP_AFTER
 rm -rf "$PROJHOME/InhTok" "$CFGROOT/inhtok"
 
 newstate; printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
-LIVE_NORM='branch|active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:false|R-CMD-check+gitleaks|refs:~DEFAULT_BRANCH/|strict:false|merge,rebase,squash'
+LIVE_NORM='branch|active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:false|R-CMD-check+gitleaks|refs:~DEFAULT_BRANCH/|strict:false|merge,rebase,squash|upd:-'
 touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"; echo 7 > "$STATE/ruleset-id-protect-main"; echo "$LIVE_NORM" > "$STATE/ruleset-norm-protect-main"
 check "--require R-CMD-check matches C-sorted norm (default locale)" run protect allen/repo1 --vault agent-p1 --require R-CMD-check --main-gate
 check "  and under en_US.utf8" env LC_ALL=en_US.utf8 HOME="$H" AGENT_CONTAINERS_CONFIG="$CFGROOT" PATH="$T/bin:$PATH" "$AN" protect allen/repo1 --vault agent-p1 --require R-CMD-check --main-gate

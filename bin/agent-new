@@ -31,9 +31,10 @@ usage(){
 usage:
   agent-new project <folder> [--image base|gis|bio] [--public] [--no-research]
                              [--t3 publish|1|0] [--token-from <vault>] [--machine-user <user>]
-  agent-new protect <owner>/<repo>... [--machine-user <user>] [--vault <op-vault>] [--require <check>]...
-                             [--main-gate] [--no-working-branch] [--migrate]
-  agent-new verify  <project> | <owner>/<repo> [--vault <op-vault>]
+  agent-new protect <owner>/<repo>... [--machine-user <user>] [--vault <op-vault>]
+                             [--main-gate [--require <check>]...] [--no-working-branch]
+                             [--migrate] [--retire-main-gate]
+  agent-new verify  <project> | <owner>/<repo> [--vault <op-vault>] [--main-gate [--require <check>]...]
 Runs AS THE OWNER. The runbooks in docs/runbooks/ remain the reference procedure.
 USAGE
   exit 2
@@ -58,7 +59,7 @@ gh_read(){ # $1 what is read (for the message), then gh's arguments: prints gh's
   rm -f "$errf"; printf '%s' "$out"
 }
 
-MAIN_GATE=0 WORK_BRANCH_ON=1 MIGRATE=0 MU_TOK=""
+MAIN_GATE=0 WORK_BRANCH_ON=1 MIGRATE=0 RETIRE=0 REQUIRE_GIVEN=0 MU_TOK=""
 MACHINE_USER_FLAG="" VAULT="" IMAGE="" VISIBILITY=private RESEARCH=1 T3MODE=publish TOKEN_FROM=""
 REQUIRE_CHECKS=(gitleaks)
 
@@ -348,7 +349,8 @@ NORM_JQ='[.target, .enforcement,
  ((.rules[] | select(.type=="required_status_checks") | .parameters.required_status_checks | map(.context) | sort | join("+")) // ""),
  ((.conditions.ref_name | "refs:\(.include|sort|join(","))/\(.exclude|sort|join(","))") // "refs:-"),
  ((.rules[] | select(.type=="required_status_checks") | .parameters | "strict:\(.strict_required_status_checks_policy)") // "strict:-"),
- ((.rules[] | select(.type=="pull_request") | .parameters.allowed_merge_methods | sort | join(",")) // "")
+ ((.rules[] | select(.type=="pull_request") | .parameters.allowed_merge_methods | sort | join(",")) // ""),
+ ((.rules[] | select(.type=="update") | "upd:\(.parameters.update_allows_fetch_and_merge // false)") // "upd:-")
 ] | join("|")'
 
 FREE_PREFIXES=(fix feature chore docs test ci refactor perf revert upstream sync experiment)
@@ -412,20 +414,22 @@ ruleset_norm_expected(){ # $1 template name; what NORM_JQ makes of that template
   local ex
   case "$1" in
     protect-main)
-      printf 'branch|active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:false|%s|refs:~DEFAULT_BRANCH/|strict:false|merge,rebase,squash' \
+      printf 'branch|active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:false|%s|refs:~DEFAULT_BRANCH/|strict:false|merge,rebase,squash|upd:-' \
         "$(checks_sorted | paste -sd+ -)" ;;
     agent-fence)
       ex="$({ printf 'refs/heads/%s\n' "$WORK_BRANCH"; printf 'refs/heads/%s/**\n' "${FREE_PREFIXES[@]}"; } | LC_ALL=C sort | paste -sd, -)"
-      printf 'branch|active|RepositoryRole:5:always|creation,deletion,non_fast_forward,update|pr:-||refs:~ALL/%s|strict:-|' "$ex" ;;
+      printf 'branch|active|RepositoryRole:5:always|creation,deletion,non_fast_forward,update|pr:-||refs:~ALL/%s|strict:-||upd:false' "$ex" ;;
     agent-fence-tags)
-      printf 'tag|active|RepositoryRole:5:always|creation,deletion,update|pr:-||refs:~ALL/|strict:-|' ;;
+      printf 'tag|active|RepositoryRole:5:always|creation,deletion,update|pr:-||refs:~ALL/|strict:-||upd:false' ;;
     *) die "no ruleset template named $1" ;;
   esac
 }
-ruleset_id(){ # $1 owner/repo, $2 ruleset name: prints the id, or nothing when there is none
-  local repo="$1" name="$2" out rc=0 errf sel; errf="$(mktemp)"
-  sel=".name==\"$name\""
-  [ "$name" != protect-main ] || sel="$sel or .name==\"main\""   # a ruleset named main is the same gate
+ruleset_id(){ # $1 owner/repo, $2 template name: prints the id, or nothing when there is none (a ruleset named main is protect-main)
+  if [ "$2" = protect-main ]; then ruleset_id_exact "$1" protect-main main; else ruleset_id_exact "$1" "$2"; fi
+}
+ruleset_id_exact(){ # $1 owner/repo, then one or more exact ruleset names: prints the first match's id, or nothing
+  local repo="$1" out rc=0 errf sel="" n; shift; errf="$(mktemp)"
+  for n in "$@"; do sel="${sel:+$sel or }.name==\"$n\""; done
   # stdout only is parsed (a stray stderr line must not become the id); stderr shown on failure
   out="$(gh api "repos/$repo/rulesets" --jq ".[] | select($sel) | .id" 2>"$errf")" || rc=$?
   [ "$rc" -eq 0 ] || die "could not list rulesets on $repo (needs admin; private repos on GitHub Free have no rulesets): $out$(cat "$errf"; rm -f "$errf")
@@ -491,22 +495,24 @@ protect_autodelete(){ # $1 owner/repo: merged PR branches delete themselves
     *)     die "could not read delete_branch_on_merge of $repo (got: '$v')" ;;
   esac
 }
-confirm(){ # $1 question: 0 for yes, 1 for no, 2 when there is nobody to ask (AGENT_NEW_CONFIRM=y|n is the test seam)
+confirm(){ # $1 question: 0 for yes, 1 for no, 2 when there is nobody to ask. Only a line typed at a terminal answers yes.
   local ans=""
-  case "${AGENT_NEW_CONFIRM:-}" in
-    y|n) printf '%s %s\n' "$1" "$AGENT_NEW_CONFIRM" >&2; [ "$AGENT_NEW_CONFIRM" = y ]; return ;;
-  esac
   [ -t 0 ] || return 2
   printf '%s ' "$1" >&2
   read -r ans || true
   [[ "$ans" =~ ^[yY]$ ]]
 }
+OLD_FENCE_NORM='branch|active|RepositoryRole:5:always|creation,deletion,non_fast_forward,update|pr:-||refs:~ALL/refs/heads/feature/**,refs/heads/fix/**|strict:-||upd:false'
+OLD_TAGS_NORM='tag|active|RepositoryRole:5:always|creation,deletion,update|pr:-||refs:~ALL/|strict:-||upd:false'
+FENCE_SKIP=()   # fence rulesets this run leaves uncreated: an older hand-made one stands in their place until --migrate
+free_names(){ local p out="$WORK_BRANCH"; for p in "${FREE_PREFIXES[@]}"; do out+=", $p/**"; done; printf '%s' "$out"; }
 migrate_fence(){ # $1 owner/repo: the hand-made protect-fork rulesets become the agent fence (the only rulesets this tool ever renames)
-  local repo="$1" pair old new oldnorm id fid have
-  for pair in "protect-fork agent-fence branch|active|RepositoryRole:5:always|creation,deletion,non_fast_forward,update|pr:-||refs:~ALL/refs/heads/feature/**,refs/heads/fix/**|strict:-|" \
-              "protect-fork-tags agent-fence-tags tag|active|RepositoryRole:5:always|creation,deletion,update|pr:-||refs:~ALL/|strict:-|"; do
+  local repo="$1" pair old new oldnorm id fid have t todo=()
+  FENCE_SKIP=()
+  # both are checked before the first PUT: a refusal changes neither
+  for pair in "protect-fork agent-fence $OLD_FENCE_NORM" "protect-fork-tags agent-fence-tags $OLD_TAGS_NORM"; do
     read -r old new oldnorm <<<"$pair"
-    id="$(ruleset_id "$repo" "$old")"
+    id="$(ruleset_id_exact "$repo" "$old")"
     [ -n "$id" ] || continue
     fid="$(ruleset_id "$repo" "$new")"
     if [ -n "$fid" ]; then
@@ -518,35 +524,49 @@ migrate_fence(){ # $1 owner/repo: the hand-made protect-fork rulesets become the
       [ "$MIGRATE" -eq 1 ] || continue   # not the hand-made shape, so not ours to report
       warn "live:     $have"
       warn "expected: $oldnorm"
-      die "ruleset $old on $repo is not the shape --migrate renames: refusing to modify it."
+      die "ruleset $old on $repo is not the shape --migrate renames: refusing to modify it (nothing was changed)."
     fi
     if [ "$MIGRATE" -eq 1 ]; then
-      say "renaming ruleset $old on $repo to $new"
-      ruleset_json "$new" | gh api -X PUT "repos/$repo/rulesets/$id" --input - >/dev/null
+      todo+=("$old $new $id")
     else
-      warn "ruleset $old on $repo is the old hand-made shape: the agent is still limited to fix/ and feature/ until you re-run with --migrate (it then becomes $new)"
+      warn "ruleset $old on $repo is the older, narrower hand-made shape (the agent is limited to fix/ and feature/): $new is not created beside it; re-run with --migrate to convert it"
+      FENCE_SKIP+=("$new")
     fi
   done
+  for t in ${todo[@]+"${todo[@]}"}; do
+    read -r old new id <<<"$t"
+    say "renaming ruleset $old on $repo to $new"
+    if [ "$new" = agent-fence ]; then
+      say "  free names before: fix/**, feature/**"
+      say "  free names after:  $(free_names)"
+    fi
+    ruleset_json "$new" | gh api -X PUT "repos/$repo/rulesets/$id" --input - >/dev/null
+  done
 }
-migrate_main_gate(){ # $1 owner/repo: with --migrate and no --main-gate, offer to delete the old protect-main / main gate
-  local repo="$1" mid pid name id have rc
-  local -a f
-  mid="$(ruleset_id "$repo" main)"
-  pid="$(ruleset_id "$repo" protect-main)"   # also matches main
+fence_skipped(){ local n; for n in ${FENCE_SKIP[@]+"${FENCE_SKIP[@]}"}; do [ "$n" != "$1" ] || return 0; done; return 1; }
+RULE_REF_JQ='[.name, .target, (.conditions.ref_name.include | tojson), (.conditions.ref_name.exclude | tojson)] | join("\n")'
+retire_main_gate(){ # $1 owner/repo: with --retire-main-gate, offer to delete protect-main and main, each found by its exact name
+  local repo="$1" name id info have again rc f=()
   for name in protect-main main; do
-    case "$name" in protect-main) id="$pid"; [ "$pid" != "$mid" ] || id="" ;; *) id="$mid" ;; esac
-    [ -n "$id" ] || continue
-    have="$(gh api "repos/$repo/rulesets/$id" --jq "$NORM_JQ")"
-    IFS='|' read -ra f <<<"$have"
-    if [ "${f[6]:-}" != 'refs:~DEFAULT_BRANCH/' ]; then
-      warn "ruleset $name on $repo does not just target the default branch: leaving it alone ($have)"
+    id="$(ruleset_id_exact "$repo" "$name")"
+    if [ -z "$id" ]; then say "no ruleset named $name on $repo"; continue; fi
+    info="$(gh_read "ruleset $name on $repo" api "repos/$repo/rulesets/$id" --jq "$RULE_REF_JQ")"
+    mapfile -t f <<<"$info"
+    if [ "${f[0]:-}" != "$name" ] || [ "${f[1]:-}" != branch ] || [ "${f[2]:-}" != '["~DEFAULT_BRANCH"]' ] || [ "${f[3]:-}" != '[]' ]; then
+      warn "ruleset $name on $repo does not apply to just the default branch: leaving it alone (target ${f[1]:-?}, include ${f[2]:-?}, exclude ${f[3]:-?})"
       continue
     fi
+    have="$(gh_read "ruleset $name on $repo" api "repos/$repo/rulesets/$id" --jq "$NORM_JQ")"
     say "ruleset $name on $repo: $have"
     rc=0; confirm "delete ruleset '$name' on $repo? [y/N]" || rc=$?
     case "$rc" in
-      0) say "deleting ruleset $name on $repo"; gh api -X DELETE "repos/$repo/rulesets/$id" >/dev/null ;;
-      2) warn "not a terminal: $name on $repo was NOT deleted; re-run --migrate at a terminal" ;;
+      0) # the answer may have taken a while: the id must still be this ruleset's
+         again="$(ruleset_id_exact "$repo" "$name")"
+         [ "$again" = "$id" ] && [ "$(gh_read "ruleset $id on $repo" api "repos/$repo/rulesets/$id" --jq .name)" = "$name" ] \
+           || die "ruleset $name on $repo changed while you answered: nothing was deleted; re-run"
+         say "deleting ruleset $name on $repo"
+         gh api -X DELETE "repos/$repo/rulesets/$id" >/dev/null ;;
+      2) warn "not a terminal: $name on $repo was NOT deleted; re-run --retire-main-gate at a terminal" ;;
       *) skip "ruleset $name on $repo kept" ;;
     esac
   done
@@ -618,15 +638,18 @@ protect_repo(){ # $1 owner/repo, in this order: the fence and the branch setting
   protect_preflight "$1"; repo="$P_REPO"
   protect_notices
   migrate_fence "$repo"
-  ensure_ruleset "$repo" agent-fence
-  ensure_ruleset "$repo" agent-fence-tags
+  local n
+  for n in agent-fence agent-fence-tags; do
+    if ! fence_skipped "$n"; then ensure_ruleset "$repo" "$n"; fi
+  done
   if [ "$WORK_BRANCH_ON" -eq 1 ]; then protect_work_branch "$repo" "$P_DEFAULT"; fi
   protect_autodelete "$repo"
   if [ "$MAIN_GATE" -eq 1 ]; then
     ensure_ruleset "$repo" protect-main
     protect_warnings "$repo"
-  elif [ "$MIGRATE" -eq 1 ]; then
-    migrate_main_gate "$repo"   # both fence rulesets were ensured above, in this run
+  elif [ "$RETIRE" -eq 1 ]; then
+    if [ "${#FENCE_SKIP[@]}" -eq 0 ]; then retire_main_gate "$repo"   # both fence rulesets were ensured above, in this run
+    else warn "the older protect-fork ruleset still stands in for the fence on $repo: not retiring the main gate (run --migrate first)"; fi
   fi
   protect_collaborator "$repo"
   say "protect: done ($repo)"
@@ -868,20 +891,30 @@ while [ $# -gt 0 ]; do case "$1" in
   --no-research)  RESEARCH=0; shift ;;
   --t3)           case "${2:?}" in publish|1|0) T3MODE="$2" ;; *) die "--t3 must be publish, 1 or 0 (got: $2)" ;; esac; shift 2 ;;
   --token-from)   TOKEN_FROM="${2:?}"; shift 2 ;;
-  --require)      REQUIRE_CHECKS+=("${2:?}"); shift 2 ;;
+  --require)      REQUIRE_CHECKS+=("${2:?}"); REQUIRE_GIVEN=1; shift 2 ;;
   --main-gate)    MAIN_GATE=1; shift ;;
   --no-working-branch) WORK_BRANCH_ON=0; shift ;;
   --migrate)      MIGRATE=1; shift ;;
+  --retire-main-gate) RETIRE=1; shift ;;
   -*)             usage ;;
   *)              args+=("$1"); shift ;;
 esac; done
 set -- "${args[@]:-}"
+if [ "$RETIRE" -eq 1 ] && [ "$MAIN_GATE" -eq 1 ]; then
+  printf 'agent-new: --retire-main-gate and --main-gate cannot be used together\n' >&2; usage
+fi
+[ "$REQUIRE_GIVEN" -eq 0 ] || [ "$MAIN_GATE" -eq 1 ] || warn "--require is ignored without --main-gate"
 
 case "$sub" in
   project) [ $# -eq 1 ] && [ -n "$1" ] || usage; cmd_project "$1" ;;
   protect) [ $# -ge 1 ] || usage
            for r in "$@"; do repo_arg_ok "$r" || die "protect wants <owner>/<repo> (got: $r)"; done
-           OWNER="$(preflight_owner)"; cmd_protect_many "$@" ;;
+           OWNER="$(preflight_owner)"
+           if [ $# -gt 1 ]; then
+             [ "$MAIN_GATE" -eq 0 ] || warn "--main-gate applies to every repo named: $*"
+             [ "$RETIRE" -eq 0 ] || warn "--retire-main-gate applies to every repo named: $*"
+           fi
+           cmd_protect_many "$@" ;;
   verify)  [ $# -eq 1 ] || usage; cmd_verify "$1" ;;
   *) usage ;;
 esac
