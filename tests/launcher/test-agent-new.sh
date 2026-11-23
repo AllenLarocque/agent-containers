@@ -377,7 +377,8 @@ migstate; echo 5 > "$STATE/ruleset-id-protect-fork-tags"; echo "${OLD_FORK_TAGS/
 refuses "altered protect-fork-tags + --migrate: refused" 'refusing to modify' run protect allen/repo1 --vault agent-p1 --migrate
 check "  no PUT"                                         bash -c '! grep -q "api -X PUT repos/allen/repo1/rulesets" "$1"' _ "$GHLOG"
 migstate; echo 4 > "$STATE/ruleset-id-protect-fork"; echo "$OLD_FORK" > "$STATE/ruleset-norm-protect-fork"
-OUT=$(run protect allen/repo1 --vault agent-p1 2>&1)
+OUT=$(run protect allen/repo1 --vault agent-p1 2>&1); rc=$?
+check "old protect-fork without --migrate: exits 0"        test "$rc" -eq 0
 check "old protect-fork without --migrate: warning names --migrate" grep -q 'WARNING.*--migrate' <<<"$OUT"
 check "  warning says the agent is still limited to fix/ and feature/" grep -q 'WARNING.*fix/.*feature/' <<<"$OUT"
 check "  no PUT"                                         bash -c '! grep -q "api -X PUT repos/allen/repo1/rulesets" "$1"' _ "$GHLOG"
@@ -385,16 +386,16 @@ check "  the new fence is created beside it"             test -s "$STATE/ruleset
 for mig in "" --migrate; do
   migstate; fencepair; echo 4 > "$STATE/ruleset-id-protect-fork"; echo "$OLD_FORK" > "$STATE/ruleset-norm-protect-fork"
   echo 5 > "$STATE/ruleset-id-protect-fork-tags"; echo "$OLD_FORK_TAGS" > "$STATE/ruleset-norm-protect-fork-tags"
-  OUT=$(run protect allen/repo1 --vault agent-p1 $mig 2>&1)
-  check "agent-fence and protect-fork both exist (${mig:-no flag}): protect succeeds" test -n "$OUT"
+  OUT=$(run protect allen/repo1 --vault agent-p1 $mig 2>&1); rc=$?
+  check "agent-fence and protect-fork both exist (${mig:-no flag}): protect exits 0" test "$rc" -eq 0
   check "  warns protect-fork must be removed by hand"   grep -q 'WARNING.*protect-fork.*by hand' <<<"$OUT"
   check "  warns protect-fork-tags must be removed by hand" grep -q 'WARNING.*protect-fork-tags.*by hand' <<<"$OUT"
   check "  no PUT"                                       bash -c '! grep -q "api -X PUT repos/allen/repo1/rulesets" "$1"' _ "$GHLOG"
 done
 # retiring the main gate
 migstate; fencepair; echo 7 > "$STATE/ruleset-id-protect-main"; echo "$EXPECT_NORM" > "$STATE/ruleset-norm-protect-main"
-OUT=$(AGENT_NEW_CONFIRM=y run protect allen/repo1 --vault agent-p1 --migrate 2>&1)
-check "protect-main + --migrate + yes: succeeds"         test -n "$OUT"
+OUT=$(AGENT_NEW_CONFIRM=y run protect allen/repo1 --vault agent-p1 --migrate 2>&1); rc=$?
+check "protect-main + --migrate + yes: exits 0"         test "$rc" -eq 0
 check "  prints the normalised form and asks"            grep -q "delete ruleset 'protect-main' on allen/repo1? \[y/N\]" <<<"$OUT"
 check "  exactly one DELETE, of its id"                   test "$(cat "$STATE/ruleset-deleted")" = 7
 check "  DELETE comes after the fence calls"              bash -c 'a=$(grep -n "rulesets/9 --jq" "$1" | head -n1 | cut -d: -f1); b=$(grep -n "api -X DELETE" "$1" | cut -d: -f1); [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]' _ "$GHLOG"
@@ -410,16 +411,19 @@ migstate; fencepair; echo 7 > "$STATE/ruleset-id-protect-main"; echo "$EXPECT_NO
 check "--migrate --main-gate: succeeds"                   runc y protect allen/repo1 --vault agent-p1 --migrate --main-gate
 check "  no DELETE"                                       test ! -f "$STATE/ruleset-deleted"
 migstate; fencepair; echo 7 > "$STATE/ruleset-id-main"; echo "$EXPECT_NORM" > "$STATE/ruleset-norm-protect-main"
-OUT=$(AGENT_NEW_CONFIRM=y run protect allen/repo1 --vault agent-p1 --migrate 2>&1)
+OUT=$(AGENT_NEW_CONFIRM=y run protect allen/repo1 --vault agent-p1 --migrate 2>&1); rc=$?
+check "  exits 0"                                          test "$rc" -eq 0
 check "ruleset named main: treated as protect-main"       test "$(cat "$STATE/ruleset-deleted")" = 7
 check "  prompt names it main"                            grep -q "delete ruleset 'main' on allen/repo1" <<<"$OUT"
 migstate; fencepair; echo 7 > "$STATE/ruleset-id-protect-main"
 echo 'branch|active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:false|gitleaks|refs:~DEFAULT_BRANCH/refs/heads/x|strict:false|merge,rebase,squash' > "$STATE/ruleset-norm-protect-main"
-OUT=$(AGENT_NEW_CONFIRM=y run protect allen/repo1 --vault agent-p1 --migrate 2>&1)
+OUT=$(AGENT_NEW_CONFIRM=y run protect allen/repo1 --vault agent-p1 --migrate 2>&1); rc=$?
+check "  exits 0"                                          test "$rc" -eq 0
 check "protect-main with other conditions: left alone"    test ! -f "$STATE/ruleset-deleted"
 check "  and warned about"                                grep -q 'WARNING.*protect-main' <<<"$OUT"
 migstate; fencepair; echo 7 > "$STATE/ruleset-id-protect-main"; echo "$EXPECT_NORM" > "$STATE/ruleset-norm-protect-main"
-OUT=$(AGENT_NEW_CONFIRM=y run protect allen/repo1 --vault agent-p1 2>&1)
+OUT=$(AGENT_NEW_CONFIRM=y run protect allen/repo1 --vault agent-p1 2>&1); rc=$?
+check "  exits 0"                                          test "$rc" -eq 0
 check "protect-main without --migrate: never deleted"     test ! -f "$STATE/ruleset-deleted"
 migstate; touch "$STATE/rulesets-list-fail"
 refuses "--migrate, fence cannot be created (list fails)" 'could not list rulesets' runc y protect allen/repo1 --vault agent-p1 --migrate
