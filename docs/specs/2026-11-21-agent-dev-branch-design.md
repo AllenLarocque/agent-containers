@@ -75,8 +75,8 @@ mirror:
 - A change that builds on a PR upstream has not merged is either held on `allen-dev` until then,
   or sent stacked on that PR's branch with "depends on #N" in its description. Owner's choice per
   change.
-- Upstream's changes enter `allen-dev` when the owner asks: the agent opens a PR from the synced
-  mirror into `allen-dev`.
+- Upstream's changes enter `allen-dev` when the owner asks: the agent opens a PR into `allen-dev`
+  from a `sync/` branch that merges in the synced mirror the owner names.
 
 The branch is named `allen-dev` on every repo (owner's choice, 2026-11-23). `agent-new protect`
 creates it from the default branch's head when it does not exist, leaves an existing one alone,
@@ -172,10 +172,11 @@ project's vault holds a token for the same machine user, used only to accept the
 `agent-fence-tags` must equal their templates (and `agent-working-branch` when `allen-dev` exists,
 and `protect-main` with `--main-gate`), and no
 `protect-fork` or `protect-fork-tags` may be left. Then the owner creates a throwaway branch and
-tag named `verify-fence-<run id>` at the default branch's head, and, as the machine user:
+tag named `zz-agent-new-verify-<run id>` at the default branch's head (only if no ref of that name
+exists), and, as the machine user:
 
-- a fast-forward push to that branch, a force-push of unrelated history to it and its deletion
-  are refused;
+- a fast-forward push to that branch, a force-push that rewinds it to the default head's parent,
+  and its deletion are refused;
 - creating a new branch outside the free names, and a new tag, are refused;
 - moving and deleting the throwaway tag are refused;
 - a free-named branch can be pushed, and a PR from it into the throwaway branch cannot be merged;
@@ -201,8 +202,9 @@ file is generated. The research profile's own instructions are unchanged. Its co
 - Work on a branch named `<prefix>/<short-name>` with a free prefix. `fix`, `feature`, `chore`,
   `docs`, `test`, `ci`, `refactor`, `perf`, `revert` and `experiment` branches start from the
   current `allen-dev` and are squash-merged into it.
-- `sync/<name>`, only when the owner asks: it merges the fork's copy of the upstream branch into
-  `allen-dev`, and its PR is merged with a merge commit, never squashed.
+- `sync/<name>`, only when the owner asks: a `sync/` branch from `allen-dev` merges in the branch
+  the owner names (the fork's copy of an upstream branch); its PR into `allen-dev` is merged by the
+  owner unless they say otherwise, with a merge commit, never squashed.
 - `upstream/<topic>`, only when the owner asks: cut from the fork's copy of the upstream
   repository's target branch, never from `allen-dev`; one change; never merged in the fork; the
   owner gets the link.

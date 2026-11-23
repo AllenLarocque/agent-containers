@@ -116,7 +116,7 @@ Both are checked before either is changed: if either is not exactly the hand-mad
 
 ### `--retire-main-gate`: removing the older main gate
 
-Run it only after `verify` has printed `FENCE VERIFIED` on that repo. Per repo: `agent-new protect <owner>/<repo> --migrate`, then `agent-new verify ...`, then `agent-new protect <owner>/<repo> --retire-main-gate`.
+Run it only after `verify` has printed `FENCE VERIFIED` on that repo. Per repo: `agent-new protect <owner>/<repo> --migrate`, then `agent-new verify <owner>/<repo> --vault agent-<project>`, then `agent-new protect <owner>/<repo> --retire-main-gate`.
 
 It first makes sure the fence is in place, in the same run. Then it looks up a ruleset named exactly `protect-main` and one named exactly `main`, separately. A ruleset qualifies only if it is a branch ruleset that applies to exactly the default branch; any other is left alone with a warning. For each one that qualifies, the tool prints its settings and asks `delete ruleset '<name>' on <repo>? [y/N]`. Only `y` typed at a terminal deletes it; where there is no terminal, nothing is deleted and the tool says so. It reads the ruleset again just before deleting it, and stops if it changed. `--retire-main-gate` together with `--main-gate` is refused.
 
@@ -125,12 +125,14 @@ It first makes sure the fence is in place, in the same run. Then it looks up a r
 Run it after `protect`. With a project name it works in that project's running container, in a temporary git worktree, so your checkout is not touched. With `<owner>/<repo> --vault ...` it works in a temporary clone that it removes afterwards. Your own `gh` (as you) prepares and cleans up; the attempts are made as the machine user (with that account's token, never yours).
 
 1. **As you, before anything is pushed:** it reads the rulesets. `agent-fence` and `agent-fence-tags` must equal their templates (and `agent-working-branch` when `allen-dev` exists, and `protect-main` with `--main-gate`), and no `protect-fork` or `protect-fork-tags` may be left (migrate first). Otherwise it stops.
-2. **As you:** it creates a throwaway branch and a throwaway tag, both named `verify-fence-<run id>`, at the head of the default branch. The run id is the time and the process number, so no name is reused.
-3. **As the machine user, each of these must be refused by a rule:** a fast-forward push to the throwaway branch; a force-push of an unrelated commit to it; deleting it; creating a new branch outside the allowed names; creating a new tag; moving the throwaway tag; deleting it; and merging (through GitHub's API) a PR from `chore/verify-fence-<run id>` into the throwaway branch. The push of `chore/verify-fence-<run id>` itself must succeed.
+2. **As you:** it creates a throwaway branch and a throwaway tag, both named `zz-agent-new-verify-<run id>`, at the head of the default branch. The run id is the time, the process number and a random number. It first checks that no ref of that name exists, and removes only refs it created.
+3. **As the machine user, each of these must be refused by a rule:** a fast-forward push to the throwaway branch; a force-push that rewinds it to the default head's parent (an unrelated commit when the head has no parent); deleting it; creating a new branch outside the allowed names; creating a new tag; moving the throwaway tag; deleting it; and merging (through GitHub's API) a PR from `chore/verify-fence-<run id>` into the throwaway branch. The push of `chore/verify-fence-<run id>` itself must succeed.
 4. **If `allen-dev` exists:** a PR from `chore/verify-fence-<run id>-dev` into `allen-dev`, waiting for its checks, then a squash merge that must succeed and must leave the PR merged. If the PR reports no checks after the tool's retries, it merges without them and says so. Then, as the machine user, deleting `allen-dev` and force-pushing it must both be refused. The force-push attempt would only rewind `allen-dev` by verify's own commit, and only if nothing else landed meanwhile; if either attempt went through, the tool puts `allen-dev` back where it was, as you, before it stops.
 5. **As you:** it closes the refused PR and deletes the throwaway branch, the throwaway tag and the `chore/` branches.
 
 The default branch is never pushed to or merged into in these checks; if an attempt is wrongly accepted, only a throwaway ref changes. Every push goes to `https://github.com/<owner>/<repo>.git`, so origin must be an https URL whose push URL names the same repo. With a project name, the container must work on the project's repo.
+
+The throwaway branch and tag are ordinary pushes by your account, so a workflow that runs on every push (or on every tag) will run for them.
 
 You should see one line `OK (refused as expected): ...` per refusal, then `OK (merged as expected): ...`, the removals, and last `FENCE VERIFIED on <owner>/<repo>` (with the project name in container mode). The last check leaves one empty commit on `allen-dev`. If `allen-dev` is missing, check 4 is skipped and the tool says so. If the repo's checks are red on the PR into `allen-dev`, it stops and asks you to fix CI first.
 
@@ -140,15 +142,15 @@ How to read a failure:
 - `GATE NOT BINDING: '<check>' was refused, but not for the expected reason`: GitHub refused, but its message did not say that a rule did it. The tool prints GitHub's message. Do not work around it; report the text.
 - `FENCE VERIFIED, but cleanup is incomplete`: the checks passed, but something verify made could not be removed. The lines above name each one and the command that removes it. The exit status is non-zero.
 
-With `--main-gate`, `verify` runs the fence checks first, then the older merge-gate checks (step 6.2 below) from a new commit on the default branch, with a PR from `chore/verify-gate-<run id>`. That PR stays open for you to approve-and-merge or close. If one of those steps moves the default branch, the message gives the exact `git push --force-with-lease` command that puts it back.
+With `--main-gate`, `verify` runs the fence checks first, then the older merge-gate checks (step 6.2 below) from a new commit on the default branch, with a PR from `chore/verify-gate-<run id>`. That PR stays open for you to approve-and-merge or close. If the direct push or a merge into the default branch is wrongly accepted, the message gives the sha of verify's empty commit that is now on the default branch. It changes no files; removing it needs a revert PR, or the ruleset switched off first.
 
 ## Rollout order
 
 Do this order the first time, on the repos you already have.
 
-1. **Migrate first.** `verify` refuses to run while an older `protect-fork` or `protect-fork-tags` ruleset exists, so convert those first: `agent-new protect <owner>/<repo> --migrate --vault agent-<project>`, then `agent-new verify <project>`.
+1. **Start with a repo you own outright** (not a fork, not `agent-containers`). **Migrate first:** `verify` refuses to run while an older `protect-fork` or `protect-fork-tags` ruleset exists, so convert those first: `agent-new protect <owner>/<repo> --migrate --vault agent-<project>`, then `agent-new verify <owner>/<repo> --vault agent-<project>`.
 2. **Note GitHub's exact refusal text for each check on the first repo.** `verify` prints GitHub's message only when a check fails; on success it prints just `OK (refused as expected): <label>`. To record the exact texts on a clean first run, use the by-hand commands in section 6.1. If `verify` stops with "not for the expected reason", that is a finding to report, not something to work around.
-3. **Then take the other repos one at a time.** For each: `agent-new protect <owner>/<repo> --migrate --vault agent-<project>`, then `agent-new verify <project>`; only when `FENCE VERIFIED` has printed, `agent-new protect <owner>/<repo> --retire-main-gate` and answer the delete question. Move to the next repo after that.
+3. **Then take the other repos one at a time.** For each: `agent-new protect <owner>/<repo> --migrate --vault agent-<project>`, then `agent-new verify <owner>/<repo> --vault agent-<project>`; only when `FENCE VERIFIED` has printed, `agent-new protect <owner>/<repo> --retire-main-gate` and answer the delete question. Move to the next repo after that.
 4. **`agent-containers` keeps its main gate:** `agent-new protect <owner>/agent-containers --main-gate --require build-test --require lint`, never `--retire-main-gate`.
 
 The numbered steps that follow are the by-hand procedure. Step 1 is done once, step 3 once per project, steps 2, 4 and 5 per repo (`agent-new protect` does 2.1, 4 and 5), step 6 per project after its container is up, and step 7 once, for `agent-containers`.
@@ -237,7 +239,7 @@ Repo → Settings → Rules → Rulesets → New ruleset → **New branch rulese
    - **Require status checks to pass** → Add checks → `build-test` and `gitleaks` (both are jobs in this repo's `ci.yml`; selectable after CI has run once).
 5. Create.
 
-*Why `build-test` and `gitleaks`:* `build-test` builds the images through the publish script itself, smoke-tests them, then runs the firewall, launcher and acceptance tests, so it is the real quality gate and the publish rehearsal in one; `gitleaks` is the full-history secret scan. `lint` (shellcheck, actionlint) is advisory.
+*Why `build-test`, `gitleaks` and `lint`:* `build-test` builds the images through the publish script itself, smoke-tests them, then runs the firewall, launcher and acceptance tests, so it is the real quality gate and the publish rehearsal in one; `gitleaks` is the full-history secret scan; `lint` (shellcheck, actionlint) is required too (the commands above pass `--require lint`).
 **The `build-test` check only appears in the picker after CI has run once on the repo.** If it is missing, open any PR first (CI runs), then come back and add it. Merge a PR only when its checks are green.
 
 ### 4.4 `agent-working-branch` (New branch ruleset)
