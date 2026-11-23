@@ -31,7 +31,7 @@ echo "${GH_TOKEN:-}" >> "$STATE/gh-tokens"
 case "$*" in
   "pr create"*) "$REALGIT" log -1 --format='AUTHOR: %an <%ae> COMMITTER: %cn <%ce>' >> "$STATE/gh-author" ;;
   "pr merge --squash --admin") [ -f "$STATE/gate" ] && { echo "GraphQL: Repository rule violations found" >&2; exit 1; }; : ;;
-  "pr merge chore/verify-fence --squash") [ -f "$STATE/fence" ] && { echo "GraphQL: Repository rule violations found for refs/heads/main" >&2; exit 1; }; : ;;
+  "pr merge chore/verify-fence --squash") [ -f "$STATE/fence" ] && { echo "X Pull request #1 is not mergeable: the base branch policy prohibits the merge." >&2; exit 1; }; : ;;
   "pr merge --squash") [ -f "$STATE/gate" ] && { echo "the base branch policy prohibits the merge" >&2; exit 1; }; : ;;
   "pr review --approve") [ -f "$STATE/gate" ] && { echo "Review Can not approve your own pull request" >&2; exit 1; }; : ;;
   "api user --jq .login") if [ -n "${GH_TOKEN:-}" ]; then cat "$STATE/mu-login" 2>/dev/null || echo agent-allen
@@ -573,7 +573,7 @@ ls-remote --exit-code --heads origin allen-dev|0|1111111111111111111111111111111
 push origin HEAD:main|1|remote: error: GH013: Repository rule violations found for refs/heads/main.
 push origin HEAD:refs/heads/verify-fence-not-free|1|remote: error: GH013: Repository rule violations found for refs/heads/verify-fence-not-free.
 push origin HEAD:refs/tags/verify-fence-tag|1|remote: error: GH013: Repository rule violations found for refs/tags/verify-fence-tag.
-pr merge chore/verify-fence --squash|1|GraphQL: Repository rule violations found for refs/heads/main (mergePullRequest)
+pr merge chore/verify-fence --squash|1|X Pull request #1 is not mergeable: the base branch policy prohibits the merge.
 pr checks|0|gitleaks	pass
 PLAN
 }
@@ -633,6 +633,10 @@ check "  worktree removed on exit"                      fence_in 'git worktree r
 
 newstate; plan_fence; sed -i 's/^\(push origin HEAD:main|1|\).*/\1! [rejected] HEAD -> main (non-fast-forward)/' "$STATE/exec-plan"
 refuses "refused for an unrelated reason (non-fast-forward): dies" 'not for the expected reason' run verify p1
+newstate; plan_fence; sed -i 's/^\(push origin HEAD:main|1|\).*/\1X the base branch policy prohibits the push/' "$STATE/exec-plan"
+refuses "push to main: 'base branch policy' is not the fence's reason there" "'push to main' was refused, but not for the expected reason" run verify p1
+newstate; plan_fence; sed -i 's/^\(pr merge chore\/verify-fence --squash|1|\).*/\1X Pull request #1 is not mergeable: the merge commit cannot be cleanly created./' "$STATE/exec-plan"
+refuses "merge into main refused for an unrelated reason: dies" "'merge a PR into main' was refused, but not for the expected reason" run verify p1
 
 newstate; plan_fence; sed -i 's/^\(push origin HEAD:refs\/heads\/verify-fence-not-free\)|1|.*/\1|0|created/' "$STATE/exec-plan"
 VOUT=$(run verify p1 2>&1); VRC=$?
@@ -842,6 +846,15 @@ check "  no research config: no research up"  sh -c "! grep -q 'up research' '$A
 OUT=$(run project NewProj --token-from agent-old < /dev/null 2>&1)
 check "  checklist printed"          grep -q "codex login --device-auth" <<<"$OUT"
 check "  its verify proved the fence (no --main-gate)" bash -c 'grep -q "FENCE VERIFIED on newproj" <<<"$1" && ! grep -q "GATE VERIFIED" <<<"$1"' _ "$OUT"
+check "  checklist: no verification PR to close"  bash -c '! grep -q "verification PR" <<<"${1#*DONE}"' _ "$OUT"
+check "  checklist: allowlist sentence kept"      grep -q "^Allowlist extra domains in .*/newproj/allowlist as the project needs them, then: agent-up up newproj" <<<"$OUT"
+fullstate; plan_ok
+OUT=$(run project NewProj --token-from agent-old --main-gate < /dev/null 2>&1); RC=$?
+check "--main-gate project run: completes"        test "$RC" -eq 0
+check "  its verify ran the main gate"            grep -q "GATE VERIFIED on newproj" <<<"$OUT"
+check "  checklist: close the verification PR"    grep -qx "Close or approve-and-merge the verification PR in the browser." <<<"$OUT"
+check "  checklist: allowlist sentence kept"      grep -q "^Allowlist extra domains in .*/newproj/allowlist" <<<"$OUT"
+fullstate   # back to the fence plan for the checks below
 check "  WARNING: research has no container yet"  grep -q "WARNING: .*research" <<<"$OUT"
 check "  checklist mentions agent-up init --profile research"  grep -q "no container yet: agent-up init --profile research" <<<"${OUT#*DONE}"
 mkdir -p "$CFGROOT/research"; : > "$AULOG"

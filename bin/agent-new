@@ -261,8 +261,10 @@ EOF
   cat <<EOF
   agent-up pair $PROJ           # pairing code for the apps
   phone (Tailscale on): https://${host:-<machine>.<tailnet>.ts.net}:$port
-Close or approve-and-merge the verification PR in the browser. Allowlist extra domains in
-$CFG_ROOT/$PROJ/allowlist as the project needs them, then: agent-up up $PROJ
+EOF
+  [ "$MAIN_GATE" -eq 0 ] || echo "Close or approve-and-merge the verification PR in the browser."
+  cat <<EOF
+Allowlist extra domains in $CFG_ROOT/$PROJ/allowlist as the project needs them, then: agent-up up $PROJ
 EOF
 }
 cmd_project(){
@@ -588,6 +590,7 @@ wait_checks(){ # $1 the gh pr checks command; retries only on "no checks reporte
 }
 
 FENCE_RE='GH013|repository rule|rule violations|protected'
+FENCE_MERGE_RE="$FENCE_RE|base branch policy"   # gh reports a merge blocked by a ruleset as "base branch policy prohibits the merge"
 FENCE_PRS=() FENCE_BRANCHES=()   # what verify_fence opened or pushed and has not removed yet; fence_cleanup removes it
 fence_cleanup(){ # closes verify_fence's open PRs and deletes its remote branches; runs at the end and from the EXIT trap
   local b rc
@@ -628,7 +631,7 @@ verify_fence(){ # $1 the default branch: the machine user is refused outside the
     'git push origin --delete refs/tags/verify-fence-tag'
   fence_push chore/verify-fence
   fence_pr chore/verify-fence "$def"
-  expect_refusal "merge a PR into $def"          "$FENCE_RE" 'gh pr merge chore/verify-fence --squash'
+  expect_refusal "merge a PR into $def"          "$FENCE_MERGE_RE" 'gh pr merge chore/verify-fence --squash'
   RUN_IN 'gh pr close chore/verify-fence' >/dev/null 2>&1 \
     || warn "could not close the PR from chore/verify-fence on $VTARGET: close it in the browser"
   FENCE_PRS=()
