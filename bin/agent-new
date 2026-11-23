@@ -558,11 +558,15 @@ protect_repo(){
   say "protect: done ($1)"
 }
 
-expect_refusal(){ # $1 label, $2 reason ERE, $3 command string (runs via RUN_IN)
-  local label="$1" re="$2" cmd="$3" out rc=0
+expect_refusal(){ # $1 label, $2 reason ERE, $3 command string (runs via RUN_IN), $4 optional: the command that undoes $3
+  local label="$1" re="$2" cmd="$3" undo="${4:-}" out rc=0
   out="$(RUN_IN "$cmd" 2>&1)" || rc=$?
   if [ "$rc" -eq 0 ]; then
     printf '%s\n' "$out" >&2
+    if [ -n "$undo" ]; then
+      if RUN_IN "$undo" >/dev/null 2>&1; then warn "'$label' created something on $VTARGET: deleted it again ($undo)"
+      else warn "'$label' created something on $VTARGET and deleting it failed: as an admin, run: $undo"; fi
+    fi
     die "GATE NOT BINDING: '$label' SUCCEEDED on $VTARGET — stop, fix the ruleset before any real work"
   fi
   grep -Eqi -- "$re" <<<"$out" || {
@@ -572,9 +576,125 @@ expect_refusal(){ # $1 label, $2 reason ERE, $3 command string (runs via RUN_IN)
   say "OK (refused as expected): $label"
 }
 
+wait_checks(){ # $1 the gh pr checks command; retries only on "no checks reported"; sets CHECKS, CHECKS_RC, CHECKS_TRIES
+  # CI may not have registered yet right after pr create
+  local tries="${AGENT_NEW_CHECK_TRIES:-6}"
+  CHECKS_TRIES=1
+  while :; do
+    CHECKS_RC=0; CHECKS="$(RUN_IN "$1" 2>&1)" || CHECKS_RC=$?
+    [ "$CHECKS_RC" -ne 0 ] && grep -qi 'no checks reported' <<<"$CHECKS" && [ "$CHECKS_TRIES" -lt "$tries" ] || break
+    CHECKS_TRIES=$((CHECKS_TRIES+1)); sleep "${AGENT_NEW_CHECK_SLEEP:-10}"
+  done
+}
+
+FENCE_RE='GH013|repository rule|rule violations|protected'
+FENCE_PRS=() FENCE_BRANCHES=()   # what verify_fence opened or pushed and has not removed yet; fence_cleanup removes it
+fence_cleanup(){ # closes verify_fence's open PRs and deletes its remote branches; runs at the end and from the EXIT trap
+  local b rc
+  for b in ${FENCE_PRS[@]+"${FENCE_PRS[@]}"}; do
+    RUN_IN "gh pr close $b" >/dev/null 2>&1 || warn "could not close the PR from $b on $VTARGET: close it in the browser"
+  done
+  FENCE_PRS=()
+  for b in ${FENCE_BRANCHES[@]+"${FENCE_BRANCHES[@]}"}; do
+    rc=0; RUN_IN "git ls-remote --exit-code --heads origin $b" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 2 ] || RUN_IN "git push -q origin --delete $b" >/dev/null 2>&1 \
+      || warn "could not delete branch $b on $VTARGET: delete it in the browser"
+  done
+  FENCE_BRANCHES=()
+}
+fence_push(){ # $1 a branch under chore/: push HEAD there (replacing a leftover from an earlier run); it must succeed
+  local out
+  FENCE_BRANCHES+=("$1")
+  out="$(RUN_IN "git push -f origin HEAD:refs/heads/$1" 2>&1)" \
+    || die "verify: could not push $1 (the fence leaves chore/** free): $out"
+}
+fence_pr(){ # $1 head branch, $2 base branch: open a PR; one left open by an earlier run is reused
+  local out
+  FENCE_PRS+=("$1")
+  out="$(RUN_IN "gh pr create --base $2 --head $1 --title 'chore: verify fence' --body 'Opened by agent-new verify, which closes or merges it.'" 2>&1)" \
+    || grep -q 'already exists' <<<"$out" || die "verify: could not open the PR from $1 into $2: $out"
+}
+
+verify_fence(){ # $1 the default branch: the machine user is refused outside the free names, and merges into the working branch
+  local def="$1" out rc
+  say "verifying the agent fence as the machine user (throwaway refs, removed after)"
+  # one empty commit on top of origin/$def: every push below would be accepted without the fence,
+  # so a refusal can only be the rule
+  RUN_IN 'git commit -q --allow-empty -m "chore: verify fence"' >/dev/null
+  expect_refusal "push to $def"                  "$FENCE_RE" "git push origin HEAD:$def"
+  expect_refusal "branch outside the free names" "$FENCE_RE" 'git push origin HEAD:refs/heads/verify-fence-not-free' \
+    'git push origin --delete refs/heads/verify-fence-not-free'
+  expect_refusal "create a tag"                  "$FENCE_RE" 'git push origin HEAD:refs/tags/verify-fence-tag' \
+    'git push origin --delete refs/tags/verify-fence-tag'
+  fence_push chore/verify-fence
+  fence_pr chore/verify-fence "$def"
+  expect_refusal "merge a PR into $def"          "$FENCE_RE" 'gh pr merge chore/verify-fence --squash'
+  RUN_IN 'gh pr close chore/verify-fence' >/dev/null 2>&1 \
+    || warn "could not close the PR from chore/verify-fence on $VTARGET: close it in the browser"
+  FENCE_PRS=()
+  rc=0; out="$(RUN_IN "git ls-remote --exit-code --heads origin $WORK_BRANCH" 2>&1)" || rc=$?
+  case "$rc" in
+    0)
+      out="$(RUN_IN "git fetch -q origin +refs/heads/$WORK_BRANCH:refs/remotes/origin/$WORK_BRANCH && git checkout -q --detach origin/$WORK_BRANCH && git commit -q --allow-empty -m 'chore: verify fence ($WORK_BRANCH)'" 2>&1)" \
+        || die "verify: could not make a commit on top of origin/$WORK_BRANCH: $out"
+      fence_push chore/verify-fence-dev
+      fence_pr chore/verify-fence-dev "$WORK_BRANCH"
+      say "waiting for checks on the PR into $WORK_BRANCH"
+      wait_checks 'gh pr checks chore/verify-fence-dev --watch'
+      if [ "$CHECKS_RC" -ne 0 ]; then
+        grep -qi 'no checks reported' <<<"$CHECKS" \
+          || die "verify: checks are not green on the PR into $WORK_BRANCH — fix CI first, then re-run verify: $(tail -n5 <<<"$CHECKS")"
+        say "no checks reported on the PR into $WORK_BRANCH after $CHECKS_TRIES tries: merging without them"
+      fi
+      out="$(RUN_IN 'gh pr merge chore/verify-fence-dev --squash --delete-branch' 2>&1)" \
+        || die "verify: could not squash-merge the PR into $WORK_BRANCH: $out"
+      FENCE_PRS=()
+      say "OK (merged as expected): a PR into $WORK_BRANCH, squashed, its branch deleted"
+      ;;
+    2) say "$WORK_BRANCH is not on $VTARGET: the working-branch check was skipped" ;;
+    *) die "verify: could not ask $VTARGET whether $WORK_BRANCH exists: $out" ;;
+  esac
+  fence_cleanup
+  say "FENCE VERIFIED on $VTARGET"
+}
+
+verify_main_gate(){ # $1 the default branch: the review gate on it binds the machine user
+  local def="$1"
+  say "verifying the merge gate (machine-user-and-rulesets.md step 6; a throwaway PR as the machine user)"
+  RUN_IN 'git commit --allow-empty -m "chore: verify ruleset"' >/dev/null
+  # -f: replaces a leftover from an earlier run; the branch starts at origin/$def, so the later
+  # push to $def is a fast-forward and a refusal can only be the ruleset
+  RUN_IN 'git push -f -u origin verify-ruleset' >/dev/null
+  local pr_out; pr_out="$(RUN_IN 'gh pr create --fill' 2>&1)" \
+    || grep -q 'already exists' <<<"$pr_out" || die "could not open the verification PR: $pr_out"
+  say "waiting for required checks on the verification PR"
+  wait_checks 'gh pr checks --watch'
+  if [ "$CHECKS_RC" -ne 0 ]; then
+    if grep -qi 'no checks reported' <<<"$CHECKS"; then
+      warn "no required check reported after $CHECKS_TRIES tries: the required-check rule stays UNTESTED (re-run verify once CI exists)"
+    else
+      die "required checks are not green on the verification PR — fix CI first, then re-run verify: $(tail -n5 <<<"$CHECKS")"
+    fi
+  fi
+  printf '%s\n' "$CHECKS" | tail -n2
+  expect_refusal "merge own PR"        'base branch policy|review'        'gh pr merge --squash'
+  expect_refusal "approve own PR"      'approve your own'                 'gh pr review --approve'
+  expect_refusal "push straight to $def" 'GH013|repository rule'         "git push origin HEAD:$def"
+  expect_refusal "admin-merge own PR"  'rule violations|not.*admin'       'gh pr merge --squash --admin'
+  say "GATE VERIFIED on $VTARGET. Approve-and-merge or close the verification PR in the browser (only your approval counts)."
+}
+
+read_default_branch(){ # sets VDEF: the repo's default branch, read once through RUN_IN
+  VDEF="$(RUN_IN 'gh repo view --json defaultBranchRef --jq .defaultBranchRef.name')" \
+    || die "could not read the default branch of $VTARGET (gh repo view failed)"
+  [[ $VDEF =~ ^[A-Za-z0-9._/-]+$ ]] || die "could not read the default branch of $VTARGET (got: '$VDEF')"
+}
+
+# RUN_IN and the EXIT trap's fence_cleanup read only globals (VDIR, VTOK, VMU, VC, VWD):
+# an EXIT trap runs after this function's locals are gone
 cmd_verify(){
   VTARGET="$1"
-  local mu; mu="$(machine_user)"
+  VMU="$(machine_user)"
   if [[ "$VTARGET" == */* ]]; then
     [ -n "$VAULT" ] || die "verify <owner>/<repo> needs --vault <op-vault> (the project vault holding github-agent)"
     # trap value frozen at set time: an EXIT trap outlives this function's locals,
@@ -582,81 +702,58 @@ cmd_verify(){
     # must not overwrite the script's real exit status.
     local tmp; tmp="$(mktemp -d)"
     # shellcheck disable=SC2064
-    trap "rm -rf '$tmp' || true" EXIT
+    trap "fence_cleanup || true; rm -rf '$tmp' || true" EXIT
     op_ready   # top level, not in mu_token: a sign-in inside $(...) would be lost
-    local tok who; tok="$(mu_token)"
-    who="$(GH_TOKEN="$tok" gh api user --jq .login)" || die "the machine-user token from op://$VAULT/github-agent/token does not work"
-    [ "$who" = "$mu" ] || die "the token in op://$VAULT/github-agent/token is for '$who', not the machine user '$mu': refusing to verify as the wrong identity"
+    local who; VTOK="$(mu_token)"
+    who="$(GH_TOKEN="$VTOK" gh api user --jq .login)" || die "the machine-user token from op://$VAULT/github-agent/token does not work"
+    [ "$who" = "$VMU" ] || die "the token in op://$VAULT/github-agent/token is for '$who', not the machine user '$VMU': refusing to verify as the wrong identity"
     # git isolated from the owner's config and credentials; the helper is single-quoted so git's
     # shell expands $GH_TOKEN at run time (the token lives in the environment only, never argv/disk)
     vgit_env(){
-      export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 GH_TOKEN="$tok" \
+      export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 GH_TOKEN="$VTOK" \
         GIT_CONFIG_COUNT=3 \
         GIT_CONFIG_KEY_0=credential.helper \
         GIT_CONFIG_VALUE_0='!f(){ echo username=x-access-token; echo "password=$GH_TOKEN"; }; f' \
-        GIT_CONFIG_KEY_1=user.name GIT_CONFIG_VALUE_1="$mu" \
-        GIT_CONFIG_KEY_2=user.email GIT_CONFIG_VALUE_2="$mu@users.noreply.github.com"
+        GIT_CONFIG_KEY_1=user.name GIT_CONFIG_VALUE_1="$VMU" \
+        GIT_CONFIG_KEY_2=user.email GIT_CONFIG_VALUE_2="$VMU@users.noreply.github.com"
       # env identity outranks config: drop the owner's so the machine user is what gets recorded
       unset BASH_ENV GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
     }
-    say "cloning $VTARGET as $mu (temp, removed after)"
-    (vgit_env; git clone -q "https://github.com/$VTARGET" "$tmp/repo") >/dev/null
+    say "cloning $VTARGET as $VMU (temp, removed after)"
+    VDIR="$tmp/repo"
+    (vgit_env; git clone -q "https://github.com/$VTARGET" "$VDIR") >/dev/null
     # bash -c, not -lc: the owner's login profile must not be able to re-export GH_TOKEN
-    RUN_IN(){ (cd "$tmp/repo" && vgit_env && bash -c "$1"); }
-    RUN_IN 'git fetch -q origin && git checkout -q -B verify-ruleset origin/main'
+    RUN_IN(){ (cd "$VDIR" && vgit_env && bash -c "$1"); }
+    read_default_branch
+    RUN_IN "git fetch -q origin && git checkout -q -B verify-ruleset origin/$VDEF"
   else
-    local c="${VTARGET}-agent-1" wd=/workspace who
-    docker ps --format '{{.Names}}' | grep -qx "$c" || die "container $c is not running (agent-up up $VTARGET first)"
-    RUN_IN(){ docker exec -w "$wd" "$c" bash -lc "$1"; }
+    local who
+    VC="${VTARGET}-agent-1" VWD=/workspace
+    docker ps --format '{{.Names}}' | grep -qx "$VC" || die "container $VC is not running (agent-up up $VTARGET first)"
+    RUN_IN(){ docker exec -w "$VWD" "$VC" bash -lc "$1"; }
     # a container just started by `agent-up up` may still be in agent-init, which wires git to gh last:
     # until then git has no credentials ("could not read Username"). Wait for that, not a fixed sleep.
     local iw="${AGENT_NEW_INIT_WAIT:-300}" waited=0
     [[ $iw =~ ^[1-9][0-9]*$ ]] || iw=300
     until RUN_IN 'git config --global --get credential.https://github.com.helper' >/dev/null 2>&1; do
-      [ "$waited" -lt "$iw" ] || die "git in $c has no GitHub credentials after $iw s: agent-init has not finished or gh setup-git failed (docker logs $c | grep agent-init)"
-      [ "$waited" -gt 0 ] || say "waiting for $c to finish its first-start setup (agent-init)..."
+      [ "$waited" -lt "$iw" ] || die "git in $VC has no GitHub credentials after $iw s: agent-init has not finished or gh setup-git failed (docker logs $VC | grep agent-init)"
+      [ "$waited" -gt 0 ] || say "waiting for $VC to finish its first-start setup (agent-init)..."
       sleep 2; waited=$((waited + 2))
     done
-    who="$(RUN_IN 'gh api user --jq .login')" || die "gh in $c is not logged in"
-    [ "$who" = "$mu" ] || die "gh in $c is '$who', not the machine user '$mu': refusing to verify as the wrong identity"
+    who="$(RUN_IN 'gh api user --jq .login')" || die "gh in $VC is not logged in"
+    [ "$who" = "$VMU" ] || die "gh in $VC is '$who', not the machine user '$VMU': refusing to verify as the wrong identity"
     [ "$(RUN_IN 'git branch --show-current')" != verify-ruleset ] \
-      || die "/workspace in $c is on verify-ruleset (left by an older agent-new): run 'git switch main' in the container, then re-run"
+      || die "/workspace in $VC is on verify-ruleset (left by an older agent-new): run 'git switch main' in the container, then re-run"
+    read_default_branch
     # a temporary worktree: the owner's /workspace checkout (branch, index, files) is never touched.
-    # The worktree goes first: a branch checked out in it cannot be deleted.
+    # fence_cleanup runs in the worktree, so it goes first; then the worktree (a branch checked out in it cannot be deleted).
     # shellcheck disable=SC2064 # expand now on purpose: the locals are gone when the EXIT trap runs
-    trap "docker exec -w /workspace '$c' git worktree remove --force /tmp/agent-new-verify 2>/dev/null || true; docker exec -w /workspace '$c' git branch -D verify-ruleset 2>/dev/null || true" EXIT
+    trap "fence_cleanup || true; docker exec -w /workspace '$VC' git worktree remove --force /tmp/agent-new-verify 2>/dev/null || true; docker exec -w /workspace '$VC' git branch -D verify-ruleset 2>/dev/null || true" EXIT
     RUN_IN 'git worktree remove --force /tmp/agent-new-verify 2>/dev/null; git worktree prune; rm -rf /tmp/agent-new-verify' >/dev/null
-    RUN_IN 'git fetch -q origin && git worktree add -f -B verify-ruleset /tmp/agent-new-verify origin/main' >/dev/null
-    wd=/tmp/agent-new-verify
+    RUN_IN "git fetch -q origin && git worktree add -f -B verify-ruleset /tmp/agent-new-verify origin/$VDEF" >/dev/null
+    VWD=/tmp/agent-new-verify
   fi
-  say "verifying the merge gate (machine-user-and-rulesets.md step 6; a throwaway PR as the machine user)"
-  RUN_IN 'git commit --allow-empty -m "chore: verify ruleset"' >/dev/null
-  # -f: replaces a leftover from an earlier run; the branch starts at origin/main, so the later
-  # push to main is a fast-forward and a refusal can only be the ruleset
-  RUN_IN 'git push -f -u origin verify-ruleset' >/dev/null
-  local pr_out; pr_out="$(RUN_IN 'gh pr create --fill' 2>&1)" \
-    || grep -q 'already exists' <<<"$pr_out" || die "could not open the verification PR: $pr_out"
-  say "waiting for required checks on the verification PR"
-  # CI may not have registered yet right after pr create: retry only on "no checks reported"
-  local checks crc tries="${AGENT_NEW_CHECK_TRIES:-6}" n=1
-  while :; do
-    crc=0; checks="$(RUN_IN 'gh pr checks --watch' 2>&1)" || crc=$?
-    [ "$crc" -ne 0 ] && grep -qi 'no checks reported' <<<"$checks" && [ "$n" -lt "$tries" ] || break
-    n=$((n+1)); sleep "${AGENT_NEW_CHECK_SLEEP:-10}"
-  done
-  if [ "$crc" -ne 0 ]; then
-    if grep -qi 'no checks reported' <<<"$checks"; then
-      warn "no required check reported after $n tries: the required-check rule stays UNTESTED (re-run verify once CI exists)"
-    else
-      die "required checks are not green on the verification PR — fix CI first, then re-run verify: $(tail -n5 <<<"$checks")"
-    fi
-  fi
-  printf '%s\n' "$checks" | tail -n2
-  expect_refusal "merge own PR"        'base branch policy|review'        'gh pr merge --squash'
-  expect_refusal "approve own PR"      'approve your own'                 'gh pr review --approve'
-  expect_refusal "push straight to main" 'GH013|repository rule'         'git push origin HEAD:main'
-  expect_refusal "admin-merge own PR"  'rule violations|not.*admin'       'gh pr merge --squash --admin'
-  say "GATE VERIFIED on $VTARGET. Approve-and-merge or close the verification PR in the browser (only your approval counts)."
+  if [ "$MAIN_GATE" -eq 1 ]; then verify_main_gate "$VDEF"; else verify_fence "$VDEF"; fi
 }
 
 [ $# -ge 1 ] || usage
