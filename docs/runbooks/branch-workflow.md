@@ -23,7 +23,7 @@ When you are satisfied with `allen-dev`, you promote it to the default branch:
 
 1. Repo → Pull requests → New pull request. Base: the default branch (usually `main`). Compare: `allen-dev`.
 2. Read the diff, then **Create pull request** and merge it. (You can also merge locally and push; you are the only account allowed to write to the default branch.)
-3. Repo → Branches: `allen-dev` stays; it is never deleted.
+3. Repo → Branches: `allen-dev` stays. Nobody can delete it or rewrite its history (the ruleset `agent-working-branch`), so GitHub's automatic deletion of merged branches leaves it in place.
 
 Nothing promotes automatically. The default branch changes only when you do it.
 
@@ -61,4 +61,5 @@ You see the upstream commits appear on `allen-dev` under one merge commit, and t
 - A branch merged into `allen-dev` is deleted by GitHub at merge time (the repo setting "Automatically delete head branches").
 - An `upstream/` branch is kept until upstream merges or closes the PR made from it. The fork check lists the ones that can go.
 - The mirrors are fenced, so the agent cannot delete them.
+- `allen-dev` cannot be deleted or rewritten, by the agent or by you (the ruleset `agent-working-branch`). Add to it; never force-push it.
 - The agent decides by the PR's state, not by `git branch --merged` (after a squash, git reports the branch as unmerged). It never deletes a branch whose PR is not merged without asking you.

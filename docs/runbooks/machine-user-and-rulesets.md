@@ -49,9 +49,13 @@ The list limits the agent only. You may name your own branches anything.
 *Why two rulesets:* GitHub keeps branch rules and tag rules apart.
 *Why the admin bypass is "always":* you are the only admin and must be able to move `allen-dev`, mirrors and tags yourself. The machine user holds Write access, never Admin, so the bypass never reaches it.
 
+### The working branch's ruleset
+
+A third ruleset, `agent-working-branch`, applies to `allen-dev` alone. It forbids deleting the branch and force-pushing it, and **nobody bypasses it, you included**: commits are added to `allen-dev` (by merging PRs, or by your own fast-forward pushes), never removed. It also keeps `allen-dev` in place when you merge a promotion PR from it, which "Automatically delete head branches" would otherwise delete.
+
 ## Branch deletion
 
-`agent-new protect` turns on the repo setting **Automatically delete head branches**: when a PR is merged, GitHub deletes its source branch. A branch merged into `allen-dev` therefore disappears at merge time. An `upstream/` branch is kept until the original repo merges or closes the PR made from it. `allen-dev` and the mirrors are never deleted.
+`agent-new protect` turns on the repo setting **Automatically delete head branches**: when a PR is merged, GitHub deletes its source branch. A branch merged into `allen-dev` therefore disappears at merge time. An `upstream/` branch is kept until the original repo merges or closes the PR made from it. `allen-dev` cannot be deleted (its ruleset), and the mirrors are fenced.
 
 ## Where the older main gate still applies
 
@@ -85,7 +89,7 @@ For each repo, `protect` does these in order, and prints `SKIP (done)` for anyth
 2. Warns, without stopping, about what the fence will affect: a `gh-pages` branch or a `.github/dependabot.yml` (pushes by GitHub Actions or Dependabot to branches outside the allowed names are refused once the fence is on), and, on a fork, branches that came from upstream and have an allowed name (the agent can write to those).
 3. With `--migrate`: renames the older rulesets (below).
 4. Creates the ruleset `agent-fence`, then `agent-fence-tags`.
-5. Creates the branch `allen-dev` from the head of the default branch, unless it exists. It stops with a message for a repo that has no commits yet. `--no-working-branch` skips this.
+5. Creates the branch `allen-dev` from the head of the default branch, unless it exists, and gives it the ruleset `agent-working-branch`. It stops with a message for a repo that has no commits yet. `--no-working-branch` skips both.
 6. Turns on "Automatically delete head branches".
 7. With `--main-gate`: creates `protect-main` and warns if the repo lacks `.github/CODEOWNERS` or a gitleaks workflow, or lets Actions approve PRs. With `--retire-main-gate`: offers to delete the main gate (below).
 8. Last: invites the machine user as a collaborator, and accepts the invitation for it when you give `--vault` (the project vault that holds its token). If the machine user is already a collaborator, it must hold Write (not Admin or Maintain), or the tool stops. The token is read once per run, for every repo in it, and must belong to the machine user.
@@ -120,10 +124,10 @@ It first makes sure the fence is in place, in the same run. Then it looks up a r
 
 Run it after `protect`. With a project name it works in that project's running container, in a temporary git worktree, so your checkout is not touched. With `<owner>/<repo> --vault ...` it works in a temporary clone that it removes afterwards. Your own `gh` (as you) prepares and cleans up; the attempts are made as the machine user (with that account's token, never yours).
 
-1. **As you, before anything is pushed:** it reads the rulesets. `agent-fence` and `agent-fence-tags` must equal their templates (and `protect-main`, with `--main-gate`), and no `protect-fork` or `protect-fork-tags` may be left (migrate first). Otherwise it stops.
+1. **As you, before anything is pushed:** it reads the rulesets. `agent-fence` and `agent-fence-tags` must equal their templates (and `agent-working-branch` when `allen-dev` exists, and `protect-main` with `--main-gate`), and no `protect-fork` or `protect-fork-tags` may be left (migrate first). Otherwise it stops.
 2. **As you:** it creates a throwaway branch and a throwaway tag, both named `verify-fence-<run id>`, at the head of the default branch. The run id is the time and the process number, so no name is reused.
 3. **As the machine user, each of these must be refused by a rule:** a fast-forward push to the throwaway branch; a force-push of an unrelated commit to it; deleting it; creating a new branch outside the allowed names; creating a new tag; moving the throwaway tag; deleting it; and merging (through GitHub's API) a PR from `chore/verify-fence-<run id>` into the throwaway branch. The push of `chore/verify-fence-<run id>` itself must succeed.
-4. **If `allen-dev` exists:** a PR from `chore/verify-fence-<run id>-dev` into `allen-dev`, waiting for its checks, then a squash merge that must succeed and must leave the PR merged. If the PR reports no checks after the tool's retries, it merges without them and says so.
+4. **If `allen-dev` exists:** a PR from `chore/verify-fence-<run id>-dev` into `allen-dev`, waiting for its checks, then a squash merge that must succeed and must leave the PR merged. If the PR reports no checks after the tool's retries, it merges without them and says so. Then, as the machine user, deleting `allen-dev` and force-pushing it must both be refused. The force-push attempt would only rewind `allen-dev` by verify's own commit, and only if nothing else landed meanwhile; if either attempt went through, the tool puts `allen-dev` back where it was, as you, before it stops.
 5. **As you:** it closes the refused PR and deletes the throwaway branch, the throwaway tag and the `chore/` branches.
 
 The default branch is never pushed to or merged into in these checks; if an attempt is wrongly accepted, only a throwaway ref changes. Every push goes to `https://github.com/<owner>/<repo>.git`, so origin must be an https URL whose push URL names the same repo. With a project name, the container must work on the project's repo.
@@ -236,6 +240,14 @@ Repo → Settings → Rules → Rulesets → New ruleset → **New branch rulese
 *Why `build-test` and `gitleaks`:* `build-test` builds the images through the publish script itself, smoke-tests them, then runs the firewall, launcher and acceptance tests, so it is the real quality gate and the publish rehearsal in one; `gitleaks` is the full-history secret scan. `lint` (shellcheck, actionlint) is advisory.
 **The `build-test` check only appears in the picker after CI has run once on the repo.** If it is missing, open any PR first (CI runs), then come back and add it. Merge a PR only when its checks are green.
 
+### 4.4 `agent-working-branch` (New branch ruleset)
+
+1. Ruleset name: `agent-working-branch`. Enforcement status: **Active**.
+2. **Bypass list:** leave it empty.
+3. Target branches → Add target → **Include by pattern** → `allen-dev`.
+4. Tick: **Restrict deletions**, **Block force pushes**. Tick nothing else.
+5. Create.
+
 Editing rulesets needs Admin; the agent (Write) cannot.
 
 ## 5. The working branch and automatic deletion (as you, per repo)
@@ -243,7 +255,8 @@ Editing rulesets needs Admin; the agent (Write) cannot.
 `agent-new protect` does both.
 
 1. Create `allen-dev`: Repo → Code → the branch drop-down → type `allen-dev` → **Create branch: allen-dev from main** (use the default branch's name if it is not `main`). You should see `allen-dev` in the branch list.
-2. Repo → Settings → General → Pull Requests → tick **Automatically delete head branches**.
+2. Create the ruleset `agent-working-branch` (step 4.4).
+3. Repo → Settings → General → Pull Requests → tick **Automatically delete head branches**.
 
 ## 6. Verify (required, after `agent-up up <project>`)
 

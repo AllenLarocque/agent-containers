@@ -119,12 +119,16 @@ case "$*" in
     [ -f "$STATE/no-commits" ] && { echo "HTTP 409: Git Repository is empty." >&2; exit 1; }
     b="${2##*/heads/}"; cat "$STATE/ref-sha-$(tr / _ <<<"$b")" 2>/dev/null || echo "sha-of-$b" ;;
   "api -X POST repos/"*"/git/refs -f ref="*) [ -f "$STATE/ref-create-fail" ] && { echo "gh: Validation Failed (HTTP 422)" >&2; exit 1; }
+    [ -f "$STATE/restore-fail" ] && [[ $* == *refs/heads/allen-dev* ]] && { echo "gh: Server Error (HTTP 500)" >&2; exit 1; }
     echo "$*" >> "$STATE/ref-posted"
-    case "$*" in *" ref=refs/heads/allen-dev "*) touch "$STATE/has-allen-dev" ;; esac ;;
+    case "$*" in *" ref=refs/heads/allen-dev "*) touch "$STATE/has-allen-dev"; rm -f "$STATE/allen-dev-deleted" ;; esac ;;
   "api -X DELETE repos/"*"/git/refs/"*) r="${4#*/git/refs/}"
     if [ -s "$STATE/ref-delete-fail" ] && [[ $r == *"$(cat "$STATE/ref-delete-fail")"* ]]; then echo "gh: Server Error (HTTP 500)" >&2; exit 1; fi
     grep -qxF "$r" "$STATE/refs-gone" 2>/dev/null && { echo "gh: Reference does not exist (HTTP 422)" >&2; exit 1; }
     echo "$r" >> "$STATE/refs-deleted"; echo "$r" >> "$STATE/refs-gone" ;;
+  "api -X PATCH repos/"*"/git/refs/heads/"*) [ -f "$STATE/restore-fail" ] && { echo "gh: Server Error (HTTP 500)" >&2; exit 1; }
+    [[ $* == *heads/allen-dev* ]] && [ -f "$STATE/allen-dev-deleted" ] && { echo "gh: Reference does not exist (HTTP 422)" >&2; exit 1; }
+    echo "$*" >> "$STATE/ref-patched" ;;
   "api -X PATCH repos/"*" -F delete_branch_on_merge=true") touch "$STATE/autodelete-patched"; echo true > "$STATE/autodelete" ;;
   "api repos/"*" --jq .delete_branch_on_merge") [ -f "$STATE/autodelete-get-fail" ] && { echo "gh: Bad Gateway (HTTP 502)" >&2; exit 1; }
     cat "$STATE/autodelete" 2>/dev/null || echo false ;;
@@ -196,6 +200,7 @@ STUB
 chmod +x "$T/bin/docker"
 # ---- fence-sim: the rulesets as GitHub applies them to a push ($@: git push's arguments). The owner (no GH_TOKEN) bypasses
 # them. $STATE/fence: refs outside the free names and every tag are refused; $STATE/gate: the default branch is refused.
+# $STATE/wbr: deleting or force-pushing allen-dev is refused (agent-working-branch).
 # $STATE/accept-push / reject-push: an ERE on the arguments that is let through / refused for another reason.
 cat > "$T/bin/fence-sim" <<'STUB'
 #!/usr/bin/env bash
@@ -219,7 +224,7 @@ for r in "${refs[@]}"; do
   if [ -f "$STATE/fence" ]; then
     case "$dst" in
       refs/tags/*) no=1 ;;
-      refs/heads/allen-dev) ;;
+      refs/heads/allen-dev) if [ -f "$STATE/wbr" ] && { [ "$del" = 1 ] || [ "$f" = 1 ]; }; then no=1; fi ;;
       refs/heads/fix/*|refs/heads/feature/*|refs/heads/chore/*|refs/heads/docs/*|refs/heads/test/*|refs/heads/ci/*|refs/heads/refactor/*|refs/heads/perf/*|refs/heads/revert/*|refs/heads/upstream/*|refs/heads/sync/*|refs/heads/experiment/*) ;;
       *) no=1 ;;
     esac
@@ -230,6 +235,7 @@ for r in "${refs[@]}"; do
     echo " ! [remote rejected] ${r%%:*} -> $dst (push declined due to repository rule violations)" >&2; exit 1
   fi
   case "$dst" in refs/heads/*) [ "$del" = 1 ] || echo "pushed-by-mu" > "$STATE/ref-sha-$(tr / _ <<<"${dst#refs/heads/}")" ;; esac
+  [ "$del:$dst" != 1:refs/heads/allen-dev ] || touch "$STATE/allen-dev-deleted"
 done
 exit 0
 STUB
@@ -397,7 +403,7 @@ newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
 check "no fence: protect succeeds"            run protect allen/repo1 --vault agent-p1 --main-gate
 check "  agent-fence POSTed"                  test -s "$STATE/ruleset-posted-agent-fence"
 check "  agent-fence-tags POSTed"             test -s "$STATE/ruleset-posted-agent-fence-tags"
-check "  three POSTs: both fences and protect-main"                     test "$(grep -c 'POST repos/allen/repo1/rulesets' "$GHLOG")" -eq 3
+check "  four POSTs: both fences, the working branch's ruleset and protect-main" test "$(grep -c 'POST repos/allen/repo1/rulesets' "$GHLOG")" -eq 4
 check "  fence targets branches"              grep -q '"target": *"branch"' "$STATE/ruleset-posted-agent-fence"
 check "  fence bypass is always"              grep -q '"bypass_mode": *"always"' "$STATE/ruleset-posted-agent-fence"
 for t in creation update deletion non_fast_forward; do
@@ -414,8 +420,9 @@ check "  tags ruleset has empty exclude"      grep -q '"exclude": *\[\]' "$STATE
 check "  tags ruleset bypass is always"       grep -q '"bypass_mode": *"always"' "$STATE/ruleset-posted-agent-fence-tags"
 
 # the expected strings agent-new builds in bash must equal what its own NORM_JQ makes of each posted template
-for n in agent-fence agent-fence-tags protect-main; do
-  case "$n" in agent-fence) want="$FENCE_NORM" ;; agent-fence-tags) want="$TAGS_NORM" ;; *) want="$EXPECT_NORM" ;; esac
+WB_NORM='branch|active||deletion,non_fast_forward|pr:-||refs:refs/heads/allen-dev/|strict:-||upd:-'
+for n in agent-fence agent-fence-tags protect-main agent-working-branch; do
+  case "$n" in agent-fence) want="$FENCE_NORM" ;; agent-fence-tags) want="$TAGS_NORM" ;; agent-working-branch) want="$WB_NORM" ;; *) want="$EXPECT_NORM" ;; esac
   check "template $n: posted JSON projects to the expected string" test "$(jq -r "$NORM_JQ_SRC" "$STATE/ruleset-posted-$n")" = "$want"
 done
 newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
@@ -441,6 +448,28 @@ OUT=$(run protect allen/repo1 --vault agent-p1 --main-gate 2>&1)
 check "live ruleset named main counts as protect-main: SKIP" grep -q 'SKIP.*ruleset protect-main' <<<"$OUT"
 check "  protect-main not POSTed"             test ! -f "$STATE/ruleset-posted-protect-main"
 check "  creation message cites the runbook only for protect-main" bash -c '! grep -q "creating ruleset agent-fence.*machine-user" <<<"$1" && grep -q "creating ruleset agent-fence on" <<<"$1"' _ "$OUT"
+
+echo "== the working branch's ruleset =="
+newstate; touch "$STATE/collab"
+OUT=$(run protect allen/repo1 --vault agent-p1 2>&1); rc=$?
+check "fresh repo: agent-working-branch POSTed"         bash -c '[ "$1" -eq 0 ] && [ -s "$2" ]' _ "$rc" "$STATE/ruleset-posted-agent-working-branch"
+check "  it covers exactly refs/heads/allen-dev"        grep -q '"include": \["refs/heads/allen-dev"\], "exclude": \[\]' "$STATE/ruleset-posted-agent-working-branch"
+check "  rules: deletion and non_fast_forward only"     bash -c 'grep -q "\"type\": \"deletion\"" "$1" && grep -q "\"type\": \"non_fast_forward\"" "$1" && [ "$(grep -o "\"type\":" "$1" | wc -l)" -eq 2 ]' _ "$STATE/ruleset-posted-agent-working-branch"
+check "  nobody bypasses it"                            grep -q '"bypass_actors": \[\]' "$STATE/ruleset-posted-agent-working-branch"
+check "  after allen-dev is created, before auto-delete is switched on" \
+  bash -c 'a=$(grep -n "POST repos/allen/repo1/git/refs" "$1" | cut -d: -f1); b=$(grep -n "POST repos/allen/repo1/rulesets" "$1" | tail -n1 | cut -d: -f1); c=$(grep -n "PATCH repos/allen/repo1 -F delete_branch_on_merge" "$1" | cut -d: -f1); [ "$a" -lt "$b" ] && [ "$b" -lt "$c" ]' _ "$GHLOG"
+newstate; touch "$STATE/collab" "$STATE/has-allen-dev"
+check "allen-dev exists already: the ruleset is still ensured" run protect allen/repo1 --vault agent-p1
+check "  POSTed"                                        test -s "$STATE/ruleset-posted-agent-working-branch"
+newstate; touch "$STATE/collab"
+check "--no-working-branch: no working-branch ruleset" run protect allen/repo1 --vault agent-p1 --no-working-branch
+check "  not POSTed"                                    test ! -f "$STATE/ruleset-posted-agent-working-branch"
+newstate; touch "$STATE/collab" "$STATE/has-allen-dev"; echo 10 > "$STATE/ruleset-id-agent-working-branch"; echo "$WB_NORM" > "$STATE/ruleset-norm-agent-working-branch"
+OUT=$(run protect allen/repo1 --vault agent-p1 2>&1)
+check "live working-branch ruleset equals the template: SKIP" grep -q 'SKIP.*ruleset agent-working-branch' <<<"$OUT"
+newstate; touch "$STATE/collab" "$STATE/has-allen-dev"; echo 10 > "$STATE/ruleset-id-agent-working-branch"; echo "${WB_NORM/'branch|active||'/'branch|active|RepositoryRole:5:always|'}" > "$STATE/ruleset-norm-agent-working-branch"
+refuses "working-branch ruleset with an admin bypass: refused, not modified" 'ruleset agent-working-branch on allen/repo1 differs from the template' run protect allen/repo1 --vault agent-p1
+check "  no write to it"                                lacks "$GHLOG" 'api -X (PUT|DELETE) repos/allen/repo1/rulesets'
 
 echo "== fence: protect =="
 newstate; touch "$STATE/collab"; echo master > "$STATE/default-branch"
@@ -724,12 +753,15 @@ echo "== verify: the fence, in the container =="
 export AGENT_NEW_CHECK_TRIES=2 AGENT_NEW_CHECK_SLEEP=0
 # the container's answers that are not GitHub's: who gh is, origin's URLs, the unrelated commit's id. GitHub's part (pushes,
 # PRs, merges, refs) is played by the stubs from $STATE (fence on, rulesets equal to their templates, allen-dev present).
-plan_fence(){ local r="${1:-allen/p1}"; touch "$STATE/fence" "$STATE/has-allen-dev"; fencepair
+wbrule(){ echo 10 > "$STATE/ruleset-id-agent-working-branch"; echo "$WB_NORM" > "$STATE/ruleset-norm-agent-working-branch"; touch "$STATE/wbr"; }
+plan_fence(){ local r="${1:-allen/p1}"; touch "$STATE/fence" "$STATE/has-allen-dev"; fencepair; wbrule
   cat > "$STATE/exec-plan" <<PLAN
 api user|0|agent-allen
 remote get-url --push origin|0|https://github.com/$r.git
 remote get-url origin|0|https://github.com/$r.git
 commit-tree|0|1111111111111111111111111111111111111111
+rev-parse FETCH_HEAD~1|0|4444444444444444444444444444444444444444
+rev-parse FETCH_HEAD\$|0|5555555555555555555555555555555555555555
 PLAN
 }
 fence_in(){ grep -qE -- "$1" "$DLOG"; }                                              # $1 an ERE the docker log must contain
@@ -743,7 +775,7 @@ newstate; plan_fence
 VOUT=$(run verify p1 2>&1); VRC=$?
 check "fence on: verify passes"                         test "$VRC" -eq 0
 check "  says FENCE VERIFIED, naming the repo and the project" grep -qx 'agent-new: FENCE VERIFIED on allen/p1 (project p1)' <<<"$VOUT"
-check "  eight refusals asserted"                       test "$(grep -c 'OK (refused as expected)' <<<"$VOUT")" -eq 8
+check "  ten refusals asserted"                         test "$(grep -c 'OK (refused as expected)' <<<"$VOUT")" -eq 10
 check "  the rulesets were read as you"                 grep -q '^GH: api repos/allen/p1/rulesets/9 --jq' "$GHLOG"
 check "  you created the throwaway branch from the default branch's head" grep -Eq "^GH: api -X POST repos/allen/p1/git/refs -f ref=refs/heads/verify-fence-$VID_RE -f sha=sha-of-main$" "$GHLOG"
 check "  ...and the throwaway tag"                      grep -Eq "^GH: api -X POST repos/allen/p1/git/refs -f ref=refs/tags/verify-fence-$VID_RE -f sha=sha-of-main$" "$GHLOG"
@@ -762,8 +794,8 @@ check "  every merge sent to the server was into a throwaway branch" merges_only
 check "  the default branch was never pushed to"        lacks "$STATE/pushes" '(:|^PUSH.*--delete )(refs/heads/)?main( |$)'
 check "  no PR into the default branch"                 fence_not 'gh pr create [^|]*--base main '
 check "  every push and fetch names the URL, never origin" fence_not 'git (push|fetch|ls-remote)( -q)? origin( |$)'
-check "  force only in the two deliberate attempts, both on throwaway refs" \
-  bash -c 'f=$(grep -E "git push [^|]*(--force|-f )" "$1"); [ "$(grep -c . <<<"$f")" -eq 2 ] && ! grep -Ev "refs/(heads|tags)/verify-fence-[0-9]+-[0-9]+$" <<<"$f"' _ "$DLOG"
+check "  force only in the deliberate attempts: two on throwaway refs, one (with a lease) on allen-dev" \
+  bash -c 'f=$(grep -E "git push [^|]*(--force|-f )" "$1"); [ "$(grep -c . <<<"$f")" -eq 3 ] && ! grep -Ev "refs/(heads|tags)/verify-fence-[0-9]+-[0-9]+$|--force-with-lease=refs/heads/allen-dev:5{40} https://github.com/allen/p1.git 4{40}:refs/heads/allen-dev$" <<<"$f"' _ "$DLOG"
 check "  no fixed name: every verify ref carries the run's id" fence_not 'verify-ruleset|verify-fence($|[^-]|-[^0-9])'
 check "  allen-dev checked by its full ref name"        fence_in "git ls-remote --exit-code $URL1 refs/heads/allen-dev"
 check "  dev commit made on allen-dev fetched by URL"   fence_in "git fetch -q $URL1 refs/heads/allen-dev && git checkout -q --detach FETCH_HEAD"
@@ -771,7 +803,11 @@ check "  PR into allen-dev opened"                      fence_in "gh pr create -
 check "  ...its checks watched by number"               fence_in 'gh pr checks 8 -R allen/p1 --watch'
 check "  ...merged by number, --squash --delete-branch" fence_in 'gh pr merge 8 -R allen/p1 --squash --delete-branch'
 check "  ...and you confirmed it MERGED"                grep -q '^GH: pr view 8 -R allen/p1 --json state --jq .state' "$GHLOG"
-check "  no direct push to allen-dev"                   fence_not ':refs/heads/allen-dev|HEAD:allen-dev'
+check "  no direct push to allen-dev"                   fence_not 'HEAD:(refs/heads/)?allen-dev'
+check "  deleting allen-dev tried, as the machine user"  fence_in "git push $URL1 --delete refs/heads/allen-dev\$"
+check "  rewinding allen-dev by one commit tried, only with a lease on the head just read" fence_in "git push --force-with-lease=refs/heads/allen-dev:5{40} $URL1 4{40}:refs/heads/allen-dev\$"
+check "  both refused"                                  bash -c 'grep -q "OK (refused as expected): delete allen-dev" <<<"$1" && grep -q "OK (refused as expected): force-push allen-dev" <<<"$1"' _ "$VOUT"
+check "  the working-branch ruleset was checked as you" grep -q '^GH: api repos/allen/p1/rulesets/10 --jq' "$GHLOG"
 check "  you closed the refused PR"                     grep -q '^GH: pr close 7 -R allen/p1' "$GHLOG"
 check "  you removed the throwaway branch, tag and both chore branches" \
   bash -c 'for r in "heads/verify-fence-[0-9]+-[0-9]+" "tags/verify-fence-[0-9]+-[0-9]+" "heads/chore/verify-fence-[0-9]+-[0-9]+"; do grep -Eqx "$r" "$1" || exit 1; done' _ "$STATE/refs-deleted"
@@ -803,6 +839,26 @@ check "merge into the throwaway branch wrongly accepted: GATE NOT BINDING" bash 
 check "  the merged PR is not closed again"             lacks "$GHLOG" '^GH: pr close'
 check "  you removed the throwaway refs and chore branch" bash -c 'grep -Eqx "heads/verify-fence-[0-9]+-[0-9]+" "$1" && grep -Eqx "heads/chore/verify-fence-[0-9]+-[0-9]+" "$1"' _ "$STATE/refs-deleted"
 check "  ...before the worktree goes"                   bash -c 'tail -n1 "$1" | grep -q "git worktree remove"' _ "$DLOG"
+
+for a in "delete allen-dev::--delete refs/heads/allen-dev" "force-push allen-dev::--force-with-lease=refs/heads/allen-dev"; do
+  label="${a%%::*}"; re="${a#*::}"
+  newstate; plan_fence; printf '%s' "$re" > "$STATE/accept-push"
+  VOUT=$(run verify p1 2>&1); VRC=$?
+  check "'$label' wrongly accepted: GATE NOT BINDING"   bash -c '[ "$1" -ne 0 ] && grep -q "GATE NOT BINDING: .$2. SUCCEEDED on allen/p1" <<<"$3"' _ "$VRC" "$label" "$VOUT"
+  case "$label" in
+    delete*) check "  you recreated allen-dev at the head read before the attempt" bash -c 'grep -q "api -X POST repos/allen/p1/git/refs -f ref=refs/heads/allen-dev -f sha=5\{40\}$" "$1" && grep -q "allen-dev was put back at 5\{40\}" <<<"$2"' _ "$STATE/ref-posted" "$VOUT" ;;
+    *) check "  you moved allen-dev back to the head read before the attempt" bash -c 'grep -q "api -X PATCH repos/allen/p1/git/refs/heads/allen-dev -f sha=5\{40\} -F force=true" "$1" && grep -q "allen-dev was put back at 5\{40\}" <<<"$2"' _ "$STATE/ref-patched" "$VOUT" ;;
+  esac
+done
+newstate; plan_fence; printf '%s' '--delete refs/heads/allen-dev' > "$STATE/accept-push"; touch "$STATE/restore-fail"
+VOUT=$(run verify p1 2>&1); VRC=$?
+check "allen-dev deleted and cannot be put back: the message gives you the command" \
+  bash -c '[ "$1" -ne 0 ] && grep -q "allen-dev could NOT be put back: as yourself, run: gh api -X POST repos/allen/p1/git/refs -f ref=refs/heads/allen-dev -f sha=5\{40\}" <<<"$2"' _ "$VRC" "$VOUT"
+newstate; plan_fence; rm -f "$STATE/ruleset-id-agent-working-branch"
+refuses "allen-dev without its ruleset: dies"           'has no ruleset agent-working-branch: run agent-new protect' run verify p1
+check "  ...before any push"                            bash -c '[ ! -s "$1" ]' _ "$STATE/pushes"
+newstate; plan_fence; rm -f "$STATE/has-allen-dev" "$STATE/ruleset-id-agent-working-branch"
+check "no allen-dev and no working-branch ruleset: passes (nothing to protect)" run verify p1
 
 # the rulesets are checked as you before the machine user does anything
 for c in "no fence rulesets::rm -f \$STATE/ruleset-id-agent-fence \$STATE/ruleset-id-agent-fence-tags::has no ruleset agent-fence: run agent-new protect" \
@@ -914,7 +970,7 @@ gatestate
 VOUT=$(run verify p1 --main-gate 2>&1); VRC=$?
 check "--main-gate: passes"                             test "$VRC" -eq 0
 check "  runs the fence first"                          bash -c 'a=$(grep -n "FENCE VERIFIED on" <<<"$1" | cut -d: -f1); b=$(grep -n "verifying the merge gate" <<<"$1" | cut -d: -f1); [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]' _ "$VOUT"
-check "  then the gate: twelve refusals in all"         test "$(grep -c 'OK (refused as expected)' <<<"$VOUT")" -eq 12
+check "  then the gate: fourteen refusals in all"       test "$(grep -c 'OK (refused as expected)' <<<"$VOUT")" -eq 14
 check "  GATE VERIFIED, naming the PR"                  grep -q 'GATE VERIFIED on allen/p1. Approve-and-merge or close PR #9' <<<"$VOUT"
 check "  gate commit on the default branch, fetched by URL" fence_in "git fetch -q $URL1 refs/heads/main && git checkout -q --detach FETCH_HEAD && git commit -q --allow-empty -m 'chore: verify ruleset'"
 check "  gate PR from chore/verify-gate-<id> into main" fence_in "gh pr create -R allen/p1 --base main --head chore/verify-gate-$VID_RE "
@@ -946,7 +1002,7 @@ refuses "wrong refusal reason on the gate -> GATE NOT BINDING" "'approve own PR'
 echo "== verify: <owner>/<repo>, in a temporary clone =="
 refuses "repo mode without --vault refused"             'needs --vault' run verify allen/repo9
 export TMPDIR="$T/tmpdirs"; mkdir -p "$TMPDIR"
-repostate(){ newstate; touch "$STATE/fence" "$STATE/has-allen-dev"; fencepair; }
+repostate(){ newstate; touch "$STATE/fence" "$STATE/has-allen-dev"; fencepair; wbrule; }
 repostate; echo allen > "$STATE/mu-login"
 refuses "repo mode: token resolving to the owner -> die" 'allen.*agent-allen' run verify allen/repo9 --vault agent-p1
 check "  nothing cloned"                                lacks "$GITLOG" '^GIT: clone'
@@ -954,7 +1010,7 @@ repostate
 VOUT=$(run verify allen/repo9 --vault agent-p1 2>&1); VRC=$?
 check "repo mode, fence on: passes"                     test "$VRC" -eq 0
 check "  FENCE VERIFIED on allen/repo9"                 grep -qx 'agent-new: FENCE VERIFIED on allen/repo9' <<<"$VOUT"
-check "  eight refusals asserted"                       test "$(grep -c 'OK (refused as expected)' <<<"$VOUT")" -eq 8
+check "  ten refusals asserted"                         test "$(grep -c 'OK (refused as expected)' <<<"$VOUT")" -eq 10
 check "  the attempts were the machine user's"          bash -c '[ "$(grep -c "^PUSH(mu):" "$1")" -ge 9 ] && ! grep -q "^PUSH:" "$1"' _ "$STATE/pushes"
 check "  every push names the URL, never origin"        bash -c 'grep -q "^GIT: push https://github.com/allen/repo9.git " "$1" && ! grep -Eq "^GIT: (push|fetch)( -q)? origin" "$1"' _ "$GITLOG"
 check "  the refs were created and removed as you"      bash -c 'grep -q "^GH: api -X POST repos/allen/repo9/git/refs" "$1" && grep -q "^GH: api -X DELETE repos/allen/repo9/git/refs" "$1" && ! grep -q "^GH(mu): api -X (POST|DELETE) repos/allen/repo9/git/refs" "$1"' _ "$GHLOG"
@@ -990,7 +1046,7 @@ printf 'export GH_TOKEN=bogus-owner-token\n' > "$H/.profile"
 VOUT=$(run verify allen/repo9 --vault agent-p1 --main-gate 2>&1); VRC=$?
 rm -f "$H/.profile"
 check "repo mode --main-gate: passes"                   test "$VRC" -eq 0
-check "  fence and gate refusals asserted"              test "$(grep -c 'OK (refused as expected)' <<<"$VOUT")" -eq 12
+check "  fence and gate refusals asserted"              test "$(grep -c 'OK (refused as expected)' <<<"$VOUT")" -eq 14
 check "  login profile cannot swap the token (bash -c)" bash -c '! grep -q bogus-owner-token "$1" && grep -q fake-op-secret "$1"' _ "$STATE/gh-tokens"
 repostate; touch "$STATE/gate"; echo 7 > "$STATE/ruleset-id-protect-main"; echo "$EXPECT_NORM" > "$STATE/ruleset-norm-protect-main"
 printf '[ "$0" = bash ] && export GH_TOKEN=bogus-bashenv-token\n' > "$T/bashenv"

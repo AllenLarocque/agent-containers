@@ -107,13 +107,22 @@ and refuses a repo with no commits. `--no-working-branch` skips it.
 - These are the same two rulesets the owner made by hand as `protect-fork` and
   `protect-fork-tags`, with a wider `exclude` list and a name that says what they do.
 
+### The working branch's ruleset
+
+`agent-working-branch` applies to `refs/heads/allen-dev` only, with the rules deletion and
+non_fast_forward and no bypass, so neither the agent nor the owner can delete `allen-dev` or rewrite
+its history. `agent-new protect` creates it right after the working branch exists (skipped with
+`--no-working-branch`) and before it turns on automatic deletion of merged branches, which would
+otherwise delete `allen-dev` when a promotion PR from it is merged.
+
 ### Deleting branches
 
 - `agent-new protect` turns on the repo setting "Automatically delete head branches"
   (`delete_branch_on_merge`), so a branch merged into `allen-dev` is deleted at merge time.
 - An `upstream/` branch is kept until upstream merges or closes its PR. The fork check lists the
   ones that can go.
-- The mirrors are fenced, so the agent cannot delete them.
+- The mirrors are fenced, so the agent cannot delete them. `allen-dev` cannot be deleted by
+  anyone: `agent-working-branch`.
 - The agent decides by the PR's state, never by `git branch --merged` (after a squash git reports
   the branch as unmerged), and never deletes a branch whose PR is not merged without asking.
 
@@ -160,7 +169,8 @@ project's vault holds a token for the same machine user, used only to accept the
 ### Verification
 
 `agent-new verify` first reads the repository's rulesets as the owner: `agent-fence` and
-`agent-fence-tags` must equal their templates (and `protect-main` with `--main-gate`), and no
+`agent-fence-tags` must equal their templates (and `agent-working-branch` when `allen-dev` exists,
+and `protect-main` with `--main-gate`), and no
 `protect-fork` or `protect-fork-tags` may be left. Then the owner creates a throwaway branch and
 tag named `verify-fence-<run id>` at the default branch's head, and, as the machine user:
 
@@ -169,7 +179,9 @@ tag named `verify-fence-<run id>` at the default branch's head, and, as the mach
 - creating a new branch outside the free names, and a new tag, are refused;
 - moving and deleting the throwaway tag are refused;
 - a free-named branch can be pushed, and a PR from it into the throwaway branch cannot be merged;
-- a PR into `allen-dev` can be squash-merged.
+- a PR into `allen-dev` can be squash-merged;
+- deleting `allen-dev` and force-pushing it are refused (if either went through, the owner puts
+  `allen-dev` back where it was before the run stops).
 
 The default branch is never pushed to or merged into in these checks; a wrongly accepted attempt
 changes only a throwaway ref. The owner removes everything the run created; anything that cannot
