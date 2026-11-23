@@ -48,15 +48,29 @@ the reasoning for what was dropped is under "What is dropped".
 
 ### The workflow
 
-1. The agent and the owner both work on `allen-dev`. The agent makes each change on a branch with
-   a free prefix and merges it into `allen-dev` by a small squashed PR; the owner may commit to
-   `allen-dev` directly.
-2. When the owner is satisfied, they merge `allen-dev` into their own line on that repo: the
-   default branch on a repo they own outright; on a fork, the branch that corresponds to the
-   upstream branch they send work to (`development` or `main`).
-3. On a fork, when the owner is confident in how it runs, they open the PR to the upstream repo
-   from that branch. After upstream merges it, they sync the fork's branch from upstream and merge
-   it back into `allen-dev`.
+On every repo, the agent and the owner both work on `allen-dev`. The agent makes each change on a
+branch with a free prefix and merges it into `allen-dev` by a small squashed PR; the owner may
+commit to `allen-dev` directly.
+
+**On a repo the owner owns outright**, the owner merges `allen-dev` into the default branch when
+satisfied.
+
+**On a fork**, `allen-dev` is the owner's line and every branch that came from upstream is a
+mirror:
+
+- Nobody commits to a mirror. It changes only by being fast-forwarded from upstream.
+- The owner's projects run `AllenLarocque/<repo>@allen-dev`, so a run includes all of the owner's
+  work whether or not upstream has merged it. Upstream is often slow to merge; nothing here waits
+  on it.
+- Work goes upstream as small PRs made from a topic branch: cut from the mirror, carrying only the
+  commits for one change. When changes are too entangled to separate, a snapshot branch cut from
+  `allen-dev` is sent instead. `allen-dev` itself is never the head of an upstream PR, because it
+  keeps moving. The agent prepares these branches when asked; the owner opens the upstream PR.
+- A change that builds on a PR upstream has not merged is either held on `allen-dev` until then,
+  or sent stacked on that PR's branch with "depends on #N" in its description. Owner's choice per
+  change.
+- Upstream's changes enter `allen-dev` when the owner asks: the agent opens a PR from the synced
+  mirror into `allen-dev`.
 
 The branch is named `allen-dev` on every repo (owner's choice, 2026-11-23). `agent-new protect`
 creates it from the default branch's head when it does not exist, leaves an existing one alone,
