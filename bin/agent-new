@@ -590,12 +590,11 @@ wait_checks(){ # $1 the gh pr checks command; retries only on "no checks reporte
 }
 
 FENCE_RE='GH013|repository rule|rule violations|protected'
-FENCE_MERGE_RE="$FENCE_RE|base branch policy"   # gh reports a merge blocked by a ruleset as "base branch policy prohibits the merge"
 FENCE_PRS=() FENCE_BRANCHES=()   # what verify_fence opened or pushed and has not removed yet; fence_cleanup removes it
 fence_cleanup(){ # closes verify_fence's open PRs and deletes its remote branches; runs at the end and from the EXIT trap
   local b rc
   for b in ${FENCE_PRS[@]+"${FENCE_PRS[@]}"}; do
-    RUN_IN "gh pr close $b" >/dev/null 2>&1 || warn "could not close the PR from $b on $VTARGET: close it in the browser"
+    RUN_IN "gh pr close $b -R $VREPO" >/dev/null 2>&1 || warn "could not close the PR from $b on $VTARGET: close it in the browser"
   done
   FENCE_PRS=()
   for b in ${FENCE_BRANCHES[@]+"${FENCE_BRANCHES[@]}"}; do
@@ -611,11 +610,15 @@ fence_push(){ # $1 a branch under chore/: push HEAD there (replacing a leftover 
   out="$(RUN_IN "git push -f origin HEAD:refs/heads/$1" 2>&1)" \
     || die "verify: could not push $1 (the fence leaves chore/** free): $out"
 }
-fence_pr(){ # $1 head branch, $2 base branch: open a PR; one left open by an earlier run is reused
+fence_pr(){ # $1 head branch, $2 base branch: open a PR on $VREPO (one left open by an earlier run is reused); sets FENCE_PR_NUM
   local out
   FENCE_PRS+=("$1")
-  out="$(RUN_IN "gh pr create --base $2 --head $1 --title 'chore: verify fence' --body 'Opened by agent-new verify, which closes or merges it.'" 2>&1)" \
+  out="$(RUN_IN "gh pr create -R $VREPO --base $2 --head $1 --title 'chore: verify fence' --body 'Opened by agent-new verify, which closes or merges it.'" 2>&1)" \
     || grep -q 'already exists' <<<"$out" || die "verify: could not open the PR from $1 into $2: $out"
+  # gh prints the PR's URL on success and in its "already exists" message; it must be a PR on $VREPO
+  FENCE_PR_NUM="$(grep -oE "https://github\.com/${VREPO//./\\.}/pull/[0-9]+" <<<"$out" | tail -n1)" || true
+  FENCE_PR_NUM="${FENCE_PR_NUM##*/}"
+  [[ $FENCE_PR_NUM =~ ^[0-9]+$ ]] || die "verify: no PR on $VREPO in gh's answer for $1 -> $2: $out"
 }
 
 verify_fence(){ # $1 the default branch: the machine user is refused outside the free names, and merges into the working branch
@@ -631,8 +634,10 @@ verify_fence(){ # $1 the default branch: the machine user is refused outside the
     'git push origin --delete refs/tags/verify-fence-tag'
   fence_push chore/verify-fence
   fence_pr chore/verify-fence "$def"
-  expect_refusal "merge a PR into $def"          "$FENCE_MERGE_RE" 'gh pr merge chore/verify-fence --squash'
-  RUN_IN 'gh pr close chore/verify-fence' >/dev/null 2>&1 \
+  # the merge goes to the server (not gh pr merge, which refuses on its own while the PR is merely blocked),
+  # so the refusal is the rule's own answer
+  expect_refusal "merge a PR into $def"          "$FENCE_RE" "gh api -X PUT repos/$VREPO/pulls/$FENCE_PR_NUM/merge -f merge_method=squash"
+  RUN_IN "gh pr close chore/verify-fence -R $VREPO" >/dev/null 2>&1 \
     || warn "could not close the PR from chore/verify-fence on $VTARGET: close it in the browser"
   FENCE_PRS=()
   rc=0; out="$(RUN_IN "git ls-remote --exit-code --heads origin $WORK_BRANCH" 2>&1)" || rc=$?
@@ -643,13 +648,13 @@ verify_fence(){ # $1 the default branch: the machine user is refused outside the
       fence_push chore/verify-fence-dev
       fence_pr chore/verify-fence-dev "$WORK_BRANCH"
       say "waiting for checks on the PR into $WORK_BRANCH"
-      wait_checks 'gh pr checks chore/verify-fence-dev --watch'
+      wait_checks "gh pr checks chore/verify-fence-dev -R $VREPO --watch"
       if [ "$CHECKS_RC" -ne 0 ]; then
         grep -qi 'no checks reported' <<<"$CHECKS" \
           || die "verify: checks are not green on the PR into $WORK_BRANCH — fix CI first, then re-run verify: $(tail -n5 <<<"$CHECKS")"
         say "no checks reported on the PR into $WORK_BRANCH after $CHECKS_TRIES tries: merging without them"
       fi
-      out="$(RUN_IN 'gh pr merge chore/verify-fence-dev --squash --delete-branch' 2>&1)" \
+      out="$(RUN_IN "gh pr merge chore/verify-fence-dev -R $VREPO --squash --delete-branch" 2>&1)" \
         || die "verify: could not squash-merge the PR into $WORK_BRANCH: $out"
       FENCE_PRS=()
       say "OK (merged as expected): a PR into $WORK_BRANCH, squashed, its branch deleted"
@@ -668,10 +673,10 @@ verify_main_gate(){ # $1 the default branch: the review gate on it binds the mac
   # -f: replaces a leftover from an earlier run; the branch starts at origin/$def, so the later
   # push to $def is a fast-forward and a refusal can only be the ruleset
   RUN_IN 'git push -f -u origin verify-ruleset' >/dev/null
-  local pr_out; pr_out="$(RUN_IN 'gh pr create --fill' 2>&1)" \
+  local pr_out; pr_out="$(RUN_IN "gh pr create -R $VREPO --base $def --head verify-ruleset --title 'chore: verify ruleset' --body 'Opened by agent-new verify: approve-and-merge or close it.'" 2>&1)" \
     || grep -q 'already exists' <<<"$pr_out" || die "could not open the verification PR: $pr_out"
   say "waiting for required checks on the verification PR"
-  wait_checks 'gh pr checks --watch'
+  wait_checks "gh pr checks verify-ruleset -R $VREPO --watch"
   if [ "$CHECKS_RC" -ne 0 ]; then
     if grep -qi 'no checks reported' <<<"$CHECKS"; then
       warn "no required check reported after $CHECKS_TRIES tries: the required-check rule stays UNTESTED (re-run verify once CI exists)"
@@ -680,26 +685,45 @@ verify_main_gate(){ # $1 the default branch: the review gate on it binds the mac
     fi
   fi
   printf '%s\n' "$CHECKS" | tail -n2
-  expect_refusal "merge own PR"        'base branch policy|review'        'gh pr merge --squash'
-  expect_refusal "approve own PR"      'approve your own'                 'gh pr review --approve'
+  expect_refusal "merge own PR"        'base branch policy|review'        "gh pr merge verify-ruleset -R $VREPO --squash"
+  expect_refusal "approve own PR"      'approve your own'                 "gh pr review verify-ruleset -R $VREPO --approve"
   expect_refusal "push straight to $def" 'GH013|repository rule'         "git push origin HEAD:$def"
-  expect_refusal "admin-merge own PR"  'rule violations|not.*admin'       'gh pr merge --squash --admin'
+  expect_refusal "admin-merge own PR"  'rule violations|not.*admin'       "gh pr merge verify-ruleset -R $VREPO --squash --admin"
   say "GATE VERIFIED on $VTARGET. Approve-and-merge or close the verification PR in the browser (only your approval counts)."
 }
 
+REPO_RE='^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$'
+github_repo(){ # $1 a GitHub remote URL (https, ssh or scp form) -> prints owner/repo; fails on anything else
+  local r
+  case "$1" in
+    https://github.com/*)     r="${1#https://github.com/}" ;;
+    ssh://git@github.com/*)   r="${1#ssh://git@github.com/}" ;;
+    git@github.com:*)         r="${1#git@github.com:}" ;;
+    *) return 1 ;;
+  esac
+  r="${r%/}"; r="${r%.git}"
+  [[ $r =~ $REPO_RE ]] && [[ ${r#*/} != . && ${r#*/} != .. ]] || return 1
+  printf '%s' "$r"
+}
+read_origin_repo(){ # sets VREPO: the owner/repo origin points at; every gh call names it, so a fork's parent is never used
+  local url
+  url="$(RUN_IN 'git remote get-url origin')" || die "verify: could not read origin's URL in $VTARGET"
+  VREPO="$(github_repo "$url")" || die "verify: cannot tell which GitHub repo origin is (origin: '$url'): refusing to verify"
+}
 read_default_branch(){ # sets VDEF: the repo's default branch, read once through RUN_IN
-  VDEF="$(RUN_IN 'gh repo view --json defaultBranchRef --jq .defaultBranchRef.name')" \
+  VDEF="$(RUN_IN "gh repo view $VREPO --json defaultBranchRef --jq .defaultBranchRef.name")" \
     || die "could not read the default branch of $VTARGET (gh repo view failed)"
   [[ $VDEF =~ ^[A-Za-z0-9._/-]+$ ]] || die "could not read the default branch of $VTARGET (got: '$VDEF')"
 }
 
-# RUN_IN and the EXIT trap's fence_cleanup read only globals (VDIR, VTOK, VMU, VC, VWD):
+# RUN_IN and the EXIT trap's fence_cleanup read only globals (VDIR, VTOK, VMU, VC, VWD, VREPO):
 # an EXIT trap runs after this function's locals are gone
 cmd_verify(){
   VTARGET="$1"
   VMU="$(machine_user)"
   if [[ "$VTARGET" == */* ]]; then
     [ -n "$VAULT" ] || die "verify <owner>/<repo> needs --vault <op-vault> (the project vault holding github-agent)"
+    [[ $VTARGET =~ $REPO_RE ]] || die "verify wants <owner>/<repo> (got: $VTARGET)"
     # trap value frozen at set time: an EXIT trap outlives this function's locals,
     # so deferred '$tmp' would be unbound under set -u. || true: a failing cleanup
     # must not overwrite the script's real exit status.
@@ -727,6 +751,8 @@ cmd_verify(){
     (vgit_env; git clone -q "https://github.com/$VTARGET" "$VDIR") >/dev/null
     # bash -c, not -lc: the owner's login profile must not be able to re-export GH_TOKEN
     RUN_IN(){ (cd "$VDIR" && vgit_env && bash -c "$1"); }
+    read_origin_repo
+    [ "$VREPO" = "$VTARGET" ] || die "verify: the clone's origin is $VREPO, not $VTARGET: refusing to verify"
     read_default_branch
     RUN_IN "git fetch -q origin && git checkout -q -B verify-ruleset origin/$VDEF"
   else
@@ -747,6 +773,7 @@ cmd_verify(){
     [ "$who" = "$VMU" ] || die "gh in $VC is '$who', not the machine user '$VMU': refusing to verify as the wrong identity"
     [ "$(RUN_IN 'git branch --show-current')" != verify-ruleset ] \
       || die "/workspace in $VC is on verify-ruleset (left by an older agent-new): run 'git switch main' in the container, then re-run"
+    read_origin_repo
     read_default_branch
     # a temporary worktree: the owner's /workspace checkout (branch, index, files) is never touched.
     # fence_cleanup runs in the worktree, so it goes first; then the worktree (a branch checked out in it cannot be deleted).

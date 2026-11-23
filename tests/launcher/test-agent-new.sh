@@ -29,11 +29,12 @@ cat > "$T/bin/gh" <<'STUB'
 echo "GH${GH_TOKEN:+(mu)}: $*" >> "$GHLOG"
 echo "${GH_TOKEN:-}" >> "$STATE/gh-tokens"
 case "$*" in
-  "pr create"*) "$REALGIT" log -1 --format='AUTHOR: %an <%ae> COMMITTER: %cn <%ce>' >> "$STATE/gh-author" ;;
-  "pr merge --squash --admin") [ -f "$STATE/gate" ] && { echo "GraphQL: Repository rule violations found" >&2; exit 1; }; : ;;
-  "pr merge chore/verify-fence --squash") [ -f "$STATE/fence" ] && { echo "X Pull request #1 is not mergeable: the base branch policy prohibits the merge." >&2; exit 1; }; : ;;
-  "pr merge --squash") [ -f "$STATE/gate" ] && { echo "the base branch policy prohibits the merge" >&2; exit 1; }; : ;;
-  "pr review --approve") [ -f "$STATE/gate" ] && { echo "Review Can not approve your own pull request" >&2; exit 1; }; : ;;
+  "pr create"*) "$REALGIT" log -1 --format='AUTHOR: %an <%ae> COMMITTER: %cn <%ce>' >> "$STATE/gh-author"
+    a="$*"; r="${a#*-R }"; echo "https://github.com/${r%% *}/pull/7" ;;
+  "api -X PUT repos/"*"/pulls/"*"/merge -f merge_method=squash") [ -f "$STATE/fence" ] && { echo "gh: Repository rule violations found for refs/heads/main. (HTTP 405)" >&2; exit 1; }; : ;;
+  "pr merge verify-ruleset -R "*" --squash --admin") [ -f "$STATE/gate" ] && { echo "GraphQL: Repository rule violations found" >&2; exit 1; }; : ;;
+  "pr merge verify-ruleset -R "*" --squash") [ -f "$STATE/gate" ] && { echo "the base branch policy prohibits the merge" >&2; exit 1; }; : ;;
+  "pr review verify-ruleset -R "*" --approve") [ -f "$STATE/gate" ] && { echo "Review Can not approve your own pull request" >&2; exit 1; }; : ;;
   "api user --jq .login") if [ -n "${GH_TOKEN:-}" ]; then cat "$STATE/mu-login" 2>/dev/null || echo agent-allen
                           else [ -s "$STATE/login" ] || exit 1; cat "$STATE/login"; fi ;;
   api\ repos/*/collaborators/*) [ -f "$STATE/collab" ] ;;
@@ -69,7 +70,7 @@ case "$*" in
   "api -X PATCH repos/"*" -F delete_branch_on_merge=true") touch "$STATE/autodelete-patched" ;;
   "api repos/"*" --jq .default_branch") cat "$STATE/default-branch" 2>/dev/null || echo main ;;
   "api repos/"*" --jq .delete_branch_on_merge") cat "$STATE/autodelete" 2>/dev/null || echo false ;;
-  "repo view --json defaultBranchRef --jq .defaultBranchRef.name") cat "$STATE/default-branch" 2>/dev/null || echo main ;;
+  "repo view "*" --json defaultBranchRef --jq .defaultBranchRef.name") cat "$STATE/default-branch" 2>/dev/null || echo main ;;
   "repo view "*) [ -f "$STATE/repo-exists" ] ;;
   "repo create "*)
     touch "$STATE/repo-exists"; mkdir -p "$STATE/created"
@@ -138,7 +139,7 @@ echo "GIT: $*" >> "$GITLOG"
 case "$1" in
   clone) echo "GITENV: global=${GIT_CONFIG_GLOBAL:-} nosystem=${GIT_CONFIG_NOSYSTEM:-} count=${GIT_CONFIG_COUNT:-} helper=${GIT_CONFIG_VALUE_0:-} name=${GIT_CONFIG_VALUE_1:-} email=${GIT_CONFIG_VALUE_2:-}" >> "$GITLOG"
          db="$(cat "$STATE/default-branch" 2>/dev/null || echo main)"
-         mkdir -p "${@: -1}"; cd "${@: -1}" && "$REALGIT" init -q -b main && "$REALGIT" commit -q --allow-empty -m seed && "$REALGIT" remote add origin "https://github.com/x/y" && "$REALGIT" update-ref refs/remotes/origin/main HEAD \
+         mkdir -p "${@: -1}"; cd "${@: -1}" && "$REALGIT" init -q -b main && "$REALGIT" commit -q --allow-empty -m seed && "$REALGIT" remote add origin "${@: -2:1}" && "$REALGIT" update-ref refs/remotes/origin/main HEAD \
            && "$REALGIT" update-ref "refs/remotes/origin/$db" HEAD && { [ ! -f "$STATE/has-allen-dev" ] || "$REALGIT" update-ref refs/remotes/origin/allen-dev HEAD; } ;;
   fetch) exit 0 ;;
   ls-remote) case "$*" in *" allen-dev") [ -f "$STATE/has-allen-dev" ] || exit 2 ;; esac; exit 0 ;;
@@ -474,11 +475,13 @@ echo "== task 4: verify =="
 export AGENT_NEW_CHECK_TRIES=2 AGENT_NEW_CHECK_SLEEP=0
 plan_ok(){ cat > "$STATE/exec-plan" <<'PLAN'
 api user|0|agent-allen
-repo view --json defaultBranchRef|0|main
+remote get-url origin|0|https://github.com/allen/p1.git
+pr create|0|https://github.com/allen/p1/pull/7
+--json defaultBranchRef|0|main
 pr checks|0|gitleaks	pass
-pr merge --squash --admin|1|GraphQL: Repository rule violations found (mergePullRequest)
+--squash --admin|1|GraphQL: Repository rule violations found (mergePullRequest)
 pr merge|1|X Pull request #1 is not mergeable: the base branch policy prohibits the merge.
-pr review --approve|1|failed to create review: GraphQL: Review Can not approve your own pull request
+--approve|1|failed to create review: GraphQL: Review Can not approve your own pull request
 push origin HEAD:main|1|remote: error: GH013: Repository rule violations found for refs/heads/main.
 PLAN
 }
@@ -494,6 +497,8 @@ check "  checks not retried when they report" test "$(grep -c 'pr checks' "$DLOG
 check "  worktree pre-cleaned before add"     grep -qF 'bash -lc git worktree remove --force /tmp/agent-new-verify 2>/dev/null; git worktree prune; rm -rf /tmp/agent-new-verify' "$DLOG"
 check "  trap deletes the local verify-ruleset branch" grep -q 'DOCKER: exec -w /workspace p1-agent-1 git branch -D verify-ruleset' "$DLOG"
 check "  --main-gate runs none of the fence steps" sh -c "! grep -q 'verify-fence' '$DLOG'"
+check "  every gh pr / repo view call names allen/p1" bash -c 'grep -Eq "gh (pr|repo view) " "$1" && [ -z "$(grep -E "gh pr " "$1" | grep -Ev -- " -R allen/p1( |$)")" ] && [ -z "$(grep -E "gh repo view " "$1" | grep -v "gh repo view allen/p1 ")" ]' _ "$DLOG"
+check "  PR opened with explicit base and head"     grep -qF 'gh pr create -R allen/p1 --base main --head verify-ruleset ' "$DLOG"
 newstate; plan_ok; sed -i 's/^api user|0|agent-allen/api user|0|allen/' "$STATE/exec-plan"
 refuses "container identity is the owner -> die" 'allen.*agent-allen|agent-allen.*allen' run verify p1
 check "  nothing pushed" sh -c "! grep -q 'git push' '$DLOG'"
@@ -507,12 +512,12 @@ refuses "/workspace left on verify-ruleset -> die, tells owner to switch" 'git s
 check "  no worktree add attempted" sh -c "! grep -q 'worktree add' '$DLOG'"
 newstate; cat > "$STATE/exec-plan" <<'PLAN'
 pr checks|1|no checks reported on the latest commit
-pr merge --squash --admin|1|GraphQL: Repository rule violations found (mergePullRequest)
+--squash --admin|1|GraphQL: Repository rule violations found (mergePullRequest)
 pr merge|1|X Pull request #1 is not mergeable: the base branch policy prohibits the merge.
-pr review --approve|1|failed to create review: GraphQL: Review Can not approve your own pull request
+--approve|1|failed to create review: GraphQL: Review Can not approve your own pull request
 push origin HEAD:main|1|remote: error: GH013: Repository rule violations found for refs/heads/main.
 PLAN
-sed -i '1i api user|0|agent-allen\nrepo view --json defaultBranchRef|0|main' "$STATE/exec-plan"
+sed -i '1i api user|0|agent-allen\nremote get-url origin|0|https://github.com/allen/p1.git\n--json defaultBranchRef|0|main' "$STATE/exec-plan"
 VOUT=$(run verify p1 --main-gate 2>&1); VRC=$?
 check "no checks reported -> warns UNTESTED, continues" test "$VRC" -eq 0
 check "  UNTESTED warning shown"             grep -qi 'UNTESTED' <<<"$VOUT"
@@ -520,12 +525,12 @@ check "  still asserts four refusals"        test "$(grep -c 'OK (refused as exp
 check "  checks retried AGENT_NEW_CHECK_TRIES times" test "$(grep -c 'pr checks' "$DLOG")" -eq 2
 newstate; cat > "$STATE/exec-plan" <<'PLAN'
 pr checks|1|gitleaks fail 10s
-pr merge --squash --admin|1|GraphQL: Repository rule violations found (mergePullRequest)
+--squash --admin|1|GraphQL: Repository rule violations found (mergePullRequest)
 pr merge|1|X Pull request #1 is not mergeable: the base branch policy prohibits the merge.
-pr review --approve|1|failed to create review: GraphQL: Review Can not approve your own pull request
+--approve|1|failed to create review: GraphQL: Review Can not approve your own pull request
 push origin HEAD:main|1|remote: error: GH013: Repository rule violations found for refs/heads/main.
 PLAN
-sed -i '1i api user|0|agent-allen\nrepo view --json defaultBranchRef|0|main' "$STATE/exec-plan"
+sed -i '1i api user|0|agent-allen\nremote get-url origin|0|https://github.com/allen/p1.git\n--json defaultBranchRef|0|main' "$STATE/exec-plan"
 refuses "red check -> die, not UNTESTED warning" 'not green' run verify p1 --main-gate
 check "  worktree removed on a failing run"  grep -q 'git worktree remove --force /tmp/agent-new-verify' "$DLOG"
 newstate; plan_ok
@@ -568,12 +573,14 @@ echo "== fence: verify =="
 # the default branch are refused; chore/** and the PR into allen-dev go through
 plan_fence(){ cat > "$STATE/exec-plan" <<'PLAN'
 api user|0|agent-allen
-repo view --json defaultBranchRef|0|main
+remote get-url origin|0|https://github.com/allen/p1.git
+pr create|0|https://github.com/allen/p1/pull/7
+--json defaultBranchRef|0|main
 ls-remote --exit-code --heads origin allen-dev|0|1111111111111111111111111111111111111111	refs/heads/allen-dev
 push origin HEAD:main|1|remote: error: GH013: Repository rule violations found for refs/heads/main.
 push origin HEAD:refs/heads/verify-fence-not-free|1|remote: error: GH013: Repository rule violations found for refs/heads/verify-fence-not-free.
 push origin HEAD:refs/tags/verify-fence-tag|1|remote: error: GH013: Repository rule violations found for refs/tags/verify-fence-tag.
-pr merge chore/verify-fence --squash|1|X Pull request #1 is not mergeable: the base branch policy prohibits the merge.
+api -X PUT repos/allen/p1/pulls/7/merge -f merge_method=squash|1|gh: Repository rule violations found for refs/heads/main. (HTTP 405)
 pr checks|0|gitleaks	pass
 PLAN
 }
@@ -585,21 +592,35 @@ check "fence on: verify passes"                         test "$VRC" -eq 0
 check "  says FENCE VERIFIED"                           grep -q 'FENCE VERIFIED on p1' <<<"$VOUT"
 check "  four refusals asserted"                        test "$(grep -c 'OK (refused as expected)' <<<"$VOUT")" -eq 4
 check "  worktree from the default branch"              fence_in 'git worktree add -f -B verify-ruleset /tmp/agent-new-verify origin/main'
-check "  default branch read with gh repo view"         fence_in "gh repo view --json defaultBranchRef --jq .defaultBranchRef.name"
+check "  default branch read with gh repo view"         fence_in "gh repo view allen/p1 --json defaultBranchRef --jq .defaultBranchRef.name"
 check "  push to the default branch tried"              fence_in 'bash -lc git push origin HEAD:main'
 check "  branch outside the free names tried"           fence_in 'git push origin HEAD:refs/heads/verify-fence-not-free'
 check "  tag tried"                                     fence_in 'git push origin HEAD:refs/tags/verify-fence-tag'
 check "  chore/verify-fence pushed"                     fence_in 'git push -f origin HEAD:refs/heads/chore/verify-fence'
-check "  PR into the default branch opened"             fence_in 'gh pr create --base main --head chore/verify-fence '
-check "  merge into the default branch tried"           fence_in 'gh pr merge chore/verify-fence --squash'
-check "  that PR closed"                                fence_in 'gh pr close chore/verify-fence'
+check "  PR into the default branch opened"             fence_in 'gh pr create -R allen/p1 --base main --head chore/verify-fence '
+check "  merge into the default branch sent to the server" fence_in 'gh api -X PUT repos/allen/p1/pulls/7/merge -f merge_method=squash'
+check "  ...not through gh pr merge"                    fence_not 'gh pr merge chore/verify-fence -R'
+check "  that PR closed"                                fence_in 'gh pr close chore/verify-fence -R allen/p1'
 check "  dev commit made on origin/allen-dev"           fence_in 'git checkout -q --detach origin/allen-dev'
-check "  PR into allen-dev opened"                      fence_in 'gh pr create --base allen-dev --head chore/verify-fence-dev '
-check "  PR into allen-dev merged --squash --delete-branch" fence_in 'gh pr merge chore/verify-fence-dev --squash --delete-branch'
+check "  PR into allen-dev opened"                      fence_in 'gh pr create -R allen/p1 --base allen-dev --head chore/verify-fence-dev '
+check "  PR into allen-dev merged --squash --delete-branch" fence_in 'gh pr merge chore/verify-fence-dev -R allen/p1 --squash --delete-branch'
 check "  chore/verify-fence deleted on the remote"      fence_in 'git push -q origin --delete chore/verify-fence'
 check "  no direct push to allen-dev"                   fence_not 'HEAD:allen-dev'
 check "  none of the main-gate steps"                   sh -c "! grep -Eq 'pr review --approve|--admin|push -f -u origin verify-ruleset' '$DLOG'"
 check "  worktree removed on exit"                      fence_in 'DOCKER: exec -w /workspace p1-agent-1 git worktree remove --force /tmp/agent-new-verify'
+check "  every gh pr / repo view call names allen/p1 (origin), never gh's default repo" bash -c 'grep -Eq "gh (pr|repo view) " "$1" && [ -z "$(grep -E "gh pr " "$1" | grep -Ev -- " -R allen/p1( |$)")" ] && [ -z "$(grep -E "gh repo view " "$1" | grep -v "gh repo view allen/p1 ")" ]' _ "$DLOG"
+
+newstate; plan_fence; sed -i 's#^remote get-url origin|0|.*#remote get-url origin|0|git@github.com:allen/p1.git#' "$STATE/exec-plan"
+VOUT=$(run verify p1 2>&1); VRC=$?
+check "origin in scp ssh form: passes, gh calls name allen/p1" bash -c '[ "$1" -eq 0 ] && grep -q "gh pr create -R allen/p1 " "$2"' _ "$VRC" "$DLOG"
+newstate; plan_fence; sed -i 's#^remote get-url origin|0|.*#remote get-url origin|0|ssh://git@github.com/allen/p1#' "$STATE/exec-plan"
+VOUT=$(run verify p1 2>&1); VRC=$?
+check "origin in ssh:// form: passes"                   test "$VRC" -eq 0
+for bad in /srv/git/p1.git https://gitlab.com/allen/p1.git 'https://github.com/allen/p1/extra' 'https://github.com/allen'; do
+  newstate; plan_fence; sed -i "s#^remote get-url origin|0|.*#remote get-url origin|0|$bad#" "$STATE/exec-plan"
+  refuses "unparseable origin ($bad): dies"            'cannot tell which GitHub repo origin is' run verify p1
+  check "  ...before any push or gh pr call"            sh -c "! grep -Eq 'git push|gh pr |repo view' '$DLOG'"
+done
 
 newstate; plan_fence; sed -i 's/defaultBranchRef|0|main/defaultBranchRef|0|master/; s/push origin HEAD:main|/push origin HEAD:master|/' "$STATE/exec-plan"
 VOUT=$(run verify p1 2>&1); VRC=$?
@@ -607,7 +628,7 @@ check "fence on, default branch master: passes"         test "$VRC" -eq 0
 check "  push to HEAD:master tried"                     fence_in 'git push origin HEAD:master'
 check "  never HEAD:main"                               fence_not 'HEAD:main'
 check "  worktree from origin/master"                   fence_in 'git worktree add -f -B verify-ruleset /tmp/agent-new-verify origin/master'
-check "  PR opened into master"                         fence_in 'gh pr create --base master --head chore/verify-fence '
+check "  PR opened into master"                         fence_in 'gh pr create -R allen/p1 --base master --head chore/verify-fence '
 check "  refusal label names master"                    grep -q "OK (refused as expected): merge a PR into master" <<<"$VOUT"
 
 newstate; plan_fence; sed -i 's/^ls-remote --exit-code --heads origin allen-dev|0|.*/ls-remote --exit-code --heads origin allen-dev|2|/' "$STATE/exec-plan"
@@ -635,8 +656,10 @@ newstate; plan_fence; sed -i 's/^\(push origin HEAD:main|1|\).*/\1! [rejected] H
 refuses "refused for an unrelated reason (non-fast-forward): dies" 'not for the expected reason' run verify p1
 newstate; plan_fence; sed -i 's/^\(push origin HEAD:main|1|\).*/\1X the base branch policy prohibits the push/' "$STATE/exec-plan"
 refuses "push to main: 'base branch policy' is not the fence's reason there" "'push to main' was refused, but not for the expected reason" run verify p1
-newstate; plan_fence; sed -i 's/^\(pr merge chore\/verify-fence --squash|1|\).*/\1X Pull request #1 is not mergeable: the merge commit cannot be cleanly created./' "$STATE/exec-plan"
-refuses "merge into main refused for an unrelated reason: dies" "'merge a PR into main' was refused, but not for the expected reason" run verify p1
+newstate; plan_fence; sed -i 's/^\(api -X PUT [^|]*|1|\).*/\1gh: Required status check "gitleaks" is expected. (HTTP 405)/' "$STATE/exec-plan"
+refuses "merge into main refused for a pending check: dies" "'merge a PR into main' was refused, but not for the expected reason" run verify p1
+newstate; plan_fence; sed -i 's/^\(api -X PUT [^|]*|1|\).*/\1X Pull request #7 is not mergeable: the base branch policy prohibits the merge./' "$STATE/exec-plan"
+refuses "merge into main answered 'base branch policy': dies" "'merge a PR into main' was refused, but not for the expected reason" run verify p1
 
 newstate; plan_fence; sed -i 's/^\(push origin HEAD:refs\/heads\/verify-fence-not-free\)|1|.*/\1|0|created/' "$STATE/exec-plan"
 VOUT=$(run verify p1 2>&1); VRC=$?
@@ -653,10 +676,10 @@ VOUT=$(run verify p1 2>&1); VRC=$?
 check "tag accepted: dies GATE NOT BINDING"             bash -c '[ "$1" -ne 0 ] && grep -q "GATE NOT BINDING: .create a tag. SUCCEEDED" <<<"$2"' _ "$VRC" "$VOUT"
 check "  deletes the tag it created"                    fence_in 'git push origin --delete refs/tags/verify-fence-tag'
 
-newstate; plan_fence; sed -i '/^pr merge chore\/verify-fence --squash|/d' "$STATE/exec-plan"
+newstate; plan_fence; sed -i '/^api -X PUT /d' "$STATE/exec-plan"
 VOUT=$(run verify p1 2>&1); VRC=$?
 check "merge into the default branch accepted: dies GATE NOT BINDING" bash -c '[ "$1" -ne 0 ] && grep -q "GATE NOT BINDING: .merge a PR into main. SUCCEEDED" <<<"$2"' _ "$VRC" "$VOUT"
-check "  EXIT trap closes the PR"                       fence_in 'gh pr close chore/verify-fence'
+check "  EXIT trap closes the PR"                       fence_in 'gh pr close chore/verify-fence -R allen/p1'
 check "  EXIT trap deletes chore/verify-fence"          fence_in 'git push -q origin --delete chore/verify-fence'
 check "  ...before the worktree goes"                   bash -c 'a=$(grep -nF "origin --delete chore/verify-fence" "$1" | head -n1 | cut -d: -f1); b=$(grep -nF "git worktree remove --force /tmp/agent-new-verify" "$1" | tail -n1 | cut -d: -f1); [ -n "$a" ] && [ "$a" -lt "$b" ]' _ "$DLOG"
 
@@ -666,13 +689,13 @@ check "chore/verify-fence push fails: dies, names the step and the error" \
   bash -c '[ "$1" -ne 0 ] && grep -q "could not push chore/verify-fence" <<<"$2" && grep -q "rejected by a hook" <<<"$2"' _ "$VRC" "$VOUT"
 check "  no PR opened"                                  fence_not 'pr create'
 
-newstate; plan_fence; sed -i '1i pr create --base main|1|GraphQL: something broke (createPullRequest)' "$STATE/exec-plan"
+newstate; plan_fence; sed -i '1i pr create -R allen/p1 --base main|1|GraphQL: something broke (createPullRequest)' "$STATE/exec-plan"
 VOUT=$(run verify p1 2>&1); VRC=$?
 check "PR into the default branch cannot be opened: dies" \
   bash -c '[ "$1" -ne 0 ] && grep -q "could not open the PR" <<<"$2" && grep -q "something broke" <<<"$2"' _ "$VRC" "$VOUT"
 check "  no merge tried"                                fence_not 'pr merge'
 
-newstate; plan_fence; sed -i '1i pr create --base main|1|a pull request for branch "chore/verify-fence" into branch "main" already exists:' "$STATE/exec-plan"
+newstate; plan_fence; sed -i '1i pr create -R allen/p1 --base main|1|a pull request for branch "chore/verify-fence" into branch "main" already exists: https://github.com/allen/p1/pull/7' "$STATE/exec-plan"
 VOUT=$(run verify p1 2>&1); VRC=$?
 check "PR left by an earlier run is reused: passes"     test "$VRC" -eq 0
 
@@ -689,7 +712,7 @@ VOUT=$(run verify p1 2>&1); VRC=$?
 check "no checks on the PR into allen-dev: passes"      test "$VRC" -eq 0
 check "  says no checks were reported"                  grep -q 'no checks reported' <<<"$VOUT"
 check "  checks retried AGENT_NEW_CHECK_TRIES times"    test "$(grep -c 'pr checks' "$DLOG")" -eq 2
-check "  merged anyway"                                 fence_in 'gh pr merge chore/verify-fence-dev --squash --delete-branch'
+check "  merged anyway"                                 fence_in 'gh pr merge chore/verify-fence-dev -R allen/p1 --squash --delete-branch'
 
 newstate; plan_fence; sed -i 's/^pr checks|0|.*/pr checks|1|gitleaks	fail	10s/' "$STATE/exec-plan"
 refuses "red check on the PR into allen-dev: dies"      'not green' run verify p1
@@ -702,7 +725,9 @@ VOUT=$(run verify allen/repo9 --vault agent-p1 2>&1); VRC=$?
 check "repo mode, fence on: passes"                     test "$VRC" -eq 0
 check "  FENCE VERIFIED"                                grep -q 'FENCE VERIFIED on allen/repo9' <<<"$VOUT"
 check "  four refusals asserted"                        test "$(grep -c 'OK (refused as expected)' <<<"$VOUT")" -eq 4
-check "  PR into allen-dev merged as the machine user"  grep -q '^GH(mu): pr merge chore/verify-fence-dev --squash --delete-branch' "$GHLOG"
+check "  PR into allen-dev merged as the machine user"  grep -q '^GH(mu): pr merge chore/verify-fence-dev -R allen/repo9 --squash --delete-branch' "$GHLOG"
+check "  merge into main sent to the server"           grep -q '^GH(mu): api -X PUT repos/allen/repo9/pulls/7/merge -f merge_method=squash' "$GHLOG"
+check "  every gh pr / repo view call names allen/repo9" bash -c 'grep -Eq "^GH\(mu\): (pr|repo view) " "$1" && [ -z "$(grep -E "^GH\(mu\): pr " "$1" | grep -Ev -- " -R allen/repo9( |$)")" ] && [ -z "$(grep -E "^GH\(mu\): repo view " "$1" | grep -v "^GH(mu): repo view allen/repo9 ")" ]' _ "$GHLOG"
 check "  chore/verify-fence deleted"                    grep -q '^GIT: push -q origin --delete chore/verify-fence$' "$GITLOG"
 check "  temp clone cleaned up"                         test -z "$(ls -A "$TMPDIR")"
 newstate; touch "$STATE/fence"; echo master > "$STATE/default-branch"
