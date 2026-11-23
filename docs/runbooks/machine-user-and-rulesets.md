@@ -1,20 +1,128 @@
-# Runbook: machine user and branch rulesets
+# Runbook: machine user and the agent fence
 
-**Human procedure.** The agent must never perform these steps. You (the repo owner) do them in the GitHub web UI.
-GitHub UI paths below are as of 2026-10 and may move; if a label differs, look for the nearest equivalent.
+**Human procedure.** The agent must never perform these steps. You (the repo owner) do them, with `agent-new` or in the GitHub web UI.
+GitHub UI paths below are as of 2026-11 and may move; if a label differs, look for the nearest equivalent.
 
-> **Decisions for the owner to confirm** (made while writing these runbooks, not yet confirmed by you):
-> 1. The ruleset bypass list contains the **Repository admin** role, mode **"For pull requests only"**. You can merge your own PRs without a second approver, but nobody can push straight to `main`. The machine user has Write, so it is not a bypass actor and the gate binds it.
-> 2. **CODEOWNERS** (`* @AllenLarocque`) plus "Require review from Code Owners": only your approval counts.
-> 3. The machine-user token has **no** workflow permission by default.
-> 4. **Token type (to be verified by you on first setup):** GitHub fine-grained tokens generally cannot target repos owned by another *personal* account, even for a collaborator. So for personal repos the plan is a **classic PAT** on the machine user. If you find a fine-grained token CAN be created for your personal repos, prefer it. See step 3.
+## The model in brief
 
-**Why this exists.** The agent pushes code and opens pull requests as a separate GitHub account (a "machine user"), not as you.
-A branch ruleset on `main` makes it impossible for that account to merge its own work: only you can approve and merge.
+- The agent pushes code as a separate GitHub account, the **machine user** (`allen-agent`), not as you.
+- That account may write to two kinds of branch only: branches whose name starts with an allowed **prefix** (`fix/`, `feature/` and ten others, listed below), and the working branch `allen-dev`.
+- Only you change anything else: the **default branch** (the branch GitHub shows first, usually `main`), the tags, and every other branch.
+- On a **fork** (your own copy of someone else's repo), the branches that came from the original ("upstream") repo are **mirrors**: copies you keep up to date but never edit. `allen-dev` is your own line on the fork, and it is the branch your projects run.
+- On a repo you own outright, `allen-dev` is where work collects, and you decide when it moves to the default branch.
+- This is done by two **rulesets** (rules that GitHub enforces on branches or tags). Everything else in this runbook sets those rulesets up, checks them, or explains how to work inside them. The daily routine is in [branch-workflow.md](branch-workflow.md).
 
-For repos you admin, `agent-new protect` automates step 2.1 (the collaborator invite and its acceptance) and step 4 (the ruleset), and warns — without fixing — when step 2.2 is not done (CODEOWNERS is missing) or step 2.3 is not done (the Actions approval setting is ON; it must be OFF on every repo); `agent-new verify` automates step 6 (as the machine user, in a throwaway worktree or clone, leaving your checkout alone). Step 1 (the account) and step 3 (minting tokens) stay manual.
+Terms used below:
 
-Step 1 is done once. Steps 2 and 4 are done per repo. Step 3 is done once per project (a token reaches only the repos the machine user is invited to). Step 5 is a note on ordering. Step 6 is done per project after its container is up (see [new-project.md](new-project.md)). Step 7 is done once, for `agent-containers`.
+- **Ruleset:** a named set of rules that GitHub enforces on a repo's branches or tags. Repo → Settings → Rules → Rulesets.
+- **Bypass:** a role that a ruleset does not apply to. Both fence rulesets let the **Repository admin** role through (you are the only admin); the machine user is not an admin, so it is always bound.
+- **Pull request (PR):** a request to merge one branch into another, with a page for review.
+- **Squash:** a way of merging a PR that turns all its commits into one commit on the target branch.
+- **Prefix:** the part of a branch name before the first slash. In `fix/typo`, the prefix is `fix`.
+
+## The two rulesets
+
+`agent-new protect` gives every agent repo the same two rulesets, fork or not.
+
+| Ruleset | Applies to | What it forbids | Bypass |
+|---|---|---|---|
+| `agent-fence` | all branches except the allowed names | creating, updating or deleting a branch; force-pushing | Repository admin, always |
+| `agent-fence-tags` | all tags | creating, updating or deleting a tag | Repository admin, always |
+
+Merging a PR into a branch counts as updating that branch, so the machine user also cannot merge anything into the default branch or any mirror.
+
+**The allowed names** (the branches the fence leaves free): `allen-dev`, and any branch starting with one of these twelve prefixes: `fix`, `feature`, `chore`, `docs`, `test`, `ci`, `refactor`, `perf`, `revert`, `upstream`, `sync`, `experiment`. There is no `feat` (one spelling only) and no `release` (releases are yours). Uses:
+
+| Prefix | For |
+|---|---|
+| `fix/`, `feature/`, `chore/`, `docs/`, `test/`, `ci/`, `refactor/`, `perf/`, `revert/` | ordinary changes, named for their kind |
+| `upstream/` | a branch prepared to go to the original repo of a fork |
+| `sync/` | a merge of a mirror into `allen-dev` |
+| `experiment/` | throwaway work |
+
+The list limits the agent only. You may name your own branches anything.
+
+*Why two rulesets:* GitHub keeps branch rules and tag rules apart.
+*Why the admin bypass is "always":* you are the only admin and must be able to move `allen-dev`, mirrors and tags yourself. The machine user holds Write access, never Admin, so the bypass never reaches it.
+
+## Branch deletion
+
+`agent-new protect` turns on the repo setting **Automatically delete head branches**: when a PR is merged, GitHub deletes its source branch. A branch merged into `allen-dev` therefore disappears at merge time. An `upstream/` branch is kept until the original repo merges or closes the PR made from it. `allen-dev` and the mirrors are never deleted.
+
+## Where the older main gate still applies
+
+Before the fence, each repo had a ruleset `protect-main` on its default branch: one approval from you, a code-owner review, and green checks before anything could merge. The fence replaces it on the science repos.
+
+`agent-containers` keeps it, because a merge to `main` there publishes the images every project runs. Always pass `--main-gate` for that repo, to `protect` and to `verify`, and never run `--migrate` on it without `--main-gate`. The by-hand steps for it are step 4.3 below. (A repo with `--main-gate` also gets the fence; the gate sits on top.)
+
+## Using `agent-new` (the automated route)
+
+Run these on the host as yourself (`gh auth login` as you, not as the machine user).
+
+```bash
+agent-new protect <owner>/<repo> [<owner>/<repo>...] [--vault agent-<project>] [--migrate]
+                 [--main-gate] [--no-working-branch] [--require <check>]
+agent-new verify <project>                       # inside the running container
+agent-new verify <owner>/<repo> --vault agent-<project>   # from a temporary clone
+```
+
+For each repo, `protect` does these in order, and prints `SKIP (done)` for anything that is already right:
+
+1. Invites the machine user as a collaborator, and accepts the invitation for it when you give `--vault` (the project vault that holds its token; one `--vault` serves every repo in the run).
+2. Creates the ruleset `agent-fence`, then `agent-fence-tags`.
+3. Creates the branch `allen-dev` from the head of the default branch, unless it exists. It stops with a message for a repo that has no commits yet. `--no-working-branch` skips this.
+4. Turns on "Automatically delete head branches".
+5. With `--main-gate`: creates `protect-main` and warns if the repo lacks `.github/CODEOWNERS` or a gitleaks workflow, or lets Actions approve PRs.
+
+Rules of the tool:
+
+- **It never changes a ruleset that already exists and differs from its template.** It prints the live and expected settings and stops on that repo. Edit such a ruleset in the GitHub UI if the difference is intended.
+- **Several repos:** repos are done in the order given. A failure on one is reported, the rest continue, and the last lines read `protect: ok <repo>` or `protect: FAILED <repo>`. The exit status is non-zero if any failed. Flags apply to every repo in the run.
+- **`--require <check>`** adds a required check to `protect-main` (`gitleaks` is always required). It matters only with `--main-gate`.
+
+### `--migrate`: moving a repo from the older rulesets
+
+Before this design, some repos had hand-made rulesets `protect-fork` and `protect-fork-tags` (which limit the agent to `fix/` and `feature/` branches) and `protect-main`. Without `--migrate`, `protect` leaves them alone and warns. With `--migrate` it does exactly these things and nothing else:
+
+1. A `protect-fork` in exactly the hand-made shape is renamed `agent-fence` and gets the full list of allowed names.
+2. A `protect-fork-tags` in exactly the hand-made shape is renamed `agent-fence-tags`.
+3. A ruleset named `protect-main` or `main` that applies only to the default branch is deleted, but only after the fence exists on that repo. Deleting it is the one step that removes a protection, so the tool prints the ruleset's settings and asks `delete ruleset '<name>' on <repo>? [y/N]`. Answer `y` to delete. Where there is no terminal to ask, nothing is deleted and the tool says so; run it again at a terminal. A ruleset of either name that targets anything more than the default branch is left alone.
+
+A `protect-fork` that is not exactly the hand-made shape makes `--migrate` stop with a message and no change. If `protect-fork` still sits beside an existing `agent-fence`, it is left, and the tool warns you to remove it by hand because it still limits the agent to `fix/` and `feature/`.
+
+With `--main-gate`, `--migrate` still renames the hand-made fence rulesets but does not offer to delete the main gate.
+
+### `agent-new verify`: proving the fence
+
+Run it after `protect`, as the machine user (it uses that account's token, never yours). With a project name it works in that project's running container, in a temporary git worktree, so your checkout is not touched. With `<owner>/<repo> --vault ...` it works in a temporary clone that it removes afterwards.
+
+It makes one empty commit and then tries, in order:
+
+1. a direct push to the default branch (must be refused);
+2. creating a branch outside the allowed names (must be refused);
+3. creating a tag (must be refused);
+4. a PR from `chore/verify-fence` into the default branch, and merging it (the merge must be refused; the PR is then closed);
+5. if `allen-dev` exists: a PR from `chore/verify-fence-dev` into `allen-dev`, waiting for its checks, then a squash merge (must succeed, and its branch is deleted).
+
+You should see one line `OK (refused as expected): ...` for each refusal, then `OK (merged as expected): ...`, and last `FENCE VERIFIED on <repo>`. The temporary branches and PRs are removed, except that the last check leaves one empty commit on `allen-dev`. If `allen-dev` is missing, check 5 is skipped and the tool says so. If the repo's checks are red on the PR into `allen-dev`, it stops and asks you to fix CI first.
+
+How to read a failure:
+
+- `GATE NOT BINDING: '<check>' SUCCEEDED`: a push or merge that should have been refused went through. Stop. The tool deletes what it created where it can, and prints the command to run if it cannot. Do not use the repo until the rulesets are fixed.
+- `GATE NOT BINDING: '<check>' was refused, but not for the expected reason`: GitHub refused, but its message did not say that a rule did it. The tool prints GitHub's message. Do not work around it; report the text.
+
+With `--main-gate`, `verify` runs the older merge-gate checks instead (step 6.2 below), not the fence checks.
+
+## Rollout order
+
+Do this order the first time, on the repos you already have.
+
+1. **Pick a first repo that has no ruleset on its default branch except the fence**: no `protect-main`, and no ruleset named `main`. Run `agent-new protect <owner>/<repo> --vault agent-<project>`, then `agent-new verify <project>`. *Why: `verify` has to show that the fence alone stops a merge into the default branch. On a repo that still has the older gate, a refusal could come from that gate instead, and the check would prove nothing about the fence.*
+2. **Note GitHub's exact refusal text for each check.** `verify` prints it when a refusal is "not for the expected reason". If `verify` stops with that message, that is a finding to report, not something to work around.
+3. **Only after step 2 is clean:** take the other repos one at a time. For each: `agent-new protect <owner>/<repo> --migrate --vault agent-<project>`, answer the delete question, then `agent-new verify <project>`. Move to the next repo only when `FENCE VERIFIED` has printed.
+4. **`agent-containers` keeps its main gate:** `agent-new protect <owner>/agent-containers --main-gate`, never `--migrate` without `--main-gate`.
+
+The numbered steps that follow are the by-hand procedure. Step 1 is done once, step 3 once per project, steps 2, 4 and 5 per repo (`agent-new protect` does 2.1, 4 and 5), step 6 per project after its container is up, and step 7 once, for `agent-containers`.
 
 ## 1. Create the agent's GitHub account
 
@@ -27,8 +135,10 @@ Step 1 is done once. Steps 2 and 4 are done per repo. Step 3 is done once per pr
 
 ## 2. Repo settings and files (as you, per repo)
 
-1. Repo → Settings → Collaborators → Add people → the machine user. **Repos owned by a personal account have no role picker:** collaborators get one fixed level, equivalent to Write (push branches, open PRs; cannot change settings or rulesets). Organisation repos do have roles: choose **Write** (not Maintain, not Admin). Then sign in as the machine user and **accept the invitation** (`https://github.com/<owner>/<repo>/invitations`). *What stops it merging is the ruleset (step 4), not the role.*
-2. Add `.github/CODEOWNERS` containing exactly one line, via a PR:
+`agent-new protect` does 2.1 for you. 2.2 and 2.3 concern the main gate and the Actions setting.
+
+1. Repo → Settings → Collaborators → Add people → the machine user. **Repos owned by a personal account have no role picker:** collaborators get one fixed level, equivalent to Write (push branches, open PRs; cannot change settings or rulesets). Organisation repos do have roles: choose **Write** (not Maintain, not Admin). Then sign in as the machine user and **accept the invitation** (`https://github.com/<owner>/<repo>/invitations`). *What stops it merging into the default branch is the fence (step 4), not the role.*
+2. **Only for a repo with the main gate:** add `.github/CODEOWNERS` containing exactly one line, via a PR:
 
    ```
    * @AllenLarocque
@@ -36,9 +146,8 @@ Step 1 is done once. Steps 2 and 4 are done per repo. Step 3 is done once per pr
 
    (For a new project repo, `.github/CODEOWNERS` (added to the project by `agent-up init`) ships with an `@OWNER` placeholder: replace it with your username rather than copying this line blindly.)
 
-   *Why: with "Require review from Code Owners" (step 4), only an approval from you counts. Without it, any account that is allowed to approve could satisfy the "1 approval" rule.* (`agent-containers` already has this file.)
-3. Repo → Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve pull requests":
-   - **Leave it OFF on every repo, `agent-containers` included.** If it is on, a workflow can approve a PR. With Code Owners required (step 4) a bot approval cannot satisfy the gate, so this is defence in depth rather than the only barrier, but there is no reason to leave it on. (`publish` no longer opens a pull request, so it does not need it. If you turned it on for `agent-containers` earlier, turn it off.)
+   *Why: with "Require review from Code Owners" (step 4.3), only an approval from you counts.* (`agent-containers` already has this file. Repos without the main gate do not need it; the template still adds it and an existing file does no harm.)
+3. Repo → Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create and approve pull requests": **leave it OFF on every repo, `agent-containers` included.** (`publish` no longer opens a pull request, so it does not need it. If you turned it on for `agent-containers` earlier, turn it off.)
 
 ## 3. Create the machine user's GitHub token
 
@@ -65,35 +174,76 @@ Copy the token once and store it in 1Password: vault `agent-<project>`, item `gi
 
 **Rotation (every 90 days, or on suspected leak):** revoke the old token on GitHub (signed in as `allen-agent`), create a new one, update the vault item, then run `agent-up up <project>`. Short lifetimes matter because the resolved tier-A values (for example `GH_TOKEN`) are visible to anyone on the host who can run `docker inspect` on the container. (The 1Password service-account token is not: it stays on the host.)
 
-## 4. Create the ruleset (as you, per repo)
+## 4. Create the rulesets (as you, per repo)
+
+This is what `agent-new protect` does, for someone doing it by hand. Repo → Settings → Rules → Rulesets → New ruleset.
+
+### 4.1 `agent-fence` (New branch ruleset)
+
+1. Ruleset name: `agent-fence`. Enforcement status: **Active**.
+2. **Bypass list:** Add bypass → **Repository admin** role → bypass mode **Always allow**.
+3. Target branches → Add target → **Include all branches**. Then Add target → **Exclude by pattern**, once for each of these 13 patterns: `allen-dev`, `fix/**`, `feature/**`, `chore/**`, `docs/**`, `test/**`, `ci/**`, `refactor/**`, `perf/**`, `revert/**`, `upstream/**`, `sync/**`, `experiment/**`.
+4. Tick: **Restrict creations**, **Restrict updates**, **Restrict deletions**, **Block force pushes**. Tick nothing else.
+5. Create. You should see the ruleset listed as Active.
+
+### 4.2 `agent-fence-tags` (New tag ruleset)
+
+1. Ruleset name: `agent-fence-tags`. Enforcement status: **Active**.
+2. **Bypass list:** **Repository admin**, **Always allow**.
+3. Target tags → Add target → **Include all tags**. No exclusions.
+4. Tick: **Restrict creations**, **Restrict updates**, **Restrict deletions**.
+5. Create.
+
+### 4.3 `protect-main` (the main gate; `agent-containers` only)
 
 Repo → Settings → Rules → Rulesets → New ruleset → **New branch ruleset**.
 
 1. Ruleset name: `protect-main`. Enforcement status: **Active**.
-2. **Bypass list:** Add bypass → **Repository admin** role → bypass mode **"For pull requests only"**. *Why: you are the repo's only admin, so you can merge your own PRs without needing a second approver (otherwise the 1-approval rule would lock you out), but the "pull requests only" mode means no one, you included, can push directly to `main`. The machine user is Write, not admin, so it is not a bypass actor and every rule binds it.*
+2. **Bypass list:** Add bypass → **Repository admin** role → bypass mode **"For pull requests only"**. *Why: you are the repo's only admin, so you can merge your own PRs without needing a second approver (otherwise the 1-approval rule would lock you out), but "pull requests only" means nobody, you included, can push directly to `main`.*
 3. Target branches → Add target → Include default branch.
 4. Tick:
    - **Restrict deletions**
    - **Block force pushes**
-   - **Require a pull request before merging**, with: Required approvals = **1**; **Dismiss stale pull request approvals when new commits are pushed**; **Require review from Code Owners**. Leave **Require approval of the most recent reviewable push** OFF.
-     *Why off: you are the only code owner and the bot cannot approve, so this rule only blocks you from approving a PR after you pushed to it yourself. "Dismiss stale approvals" plus "Code Owners" already mean your approval must be of the final commit.*
-   - **Require status checks to pass** → Add checks → `build-test` and `gitleaks` (both are jobs in this repo's `ci.yml`; selectable after CI has run once). Project repos get their own `gitleaks` workflow from `agent-up init`.
+   - **Require a pull request before merging**, with: Required approvals = **1**; **Dismiss stale pull request approvals when new commits are pushed**; **Require review from Code Owners**. Leave **Require approval of the most recent reviewable push** OFF. *Why off: you are the only code owner and the machine user cannot approve, so this rule would only block you from approving after you pushed to the PR yourself.*
+   - **Require status checks to pass** → Add checks → `build-test` and `gitleaks` (both are jobs in this repo's `ci.yml`; selectable after CI has run once).
 5. Create.
 
-*Why `build-test` and `gitleaks`:* `build-test` builds the images through the publish script itself (against a local registry, layers cached), smoke-tests them by digest, then runs the firewall, launcher and acceptance tests, so it is the real quality gate and the publish rehearsal in one; `gitleaks` is the full-history secret scan. `lint` (shellcheck, actionlint) is advisory here.
-**The `build-test` check only appears in the picker after CI has run once on the repo.** If it is missing, open any PR first (CI runs), then come back and add it. On non-`agent-containers` repos, require whatever CI job you have, or skip that rule if there is none.
-
-**Note:** your "pull requests only" bypass also skips the required status check, so do not merge a red PR just because you can.
+*Why `build-test` and `gitleaks`:* `build-test` builds the images through the publish script itself, smoke-tests them, then runs the firewall, launcher and acceptance tests, so it is the real quality gate and the publish rehearsal in one; `gitleaks` is the full-history secret scan. `lint` (shellcheck, actionlint) is advisory.
+**The `build-test` check only appears in the picker after CI has run once on the repo.** If it is missing, open any PR first (CI runs), then come back and add it. Merge a PR only when its checks are green.
 
 Editing rulesets needs Admin; the agent (Write) cannot.
 
-## 5. Order of operations for a new project
+## 5. The working branch and automatic deletion (as you, per repo)
 
-Steps 1 to 4 (the "set up" half) happen **before** `agent-up up <project>`. Step 6 (verify the gate) happens **after** `agent-up up <project>`, because it needs the container and the token. See [new-project.md](new-project.md).
+`agent-new protect` does both.
 
-## 6. Verify the gate (required, after `agent-up up <project>`)
+1. Create `allen-dev`: Repo → Code → the branch drop-down → type `allen-dev` → **Create branch: allen-dev from main** (use the default branch's name if it is not `main`). You should see `allen-dev` in the branch list.
+2. Repo → Settings → General → Pull Requests → tick **Automatically delete head branches**.
 
-Run as the machine user **inside the project container** (`agent-up shell <project>`; `GH_TOKEN` is the `allen-agent` token). Use a throwaway branch.
+## 6. Verify (required, after `agent-up up <project>`)
+
+### 6.1 The fence
+
+Use `agent-new verify` (above). By hand, as the machine user inside the project container (`agent-up shell <project>`; `GH_TOKEN` is the `allen-agent` token), with `<default>` the default branch:
+
+```bash
+git switch -c chore/verify-fence <default>
+git commit --allow-empty -m "chore: verify fence"
+git push origin HEAD:<default>                      # 1. expected: REJECTED, message mentions a repository rule
+git push origin HEAD:refs/heads/not-a-free-name     # 2. expected: REJECTED, same kind of message
+git push origin HEAD:refs/tags/verify-tag           # 3. expected: REJECTED, same kind of message
+git push -u origin chore/verify-fence               # 4. expected: succeeds
+gh pr create --base <default> --fill                # 5. expected: succeeds
+gh pr merge --squash                                # 6. expected: REFUSED
+gh pr close chore/verify-fence
+git push origin --delete chore/verify-fence         # clean up
+```
+
+*Why the rejection message matters:* a push rejected as "non-fast-forward" is not the right reason. It means the branch merely diverged, and a rule was not what stopped you. Then repeat items 4 and 5 against `allen-dev` (`--base allen-dev`); there the squash merge must succeed.
+
+### 6.2 The main gate (`agent-containers` only)
+
+`agent-new verify <project> --main-gate`, or by hand with a throwaway branch `verify-ruleset`:
 
 ```bash
 git switch -c verify-ruleset
@@ -102,7 +252,7 @@ git push -u origin verify-ruleset
 gh pr create --fill                 # 1. expected: SUCCEEDS
 ```
 
-Now **wait for `build-test` to go green** on the PR (`gh pr checks --watch`). *If the project repo has no CI check yet, skip this wait and note that the required-check rule is untested; you still verify the approval gate below, but a failure may then be caused by the missing check only, so re-run step 2 once the check exists.* Then:
+Wait for `build-test` to go green (`gh pr checks --watch`). *If the repo has no CI check yet, skip the wait and note that the required-check rule is untested; a failure below may then come from the missing check only, so re-run once the check exists.* Then:
 
 ```bash
 gh pr merge --squash                # 2. expected: FAILS, citing review/approval required
@@ -111,13 +261,10 @@ git push origin HEAD:main           # 4. expected: REJECTED, message mentions pr
 gh pr merge --squash --admin        # 5. expected: FAILS (the machine user is not an admin)
 ```
 
-**Why wait for green first:** `gh pr merge` fails while a check is pending, and that failure alone proves nothing about the approval rule. With checks green, a failure citing the required review is a real test.
-**Item 3** is GitHub behaviour regardless of rulesets (nobody can approve their own PR), so it is a sanity check, not proof of the ruleset.
-**Item 4** must be rejected because of the protected branch or repository rule. A "non-fast-forward" rejection is not the right reason: it means the branch merely diverged, and the rule was not what stopped you.
-
-Pass criteria: 2, 4 and 5 fail as described (and 3 is refused). If any succeeds, stop: the ruleset is not active, the account has too much access, or its bypass is misconfigured. Also confirm that the "Allow GitHub Actions to create and approve pull requests" setting is OFF. With "Require review from Code Owners", a bot approval cannot satisfy the gate anyway, so that setting is defence in depth.
-
-Finally, as **you** in the browser: open the PR, approve it, and merge it (or close it and delete the branch). Only your approval should count.
+**Why wait for green first:** `gh pr merge` fails while a check is pending, and that alone proves nothing about the approval rule.
+**Item 3** is GitHub behaviour regardless of rulesets (nobody can approve their own PR), so it is a sanity check.
+Pass criteria: 2, 4 and 5 fail as described, and 3 is refused. If any succeeds, stop and fix the ruleset before any real work.
+Finally, as **you** in the browser: open the PR, approve it, and merge it (or close it and delete the branch).
 
 ## 7. First publish of `agent-containers` (one-time)
 
@@ -129,3 +276,7 @@ After the first run of the `publish` workflow on `main`:
 **A package added later** (e.g. `spades-research`): do step 1 for it after the first `publish` run that builds it. Until it is public, `agent-up update` cannot read its digest and skips the project.
 
 **The host needs `gh` logged in** (`gh auth login`, any account that can read the public repo), because `agent-up update` and `agent-new` verify the build attestation with it.
+
+## 8. Order of operations for a new project
+
+Steps 1 to 5 (the "set up" half, or `agent-new protect`) happen **before** `agent-up up <project>`. Step 6 (verify) happens **after** it, because it needs the container and the token. See [new-project.md](new-project.md).

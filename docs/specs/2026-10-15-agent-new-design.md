@@ -194,3 +194,10 @@ Wired into `ci.yml` alongside the launcher job.
   `agent-new protect` / `agent-new verify` for repos the owner admins.
 - `project-template/README.md`: mention `agent-new` where the per-project Tailscale step is
   described.
+
+## 10. Amendment (2026-11-23): the fence
+
+`agent-new protect` and `agent-new verify` now set up and prove the two-ruleset fence described in
+`docs/specs/2026-11-21-agent-dev-branch-design.md`. `protect-main` is created only with
+`--main-gate`, `protect` takes several repos and `--migrate` moves older rulesets over. Where this
+document and that one differ about `protect` or `verify`, that one applies.

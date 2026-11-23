@@ -117,11 +117,12 @@ and refuses a repo with no commits. `--no-working-branch` skips it.
 
 - **`protect-main`**: with the fence, it restrains only the owner. It is removed from the science
   repos, where it mostly requires a `gitleaks` check those repos have no workflow for. It **stays
-  on `agent-containers`**, because a merge to `main` there publishes the images every project
+  where `--main-gate` is given** (`agent-containers`: `agent-new protect --main-gate`), because a merge to `main` there publishes the images every project
   runs. Accepted costs elsewhere: the fence is the only barrier, the owner's own stray or forced
   push to a default branch is not caught, and nothing requires green checks before promotion.
-- **`CODEOWNERS`**: it only decides whose approval counts under `protect-main`. It is not added
-  anywhere. Existing files are left in place.
+- **`CODEOWNERS`**: it only decides whose approval counts under `protect-main`. `agent-new` does
+  not add it. The project template (`project-template/repo/.github/CODEOWNERS`) still ships it and
+  `agent-up init` still copies it into a project, and existing files are left in place.
 - **A ruleset on the working branch**: none. That the agent uses small squashed PRs is asked for
   in its instructions, not enforced.
 
@@ -135,7 +136,8 @@ that exists and differs. With `--migrate` it also does exactly these, and nothin
   renamed `agent-fence` and given the free names above;
 - a `protect-fork-tags` in exactly the hand-made shape is renamed `agent-fence-tags`;
 - a ruleset named `protect-main` or `main` on the default branch is deleted, but only after the
-  fence exists on that repo, and never on `agent-containers`.
+  fence exists on that repo, and never together with `--main-gate` (which is how `agent-containers`
+  keeps its gate).
 
 Deleting `protect-main` is the one step here that removes a protection, so `--migrate` prints
 what it will delete and asks for confirmation per repo at a terminal.
