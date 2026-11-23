@@ -334,8 +334,23 @@ check "the container restarts with Docker (after a reboot) unless stopped by han
 check "the container gets a readable hostname (T3's environment name): the project name" \
   bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent:\n    hostname: demo-proj")" ]' _ "$CFG/.generated/hostname.yaml"
 RO="$CFG/.generated/research.yaml"
-check "RESEARCH=0: the research overlay adds nothing" bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent: {}")" ]' _ "$RO"
-check "  ...no profile switch, no instructions file" bash -c '[ ! -e "$1/profile" ] && [ ! -e "$1/agent-instructions.md" ]' _ "$CFG/.generated"
+# a builder is always told the branch workflow: the instructions file and its two read-only mounts, never a research folder
+builder_only_overlay(){ # $1 research.yaml: both instruction mounts read-only, and no /research path
+  local c; c="$(grep -v '^ *#' "$1")"
+  ! grep -q '/research' <<<"$c" || return 1
+  local t; for t in /etc/claude-code/CLAUDE.md /home/agent/.codex/AGENTS.md; do
+    grep -A3 "target: \"$t\"" <<<"$c" | grep -q 'read_only: true' || return 1
+  done
+  [ "$(grep -c 'source: "./.generated/agent-instructions.md"' <<<"$c")" = 2 ]
+}
+export -f builder_only_overlay
+BI="$ROOT/project-template/instructions/builder.md"
+check "RESEARCH=0: the research overlay mounts only the two instruction files, read-only" builder_only_overlay "$RO"
+check "  ...no profile switch" test ! -e "$CFG/.generated/profile"
+check "  ...agent-instructions.md is builder.md, mode 644" \
+  bash -c 'cmp -s "$1/agent-instructions.md" "$2" && [ "$(stat -c %a "$1/agent-instructions.md")" = 644 ]' _ "$CFG/.generated" "$BI"
+check "builder.md names the twelve prefixes, allen-dev, and no feat/ or e-mail address" \
+  bash -c 'f="$1"; for p in fix feature chore docs test ci refactor perf revert upstream sync experiment; do grep -qF "\`$p\`" "$f" || exit 1; done; grep -qF allen-dev "$f" && ! grep -qF "feat/" "$f" && ! grep -qE "[A-Za-z0-9._-]+@[A-Za-z0-9-]+\." "$f"' _ "$BI"
 RSO="$CFG/.generated/rstudio.yaml"
 check "RSTUDIO=0: the RStudio overlay adds nothing" bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent: {}")" ]' _ "$RSO"
 check "  ...no RStudio switch file and no password generated" bash -c '[ ! -e "$1/rstudio" ] && [ ! -e "$1/rstudio-password" ]' _ "$CFG/.generated"
@@ -1016,7 +1031,7 @@ for d in reports downloads; do
     bash -c 'grep -A2 "source: \"$2/$3/$4\"" "$1" | grep -q "target: \"/research/$4\"" && grep -A2 "source: \"$2/$3/$4\"" "$1" | grep -q "read_only: true"' _ "$RO" "$RD" "$NAME" "$d"
 done
 check "  ...builder instructions (untrusted data) at Claude's managed CLAUDE.md, read-only" \
-  bash -c 'cmp -s "$1/agent-instructions.md" "$2" && grep -A1 "target: \"/etc/claude-code/CLAUDE.md\"" "$1/research.yaml" | grep -q "read_only: true"' _ "$CFG/.generated" "$ROOT/project-template/instructions/builder-research.md"
+  bash -c 'cmp -s "$1/agent-instructions.md" <({ cat "$2"; echo; cat "$3"; }) && [ "$(stat -c %a "$1/agent-instructions.md")" = 644 ] && grep -A1 "target: \"/etc/claude-code/CLAUDE.md\"" "$1/research.yaml" | grep -q "read_only: true"' _ "$CFG/.generated" "$ROOT/project-template/instructions/builder.md" "$ROOT/project-template/instructions/builder-research.md"
 check "  ...no profile switch for a builder (its firewall stays the allowlist)" test ! -e "$CFG/.generated/profile"
 check "  ...still uses op run (a builder's secrets are unchanged)" grep -q "^OP: run --env-file $CFG/project.env" "$OPLOG"
 # a second builder opts in but is NOT started: the research container's up creates its folders anyway
@@ -1095,7 +1110,7 @@ for v in 2 yes " 1"; do
   sed -i "s/^RESEARCH=.*/RESEARCH=$v/" "$CFG/project.conf"
   refuses "up refuses RESEARCH='$v'" "RESEARCH='$v'.*must be 0 \(off\) or 1 \(on\)" au up "$NAME"
   check "stop works with RESEARCH='$v'" au stop "$NAME"
-  check "  ...and an invalid value mounts nothing" bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\\n  agent: {}")" ]' _ "$RO"
+  check "  ...and an invalid value mounts no research folder, only the instruction files" builder_only_overlay "$RO"
 done
 sed -i "s/^RESEARCH=.*/RESEARCH=1/" "$CFG/project.conf"
 sed -i "s|^RESEARCH_DIR=.*|RESEARCH_DIR=agent-research|" "$CFG/project.conf"
@@ -1128,7 +1143,8 @@ refuses "builder up refuses a project clone inside the research container's RESE
 cp "$T/pconf-res.bak" "$CFG/project.conf"; rmdir "$RD/clone-inside"
 cp "$T/pconf-res.bak" "$CFG/project.conf"; cp "$T/bio2-res.bak" "$CFGROOT/bio2/project.conf"
 check "builder back to RESEARCH=0: config succeeds" au config "$NAME"
-check "  ...and its overlay, instructions are gone" bash -c '[ "$(grep -v "^#" "$1/research.yaml")" = "$(printf "services:\\n  agent: {}")" ] && [ ! -e "$1/agent-instructions.md" ]' _ "$CFG/.generated"
+check "  ...and its overlay drops the research folders, the instructions are builder.md alone" \
+  bash -c 'builder_only_overlay "$1/research.yaml" && cmp -s "$1/agent-instructions.md" "$2"' _ "$CFG/.generated" "$BI"
 TOK=""
 
 # ---- rendering with the REAL docker compose (CI; skipped where docker is absent)
@@ -1254,7 +1270,11 @@ PYEOF
   check "rendered (RESEARCH=1): no profile switch (the builder firewall is unchanged)" \
     test "$(jq '[.services.agent.volumes[] | select(.target=="/etc/firewall/profile")] | length' <<<"$JR")" = 0
   check "rendered (RESEARCH=1): otherwise identical to RESEARCH=0" \
-    bash -c 'diff <(jq -S ".services.agent.volumes |= map(select((.target|startswith(\"/research/\")|not) and .target != \"/etc/claude-code/CLAUDE.md\" and .target != \"/home/agent/.codex/AGENTS.md\"))" <<<"$1") <(jq -S . <<<"$2")' _ "$JR" "$J"
+    bash -c 'diff <(jq -S ".services.agent.volumes |= map(select(.target|startswith(\"/research/\")|not))" <<<"$1") <(jq -S . <<<"$2")' _ "$JR" "$J"
+  for t in /etc/claude-code/CLAUDE.md /home/agent/.codex/AGENTS.md; do
+    check "rendered (RESEARCH=0): builder instructions read-only at $t, and no /research mount" \
+      bash -c 'test "$(jq -c --arg t "$2" "[.services.agent.volumes[] | select(.target==\$t) | {type, source, ro: (.read_only // false)}]" <<<"$1")" = "[{\"type\":\"bind\",\"source\":\"$3/.generated/agent-instructions.md\",\"ro\":true}]" && [ "$(jq "[.services.agent.volumes[] | select(.target|startswith(\"/research\"))] | length" <<<"$1")" = 0 ]' _ "$J" "$t" "$CFG"
+  done
   # The shared research container.
   JS="$(cd "$T" && aureal config research --format json)"
   RCFGR="$CFGROOT/research"
@@ -1853,6 +1873,8 @@ check "  ...fetcher.conf mode 600, no library prefix, no caps (defaults)" \
   bash -c '[ "$(stat -c %a "$1")" = 600 ] && ! grep -Ev "^(#|$)" "$1"' _ "$FCFG/.generated/fetcher.conf"
 check "  ...lists the papers folders it mounts" grep -qF "papers folders: _general alpha beta gamma" <<<"$fout"
 check "  ...no T3, pairing or Tailscale lines" bash -c '! grep -Eqi "T3 Code|pair|tailscale" <<<"$1"' _ "$fout"
+check "  ...no instruction file and no instruction mount (the builder instructions never reach the fetcher)" \
+  bash -c '[ ! -e "$1/.generated/agent-instructions.md" ] && [ ! -e "$1/.generated/research.yaml" ] && ! grep -Eq "claude-code|AGENTS.md|agent-instructions" "$1/.generated/fetcher.yaml" "$1/compose.yaml"' _ "$FCFG"
 # a new project folder is picked up at the next up
 mkdir -p "$FRD/delta/briefs" "$FRD/delta/reports" "$FRD/delta/downloads"
 fau up fetcher >/dev/null 2>&1 || true
