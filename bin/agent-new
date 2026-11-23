@@ -3,6 +3,7 @@
 # (docs/specs/2026-10-15-agent-new-design.md). Counterpart of bin/agent-up: agent-up runs the
 # sandbox with a project's read-only token; agent-new runs AS THE OWNER (gh repo admin, op
 # session) and automates docs/runbooks/new-project.md + machine-user-and-rulesets.md §2-4, §6.
+case $- in *x*) printf 'agent-new: %s\n' "refusing to run with shell tracing on (it would print secrets)" >&2; exit 1 ;; esac
 set -euo pipefail
 unset OP_SERVICE_ACCOUNT_TOKEN # agent-new acts as the owner; the SA token is only ever set explicitly, per command
 
@@ -47,8 +48,17 @@ ts_port(){ # $1 project.conf -> the Tailscale Serve HTTPS port (override or form
   printf '%s' "$v"
 }
 normalise(){ printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9_-]/-/g; s/^[^a-z0-9]*//'; }
+lc(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }   # GitHub names compare case-insensitively
+REPO_RE='^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+$'
+repo_arg_ok(){ [[ $1 =~ $REPO_RE ]] && [[ ${1#*/} != . && ${1#*/} != .. ]]; }
+gh_read(){ # $1 what is read (for the message), then gh's arguments: prints gh's output; dies with gh's own error
+  local what="$1" out rc=0 errf; shift; errf="$(mktemp)"
+  out="$(gh "$@" 2>"$errf")" || rc=$?
+  if [ "$rc" -ne 0 ]; then out="$(cat "$errf")${out:+ $out}"; rm -f "$errf"; die "could not read $what: $out"; fi
+  rm -f "$errf"; printf '%s' "$out"
+}
 
-MAIN_GATE=0 WORK_BRANCH_ON=1 MIGRATE=0
+MAIN_GATE=0 WORK_BRANCH_ON=1 MIGRATE=0 MU_TOK=""
 MACHINE_USER_FLAG="" VAULT="" IMAGE="" VISIBILITY=private RESEARCH=1 T3MODE=publish TOKEN_FROM=""
 REQUIRE_CHECKS=(gitleaks)
 
@@ -62,8 +72,9 @@ preflight_owner(){ # prints the owner login; dies if gh is absent/anonymous/the 
   local who mu
   who="$(gh api user --jq .login 2>/dev/null)" || die "gh is not logged in as you (gh auth login)"
   [ -n "$who" ] || die "gh is not logged in as you (gh auth login)"
-  mu="$(machine_user)"
-  [ "$who" != "$mu" ] || die "gh is logged in as the machine user ($who): agent-new runs as the OWNER"
+  # this runs inside $(...), where errexit is off: a failed lookup must end the run here, not return an owner
+  mu="$(machine_user)" || exit 1
+  [ "$(lc "$who")" != "$(lc "$mu")" ] || die "gh is logged in as the machine user ($who): agent-new runs as the OWNER"
   printf '%s' "$who"
 }
 
@@ -297,22 +308,33 @@ mu_token(){ # machine-user PAT from the project vault; owner op session; ONE cal
   op read "op://$VAULT/github-agent/token"
 }
 
-protect_collaborator(){ # $1 owner/repo
-  local repo="$1" mu; mu="$(machine_user)"
+mu_token_checked(){ # sets MU_TOK: the machine user's token from the vault, once per run, after checking whose it is
+  local who mu
+  mu="$(machine_user)"
+  MU_TOK="$(mu_token)" || die "could not read op://$VAULT/github-agent/token"
+  [ -n "$MU_TOK" ] || die "op://$VAULT/github-agent/token is empty"
+  who="$(GH_TOKEN="$MU_TOK" gh api user --jq .login)" || die "the token in op://$VAULT/github-agent/token does not work"
+  [ "$(lc "$who")" = "$(lc "$mu")" ] \
+    || die "the token in op://$VAULT/github-agent/token is for '$who', not the machine user '$mu': refusing to accept invitations with it"
+}
+
+protect_collaborator(){ # $1 owner/repo: the last step of protect, so a failure before it leaves no new access
+  local repo="$1" mu perm; mu="$(machine_user)"
   if gh api "repos/$repo/collaborators/$mu" >/dev/null 2>&1; then
-    skip "$mu is a collaborator on $repo"; return
+    perm="$(gh_read "$mu's permission on $repo" api "repos/$repo/collaborators/$mu/permission" --jq .permission)"
+    [ "$perm" = write ] \
+      || die "$mu has '$perm' access to $repo: the account must have Write, not Admin or Maintain (Settings -> Collaborators), then re-run"
+    skip "$mu is a collaborator on $repo (Write)"; return
   fi
   say "inviting $mu to $repo (machine-user-and-rulesets.md step 2.1)"
   gh api -X PUT "repos/$repo/collaborators/$mu" >/dev/null
   if [ -n "$VAULT" ]; then
-    say "accepting the invitation as $mu (token read from op://$VAULT/github-agent/token for this step only)"
-    local tok inv
-    tok="$(mu_token)"
-    inv="$(GH_TOKEN="$tok" gh api /user/repository_invitations \
-           --jq ".[] | select(.repository.full_name==\"$repo\") | .id" | head -n1)"
+    say "accepting the invitation as $mu (its token from op://$VAULT/github-agent/token, for this step only)"
+    local inv lrepo; lrepo="$(lc "$repo")"
+    inv="$(GH_TOKEN="$MU_TOK" gh api /user/repository_invitations \
+           --jq ".[] | select((.repository.full_name | ascii_downcase) == \"$lrepo\") | .id" | head -n1)"
     [ -n "$inv" ] || die "no invitation for $repo visible to $mu (invite pending elsewhere?)"
-    GH_TOKEN="$tok" gh api -X PATCH "/user/repository_invitations/$inv" >/dev/null
-    tok=""
+    GH_TOKEN="$MU_TOK" gh api -X PATCH "/user/repository_invitations/$inv" >/dev/null
   else
     warn "no --vault given: accept the invitation as $mu yourself (https://github.com/$repo/invitations) or re-run with --vault agent-<project>"
   fi
@@ -438,14 +460,15 @@ protect_warnings(){ # $1 owner/repo
   [ "$(gh api "repos/$repo/actions/permissions/workflow" --jq .can_approve_pull_request_reviews 2>/dev/null)" = true ] \
     && warn "$repo lets Actions approve PRs: turn it OFF (Settings -> Actions -> General, runbook step 2.3)" || true
 }
-protect_work_branch(){ # $1 owner/repo: create the working branch from the default branch's head unless it exists
-  local repo="$1" default sha rc=0 errf
-  if gh api "repos/$repo/branches/$WORK_BRANCH" >/dev/null 2>&1; then
+protect_work_branch(){ # $1 owner/repo, $2 its default branch: create the working branch from the default branch's head unless it exists
+  local repo="$1" default="$2" sha rc=0 errf err
+  err="$(gh api "repos/$repo/branches/$WORK_BRANCH" 2>&1 >/dev/null)" || rc=$?
+  if [ "$rc" -eq 0 ]; then
     skip "branch $WORK_BRANCH exists on $repo"
     return
   fi
-  default="$(gh api "repos/$repo" --jq .default_branch)"
-  errf="$(mktemp)"
+  grep -q 'HTTP 404' <<<"$err" || die "could not tell whether $WORK_BRANCH exists on $repo: $err"
+  rc=0; errf="$(mktemp)"
   sha="$(gh api "repos/$repo/git/ref/heads/$default" --jq .object.sha 2>"$errf")" || rc=$?
   if [ "$rc" -ne 0 ] || [ -z "$sha" ]; then
     # an empty repository answers 409 "Git Repository is empty"; anything else is gh's own error
@@ -459,13 +482,14 @@ protect_work_branch(){ # $1 owner/repo: create the working branch from the defau
   gh api -X POST "repos/$repo/git/refs" -f ref="refs/heads/$WORK_BRANCH" -f sha="$sha" >/dev/null
 }
 protect_autodelete(){ # $1 owner/repo: merged PR branches delete themselves
-  local repo="$1"
-  if [ "$(gh api "repos/$repo" --jq .delete_branch_on_merge)" = true ]; then
-    skip "$repo already deletes merged branches"
-  else
-    say "turning on delete_branch_on_merge for $repo"
-    gh api -X PATCH "repos/$repo" -F delete_branch_on_merge=true >/dev/null
-  fi
+  local repo="$1" v
+  v="$(gh_read "the settings of $repo" api "repos/$repo" --jq .delete_branch_on_merge)"
+  case "$v" in
+    true)  skip "$repo already deletes merged branches" ;;
+    false) say "turning on delete_branch_on_merge for $repo"
+           gh api -X PATCH "repos/$repo" -F delete_branch_on_merge=true >/dev/null ;;
+    *)     die "could not read delete_branch_on_merge of $repo (got: '$v')" ;;
+  esac
 }
 confirm(){ # $1 question: 0 for yes, 1 for no, 2 when there is nobody to ask (AGENT_NEW_CONFIRM=y|n is the test seam)
   local ans=""
@@ -528,12 +552,13 @@ migrate_main_gate(){ # $1 owner/repo: with --migrate and no --main-gate, offer t
   done
 }
 cmd_protect(){ # one repo, signed in to 1Password first when --vault asks for it
-  [ -z "$VAULT" ] || op_ready   # only --vault reads 1Password (the machine user's token)
+  if [ -n "$VAULT" ]; then op_ready; mu_token_checked; fi   # only --vault reads 1Password (the machine user's token)
   protect_repo "$1"
+  MU_TOK=""
 }
 cmd_protect_many(){ # $@ owner/repo...: each repo in its own subshell, so a die ends only that repo
   local r rc ok=() bad=()
-  [ -z "$VAULT" ] || op_ready
+  if [ -n "$VAULT" ]; then op_ready; mu_token_checked; fi   # one read of the token serves every repo
   for r in "$@"; do
     # errexit is switched off around the subshell and on again inside it: a subshell run under || or if
     # would otherwise ignore errexit; stdin stays the terminal for confirm
@@ -542,22 +567,69 @@ cmd_protect_many(){ # $@ owner/repo...: each repo in its own subshell, so a die 
   done
   for r in "${ok[@]:-}"; do [ -z "$r" ] || say "protect: ok $r"; done
   for r in "${bad[@]:-}"; do [ -z "$r" ] || say "protect: FAILED $r"; done
+  MU_TOK=""
   [ "${#bad[@]}" -eq 0 ]
 }
-protect_repo(){
-  protect_collaborator "$1"
-  migrate_fence "$1"
-  ensure_ruleset "$1" agent-fence
-  ensure_ruleset "$1" agent-fence-tags
-  [ "$WORK_BRANCH_ON" -eq 0 ] || protect_work_branch "$1"
-  protect_autodelete "$1"
-  if [ "$MAIN_GATE" -eq 1 ]; then
-    ensure_ruleset "$1" protect-main
-    protect_warnings "$1"
-  elif [ "$MIGRATE" -eq 1 ]; then
-    migrate_main_gate "$1"   # both fence rulesets were ensured above, in this run
+REPO_INFO_JQ='[.full_name, (.permissions.admin | tostring), .owner.login, (.fork | tostring), (.parent.full_name // ""), .default_branch] | join("\n")'
+read_repo_info(){ # $1 owner/repo, as the owner: sets RI_NAME (GitHub's spelling), RI_ADMIN, RI_OWNER, RI_FORK, RI_PARENT, RI_DEFAULT
+  local out f=()
+  out="$(gh_read "$1 on GitHub as you" api "repos/$1" --jq "$REPO_INFO_JQ")"
+  mapfile -t f <<<"$out"
+  RI_NAME="${f[0]:-}" RI_ADMIN="${f[1]:-}" RI_OWNER="${f[2]:-}" RI_FORK="${f[3]:-}" RI_PARENT="${f[4]:-}" RI_DEFAULT="${f[5]:-}"
+  repo_arg_ok "$RI_NAME" || die "GitHub's answer for $1 names no repository (got: '$RI_NAME')"
+  [[ $RI_DEFAULT =~ ^[A-Za-z0-9._/-]+$ ]] || die "could not read the default branch of $1 (got: '$RI_DEFAULT')"
+}
+protect_preflight(){ # $1 owner/repo as typed: the owner's own repo, with its default branch inside the fence; sets P_REPO, P_DEFAULT
+  local p
+  read_repo_info "$1"
+  if [ "$RI_ADMIN" != true ] || [ "$(lc "$RI_OWNER")" != "$(lc "$OWNER")" ]; then
+    die "agent-new protect only sets up repositories you own: $RI_NAME is owned by $RI_OWNER (signed in: $OWNER, admin: ${RI_ADMIN:-?})"
   fi
-  say "protect: done ($1)"
+  P_REPO="$RI_NAME" P_DEFAULT="$RI_DEFAULT"
+  [ "$P_DEFAULT" != "$WORK_BRANCH" ] \
+    || die "the default branch $P_DEFAULT of $P_REPO would be outside the fence (the agent may write to it): make another branch the default first"
+  for p in "${FREE_PREFIXES[@]}"; do
+    case "$P_DEFAULT" in "$p"/*)
+      die "the default branch $P_DEFAULT of $P_REPO would be outside the fence ($p/ is a name the agent may write to): make another branch the default first" ;;
+    esac
+  done
+}
+protect_notices(){ # warnings only, before the fence goes on (uses read_repo_info's RI_* values)
+  local repo="$P_REPO" mine theirs shared re
+  if gh api "repos/$repo/branches/gh-pages" >/dev/null 2>&1; then
+    warn "$repo has a gh-pages branch: once the fence is on, pushes by GitHub Actions or Dependabot to branches outside the free names are refused"
+  fi
+  if gh api "repos/$repo/contents/.github/dependabot.yml" >/dev/null 2>&1; then
+    warn "$repo has .github/dependabot.yml: once the fence is on, pushes by GitHub Actions or Dependabot to branches outside the free names are refused"
+  fi
+  [ "$RI_FORK" = true ] && [ -n "$RI_PARENT" ] || return 0
+  if ! mine="$(gh api --paginate "repos/$repo/branches?per_page=100" --jq '.[].name' 2>/dev/null)" \
+     || ! theirs="$(gh api --paginate "repos/$RI_PARENT/branches?per_page=100" --jq '.[].name' 2>/dev/null)"; then
+    warn "could not list the branches of $repo and $RI_PARENT: not checked for upstream branches under the free names"
+    return 0
+  fi
+  re="^($(IFS='|'; printf '%s' "${FREE_PREFIXES[*]}"))/"
+  shared="$(LC_ALL=C comm -12 <(LC_ALL=C sort -u <<<"$mine") <(LC_ALL=C sort -u <<<"$theirs") | grep -E "$re" | paste -sd' ' -)" || true
+  [ -z "$shared" ] \
+    || warn "$repo is a fork of $RI_PARENT, and these branches from upstream have free names, so the agent can write to them: $shared"
+}
+protect_repo(){ # $1 owner/repo, in this order: the fence and the branch settings first, the machine user's access last
+  local repo
+  protect_preflight "$1"; repo="$P_REPO"
+  protect_notices
+  migrate_fence "$repo"
+  ensure_ruleset "$repo" agent-fence
+  ensure_ruleset "$repo" agent-fence-tags
+  if [ "$WORK_BRANCH_ON" -eq 1 ]; then protect_work_branch "$repo" "$P_DEFAULT"; fi
+  protect_autodelete "$repo"
+  if [ "$MAIN_GATE" -eq 1 ]; then
+    ensure_ruleset "$repo" protect-main
+    protect_warnings "$repo"
+  elif [ "$MIGRATE" -eq 1 ]; then
+    migrate_main_gate "$repo"   # both fence rulesets were ensured above, in this run
+  fi
+  protect_collaborator "$repo"
+  say "protect: done ($repo)"
 }
 
 expect_refusal(){ # $1 label, $2 reason ERE, $3 command string (runs via RUN_IN), $4 optional: the command that undoes $3
@@ -692,7 +764,6 @@ verify_main_gate(){ # $1 the default branch: the review gate on it binds the mac
   say "GATE VERIFIED on $VTARGET. Approve-and-merge or close the verification PR in the browser (only your approval counts)."
 }
 
-REPO_RE='^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$'
 github_repo(){ # $1 a GitHub remote URL (https, ssh or scp form) -> prints owner/repo; fails on anything else
   local r
   case "$1" in
@@ -702,7 +773,7 @@ github_repo(){ # $1 a GitHub remote URL (https, ssh or scp form) -> prints owner
     *) return 1 ;;
   esac
   r="${r%/}"; r="${r%.git}"
-  [[ $r =~ $REPO_RE ]] && [[ ${r#*/} != . && ${r#*/} != .. ]] || return 1
+  repo_arg_ok "$r" || return 1
   printf '%s' "$r"
 }
 read_origin_repo(){ # sets VREPO: the owner/repo origin points at; every gh call names it, so a fork's parent is never used
@@ -809,8 +880,8 @@ set -- "${args[@]:-}"
 case "$sub" in
   project) [ $# -eq 1 ] && [ -n "$1" ] || usage; cmd_project "$1" ;;
   protect) [ $# -ge 1 ] || usage
-           for r in "$@"; do [[ "$r" == */* ]] || die "protect wants <owner>/<repo> (got: $r)"; done
-           preflight_owner >/dev/null; cmd_protect_many "$@" ;;
+           for r in "$@"; do repo_arg_ok "$r" || die "protect wants <owner>/<repo> (got: $r)"; done
+           OWNER="$(preflight_owner)"; cmd_protect_many "$@" ;;
   verify)  [ $# -eq 1 ] || usage; cmd_verify "$1" ;;
   *) usage ;;
 esac

@@ -14,6 +14,9 @@ refuses(){ local d="$1" re="$2" rc=0 msg; shift 2
   if [ "$rc" -ne 0 ] && grep -Eq -- "$re" <<<"$msg"; then echo "OK:   $d"
   else echo "FAIL: $d (rc=$rc, want non-zero and /$re/)"; printf '%s\n' "$msg" | sed 's/^/        /'; annotate "$d"; fail=1; fi; }
 annotate(){ [ -z "${GITHUB_ACTIONS:-}" ] || echo "::error title=agent-new test::FAIL: $1"; }
+lacks(){ # $1 a log file, $2 an ERE it must not contain; a missing or unreadable log fails too
+  [ -r "$1" ] || { echo "no readable log: $1"; return 1; }
+  ! grep -Eq -- "$2" "$1"; }
 
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 H="$T/home"; CFGROOT="$H/.config/agent-containers"; STATE="$T/state"
@@ -23,13 +26,18 @@ export STATE GHLOG OPLOG GITLOG DLOG AULOG TSLOG
 newstate(){ rm -rf "$STATE"; mkdir -p "$STATE"; : > "$GHLOG"; : > "$OPLOG"; : > "$GITLOG"; : > "$DLOG"; : > "$AULOG"; : > "$TSLOG"
   echo allen > "$STATE/login"; }
 
-# ---- stub gh: logs every call; behavior driven by $STATE files (grown in later tasks)
+# ---- stub gh: logs every call; behavior driven by $STATE files. Writes (rulesets, refs, settings, invitations) change the
+# live state, so a second run sees what the first one made. GH: is the owner (no GH_TOKEN), GH(mu): the machine user.
 cat > "$T/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 echo "GH${GH_TOKEN:+(mu)}: $*" >> "$GHLOG"
 echo "${GH_TOKEN:-}" >> "$STATE/gh-tokens"
+last="${@: -1}"
+rsfind(){ # $1 a ruleset id -> the ruleset-id-<name> file holding it (seeded by a test, or live/<repo>/ after a POST)
+  local f; for f in "$STATE"/ruleset-id-* "$STATE"/live/*/ruleset-id-*; do
+    [ -f "$f" ] && [ "$(cat "$f")" = "$1" ] && { printf '%s' "$f"; return 0; }; done; return 1; }
 case "$*" in
-  "pr create"*) "$REALGIT" log -1 --format='AUTHOR: %an <%ae> COMMITTER: %cn <%ce>' >> "$STATE/gh-author"
+  "pr create"*) "$REALGIT" log -1 --format='AUTHOR: %an <%ae> COMMITTER: %cn <%ce>' >> "$STATE/gh-author" 2>/dev/null
     a="$*"; r="${a#*-R }"; echo "https://github.com/${r%% *}/pull/7" ;;
   "api -X PUT repos/"*"/pulls/"*"/merge -f merge_method=squash") [ -f "$STATE/fence" ] && { echo "gh: Repository rule violations found for refs/heads/main. (HTTP 405)" >&2; exit 1; }; : ;;
   "pr merge verify-ruleset -R "*" --squash --admin") [ -f "$STATE/gate" ] && { echo "GraphQL: Repository rule violations found" >&2; exit 1; }; : ;;
@@ -37,39 +45,65 @@ case "$*" in
   "pr review verify-ruleset -R "*" --approve") [ -f "$STATE/gate" ] && { echo "Review Can not approve your own pull request" >&2; exit 1; }; : ;;
   "api user --jq .login") if [ -n "${GH_TOKEN:-}" ]; then cat "$STATE/mu-login" 2>/dev/null || echo agent-allen
                           else [ -s "$STATE/login" ] || exit 1; cat "$STATE/login"; fi ;;
+  # the repository as GitHub describes it to the owner: name, admin?, owner, fork?, parent, default branch (one per line)
+  "api repos/"*" --jq [.full_name"*) [ -f "$STATE/info-fail" ] && { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+    r="${2#repos/}"
+    cat "$STATE/full-name" 2>/dev/null || echo "$r"
+    if [ -f "$STATE/not-admin" ]; then echo false; else echo true; fi
+    cat "$STATE/repo-owner" 2>/dev/null || echo "${r%%/*}"
+    if [ -f "$STATE/parent" ]; then echo true; cat "$STATE/parent"; else echo false; echo; fi
+    cat "$STATE/default-branch" 2>/dev/null || echo main ;;
+  "api repos/"*"/collaborators/"*"/permission --jq .permission") cat "$STATE/collab-permission" 2>/dev/null || echo write ;;
   api\ repos/*/collaborators/*) [ -f "$STATE/collab" ] ;;
-  api\ -X\ PUT\ repos/*/collaborators/*) touch "$STATE/invited" ;;
-  "api /user/repository_invitations --jq"*) [ -n "${GH_TOKEN:-}" ] || exit 1; [ -f "$STATE/invited" ] && echo 42 ;;
+  api\ -X\ PUT\ repos/*/collaborators/*) r="${4#repos/}"; r="${r%/collaborators/*}"
+    if [ -f "$STATE/invited-as" ]; then cp "$STATE/invited-as" "$STATE/invited"; else echo "$r" > "$STATE/invited"; fi ;;
+  "api /user/repository_invitations --jq"*) [ -n "${GH_TOKEN:-}" ] || exit 1
+    if [ -f "$STATE/invited" ]; then printf '[{"id": 42, "repository": {"full_name": "%s"}}]' "$(cat "$STATE/invited")"; else echo '[]'; fi | jq -r "$last" ;;
   "api -X PATCH /user/repository_invitations/42") [ -n "${GH_TOKEN:-}" ] || exit 1; touch "$STATE/collab" ;;
   "api repos/"*"/rulesets --jq"*) [ -f "$STATE/fail-repo" ] && [ "$2" = "repos/$(cat "$STATE/fail-repo")/rulesets" ] && { echo "HTTP 403: no admin on this repo" >&2; exit 1; }
     [ -f "$STATE/rulesets-list-fail" ] && { echo "HTTP 403: upgrade to Pro" >&2; exit 1; }; [ -f "$STATE/rulesets-stderr" ] && echo "warning: stray stderr line" >&2
-    # answers per ruleset name: the name is the first .name=="..." in the --jq argument
-    # (a template name may be followed by `or .name=="main"`: answer for every name in the selector, first hit wins)
+    # answers per ruleset name: every .name=="..." in the --jq selector, first hit wins; this repo's live rulesets first
+    live="$STATE/live/$(r="${2#repos/}"; echo "${r%/rulesets}" | tr / _)"
     for rn in $(grep -o '\.name==\"[^\"]*\"' <<<"$*" | sed 's/^[^"]*"//; s/"$//'); do
+      [ -s "$live/ruleset-id-$rn" ] && { cat "$live/ruleset-id-$rn"; break; }
       [ -s "$STATE/ruleset-id-$rn" ] && { cat "$STATE/ruleset-id-$rn"; break; }
     done; : ;;
   "api -X POST repos/"*"/rulesets --input -") body="$(cat)"; rn="$(sed -n 's/.*"name": *"\([^"]*\)".*/\1/p' <<<"$body" | head -n1)"
-    printf '%s\n' "$body" > "$STATE/ruleset-posted-$rn" ;;
-  "api -X PUT repos/"*"/rulesets/"[45]" --input -") body="$(cat)"; id="${4##*/}"; rn="$(sed -n 's/.*"name": *"\([^"]*\)".*/\1/p' <<<"$body" | head -n1)"
+    printf '%s\n' "$body" > "$STATE/ruleset-posted-$rn"
+    live="$STATE/live/$(r="${4#repos/}"; echo "${r%/rulesets}" | tr / _)"; mkdir -p "$live"
+    n=$(( $(cat "$STATE/next-ruleset-id" 2>/dev/null || echo 20) + 1 )); echo "$n" > "$STATE/next-ruleset-id"
+    echo "$n" > "$live/ruleset-id-$rn"; printf '%s\n' "$body" > "$live/ruleset-json-$rn" ;;
+  "api -X PUT repos/"*"/rulesets/"*" --input -") body="$(cat)"; id="${4##*/}"; rn="$(sed -n 's/.*"name": *"\([^"]*\)".*/\1/p' <<<"$body" | head -n1)"
     printf '%s\n' "$body" > "$STATE/ruleset-put-$id"
-    case "$id" in 4) old=protect-fork ;; *) old=protect-fork-tags ;; esac
-    # the rename takes effect: the live ruleset is now the template (FENCE_NORM / TAGS_NORM come from the test)
-    rm -f "$STATE/ruleset-id-$old"; echo "$id" > "$STATE/ruleset-id-$rn"
-    case "$rn" in agent-fence) echo "$FENCE_NORM" ;; *) echo "$TAGS_NORM" ;; esac > "$STATE/ruleset-norm-$old" ;;
-  "api -X DELETE repos/"*"/rulesets/"*) echo "${4##*/}" >> "$STATE/ruleset-deleted" ;;
-  "api repos/"*"/rulesets/"[456789]" --jq"*) case "$2" in */4) rn=protect-fork ;; */5) rn=protect-fork-tags ;; */7) rn=protect-main ;; */8) rn=agent-fence ;; *) rn=agent-fence-tags ;; esac
-    cat "$STATE/ruleset-norm-$rn" ;;
+    # the rename takes effect: the live ruleset is now the template, under its new name
+    f="$(rsfind "$id")" && { d="${f%/*}"; old="${f##*/ruleset-id-}"; rm -f "$f" "$d/ruleset-norm-$old" "$d/ruleset-json-$old"
+      echo "$id" > "$d/ruleset-id-$rn"; printf '%s\n' "$body" > "$d/ruleset-json-$rn"; } ;;
+  "api -X DELETE repos/"*"/rulesets/"*) echo "${4##*/}" >> "$STATE/ruleset-deleted"; f="$(rsfind "${4##*/}")" && rm -f "$f" ;;
+  "api repos/"*"/rulesets/"[0-9]*" --jq"*) f="$(rsfind "${2##*/}")" || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+    rn="${f##*/ruleset-id-}"; d="${f%/*}"
+    if [ -s "$d/ruleset-json-$rn" ]; then jq -r "$last" "$d/ruleset-json-$rn"
+    elif [ "$last" = "$NORM_JQ_SRC" ]; then cat "$d/ruleset-norm-$rn"
+    elif [ "$last" = .name ]; then echo "$rn"
+    else echo "stub: ruleset $rn has no JSON to answer --jq $last" >&2; exit 1; fi ;;
   "api repos/"*"/contents/.github/CODEOWNERS") [ -f "$STATE/has-codeowners" ] ;;
   "api repos/"*"/contents/.github/workflows/gitleaks.yml") [ -f "$STATE/has-gitleaks" ] ;;
+  "api repos/"*"/contents/.github/dependabot.yml") [ -f "$STATE/has-dependabot" ] ;;
   "api repos/"*"/actions/permissions/workflow --jq .can_approve_pull_request_reviews") cat "$STATE/actions-approve" 2>/dev/null || echo false ;;
-  "api repos/"*"/branches/allen-dev") [ -f "$STATE/has-allen-dev" ] ;;
+  "api --paginate repos/"*"/branches?per_page=100 --jq .[].name") r="${3#repos/}"; r="${r%/branches*}"
+    [ -f "$STATE/branches-fail" ] && { echo "HTTP 500: branches exploded" >&2; exit 1; }
+    cat "$STATE/branches-$(tr / _ <<<"$r")" 2>/dev/null || echo main ;;
+  "api repos/"*"/branches/"*) b="${2#*/branches/}"
+    [ -f "$STATE/branch-probe-fail" ] && { echo "gh: Server Error (HTTP 500)" >&2; exit 1; }
+    case "$b" in allen-dev) [ -f "$STATE/has-allen-dev" ] ;; gh-pages) [ -f "$STATE/has-gh-pages" ] ;; *) false ;; esac \
+      || { echo "gh: Branch not found (HTTP 404)" >&2; exit 1; } ;;
   "api repos/"*"/git/ref/heads/"*" --jq .object.sha") [ -f "$STATE/ref-fail" ] && { echo "HTTP 500: ref lookup exploded" >&2; exit 1; }
     [ -f "$STATE/no-commits" ] && { echo "HTTP 409: Git Repository is empty." >&2; exit 1; }
     echo "sha-of-${2##*/heads/}" ;;
-  "api -X POST repos/"*"/git/refs -f ref="*) echo "$*" > "$STATE/ref-posted" ;;
-  "api -X PATCH repos/"*" -F delete_branch_on_merge=true") touch "$STATE/autodelete-patched" ;;
-  "api repos/"*" --jq .default_branch") cat "$STATE/default-branch" 2>/dev/null || echo main ;;
-  "api repos/"*" --jq .delete_branch_on_merge") cat "$STATE/autodelete" 2>/dev/null || echo false ;;
+  "api -X POST repos/"*"/git/refs -f ref="*) echo "$*" >> "$STATE/ref-posted"
+    case "$*" in *" ref=refs/heads/allen-dev "*) touch "$STATE/has-allen-dev" ;; esac ;;
+  "api -X PATCH repos/"*" -F delete_branch_on_merge=true") touch "$STATE/autodelete-patched"; echo true > "$STATE/autodelete" ;;
+  "api repos/"*" --jq .delete_branch_on_merge") [ -f "$STATE/autodelete-get-fail" ] && { echo "gh: Bad Gateway (HTTP 502)" >&2; exit 1; }
+    cat "$STATE/autodelete" 2>/dev/null || echo false ;;
   "repo view "*" --json defaultBranchRef --jq .defaultBranchRef.name") cat "$STATE/default-branch" 2>/dev/null || echo main ;;
   "repo view "*) [ -f "$STATE/repo-exists" ] ;;
   "repo create "*)
@@ -163,6 +197,9 @@ mkdir -p "$NW/images/base" "$ABIN"; cp -r "$ROOT/bin" "$ROOT/scripts" "$ROOT/pro
 "$REALGIT" -C "$NW" add -A; "$REALGIT" -C "$NW" commit -q -m fixture; "$REALGIT" -C "$NW" remote add origin "$NO"; "$REALGIT" -C "$NW" push -q origin main
 NSHA="$("$REALGIT" -C "$NW" rev-parse HEAD)"; "$REALGIT" clone -q "$NO" "$NC" 2>/dev/null
 AN="$NC/bin/agent-new"   # agent-new resolves its clone from its own location: run the throwaway clone's copy
+# the normalisation agent-new asks gh to apply to a ruleset: the gh stub answers it from the ruleset's JSON (or a seeded string)
+NORM_JQ_SRC="$(sed -n "/^NORM_JQ='/,/^\] | join/p" "$AN" | sed "1s/^NORM_JQ='//; \$s/'\$//")"; export NORM_JQ_SRC
+[ -n "$NORM_JQ_SRC" ] || { echo "FAIL: could not read NORM_JQ from $AN"; exit 1; }
 cp "$ROOT/tests/launcher/stubs/gh" "$ROOT/tests/launcher/stubs/curl" "$ABIN/"
 printf '#!/bin/sh\nexec "$REALGIT" "$@"\n' > "$ABIN/git"; printf '#!/bin/sh\nexit 1\n' > "$ABIN/docker"; chmod +x "$ABIN"/*
 GISD=$(printf 'c%.0s' $(seq 64)); BIOD=$(printf 'd%.0s' $(seq 64))
@@ -206,6 +243,10 @@ refuses "no args -> usage" 'usage' run
 refuses "unknown subcommand -> usage" 'usage' run frobnicate
 refuses "protect without owner/repo" 'protect wants <owner>/<repo>' run protect lonely
 refuses "no MACHINE_USER anywhere" 'MACHINE_USER' run protect o/r
+newstate
+refuses "project, no MACHINE_USER anywhere: dies" 'no machine user known' run project NoMu < /dev/null
+check "  ...before any repo is looked up or created" lacks "$GHLOG" 'repo (view|create|clone)'
+check "  ...and nothing after the owner check ran" lacks "$AULOG" '.'
 OUT=$(run protect o/r 2>&1) && { echo "FAIL: no-machine-user run should exit non-zero"; fail=1; } || true
 check "  dies at the guard (nothing after runs)" bash -c "! grep -q 'not implemented' <<<\"\$0\"" "$OUT"
 printf 'MACHINE_USER=agent-allen\n' > "$CFGROOT/agent-up.conf"
@@ -295,7 +336,6 @@ check "  tags ruleset has empty exclude"      grep -q '"exclude": *\[\]' "$STATE
 check "  tags ruleset bypass is always"       grep -q '"bypass_mode": *"always"' "$STATE/ruleset-posted-agent-fence-tags"
 
 # the expected strings agent-new builds in bash must equal what its own NORM_JQ makes of each posted template
-NORM_JQ_SRC="$(sed -n "/^NORM_JQ='/,/^\] | join/p" "$AN" | sed "1s/^NORM_JQ='//; \$s/'\$//")"
 for n in agent-fence agent-fence-tags protect-main; do
   case "$n" in agent-fence) want="$FENCE_NORM" ;; agent-fence-tags) want="$TAGS_NORM" ;; *) want="$EXPECT_NORM" ;; esac
   check "template $n: posted JSON projects to the expected string" test "$(jq -r "$NORM_JQ_SRC" "$STATE/ruleset-posted-$n")" = "$want"
@@ -318,7 +358,7 @@ check "  nothing POSTed for the tag mix-up"   test ! -f "$STATE/ruleset-posted-a
 
 check "  the cut removed exactly the one entry" test "$(( ${#FENCE_NORM} - $(wc -c < <(printf '%s' "${FENCE_NORM/'refs/heads/sync/**,'/}")) ))" -eq "$(printf '%s' 'refs/heads/sync/**,' | wc -c)"
 newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
-echo 7 > "$STATE/ruleset-id-main"; echo "$EXPECT_NORM" > "$STATE/ruleset-norm-protect-main"
+echo 7 > "$STATE/ruleset-id-main"; echo "$EXPECT_NORM" > "$STATE/ruleset-norm-main"
 OUT=$(run protect allen/repo1 --vault agent-p1 --main-gate 2>&1)
 check "live ruleset named main counts as protect-main: SKIP" grep -q 'SKIP.*ruleset protect-main' <<<"$OUT"
 check "  protect-main not POSTed"             test ! -f "$STATE/ruleset-posted-protect-main"
@@ -363,7 +403,6 @@ OUT=$(run protect allen/repo1 --vault agent-p1 2>&1) || true
 check "  and it is not blamed on an empty repo"           bash -c '! grep -q "has no commits" <<<"$1"' _ "$OUT"
 
 echo "== fence: migrate =="
-export FENCE_NORM TAGS_NORM
 OLD_FORK='branch|active|RepositoryRole:5:always|creation,deletion,non_fast_forward,update|pr:-||refs:~ALL/refs/heads/feature/**,refs/heads/fix/**|strict:-|'
 OLD_FORK_TAGS='tag|active|RepositoryRole:5:always|creation,deletion,update|pr:-||refs:~ALL/|strict:-|'
 runc(){ AGENT_NEW_CONFIRM="$1" run "${@:2}"; }   # run with the confirm seam answered y or n
@@ -420,7 +459,7 @@ check "  warns NOT deleted"                               grep -q 'WARNING.*NOT 
 migstate; fencepair; echo 7 > "$STATE/ruleset-id-protect-main"; echo "$EXPECT_NORM" > "$STATE/ruleset-norm-protect-main"
 check "--migrate --main-gate: succeeds"                   runc y protect allen/repo1 --vault agent-p1 --migrate --main-gate
 check "  no DELETE"                                       test ! -f "$STATE/ruleset-deleted"
-migstate; fencepair; echo 7 > "$STATE/ruleset-id-main"; echo "$EXPECT_NORM" > "$STATE/ruleset-norm-protect-main"
+migstate; fencepair; echo 7 > "$STATE/ruleset-id-main"; echo "$EXPECT_NORM" > "$STATE/ruleset-norm-main"
 OUT=$(AGENT_NEW_CONFIRM=y run protect allen/repo1 --vault agent-p1 --migrate 2>&1); rc=$?
 check "  exits 0"                                          test "$rc" -eq 0
 check "ruleset named main: treated as protect-main"       test "$(cat "$STATE/ruleset-deleted")" = 7
@@ -444,32 +483,111 @@ refuses "--migrate, fence differs from template: refused" 'refusing to modify' r
 check "  no DELETE"                                       test ! -f "$STATE/ruleset-deleted"
 
 echo "== fence: several repos =="
-newstate; touch "$STATE/collab" "$STATE/has-allen-dev"; echo a/two > "$STATE/fail-repo"
-OUT=$(run protect a/one a/two a/three --vault agent-p1 2>&1); rc=$?
+newstate; touch "$STATE/collab" "$STATE/has-allen-dev"; echo allen/two > "$STATE/fail-repo"
+OUT=$(run protect allen/one allen/two allen/three --vault agent-p1 2>&1); rc=$?
 check "three repos, the second failing: exit non-zero"     test "$rc" -ne 0
-check "  first repo's fence POSTed"                         grep -q 'POST repos/a/one/rulesets' "$GHLOG"
-check "  third repo's fence POSTed"                         grep -q 'POST repos/a/three/rulesets' "$GHLOG"
-check "  second repo got no POST"                           bash -c '! grep -q "POST repos/a/two/" "$1"' _ "$GHLOG"
-check "  protect: ok a/one"                                 grep -q '^agent-new: protect: ok a/one$' <<<"$OUT"
-check "  protect: ok a/three"                               grep -q '^agent-new: protect: ok a/three$' <<<"$OUT"
-check "  protect: FAILED a/two"                             grep -q '^agent-new: protect: FAILED a/two$' <<<"$OUT"
+check "  first repo's fence POSTed"                         grep -q 'POST repos/allen/one/rulesets' "$GHLOG"
+check "  third repo's fence POSTed"                         grep -q 'POST repos/allen/three/rulesets' "$GHLOG"
+check "  second repo got no POST"                           bash -c '! grep -q "POST repos/allen/two/" "$1"' _ "$GHLOG"
+check "  protect: ok allen/one"                                 grep -q '^agent-new: protect: ok allen/one$' <<<"$OUT"
+check "  protect: ok allen/three"                               grep -q '^agent-new: protect: ok allen/three$' <<<"$OUT"
+check "  protect: FAILED allen/two"                             grep -q '^agent-new: protect: FAILED allen/two$' <<<"$OUT"
 check "  exactly one FAILED line"                           test "$(grep -c 'protect: FAILED' <<<"$OUT")" -eq 1
 newstate; touch "$STATE/collab" "$STATE/has-allen-dev"
-OUT=$(run protect a/one a/two a/three --vault agent-p1 2>&1); rc=$?
+OUT=$(run protect allen/one allen/two allen/three --vault agent-p1 2>&1); rc=$?
 check "three repos all fine: exit 0"                        test "$rc" -eq 0
 check "  three protect: ok lines"                           test "$(grep -c 'protect: ok' <<<"$OUT")" -eq 3
 check "  no FAILED line"                                    bash -c '! grep -q "protect: FAILED" <<<"$1"' _ "$OUT"
-check "  op read ran once for three repos"                  test "$(grep -c '^OP: read' "$OPLOG")" -le 1
+check "  op read ran once for three repos"                  test "$(grep -c '^OP: read' "$OPLOG")" -eq 1
+newstate
+OUT=$(run protect allen/one allen/two allen/three --vault agent-p1 2>&1); rc=$?
+check "three repos, machine user not yet invited: exit 0"   test "$rc" -eq 0
+check "  the vault token is read exactly once"              test "$(grep -c '^OP: read' "$OPLOG")" -eq 1
+check "  ...and used: an invitation accepted as the machine user" grep -q '^GH(mu): api -X PATCH /user/repository_invitations/42' "$GHLOG"
 newstate
 refuses "protect a/b notarepo: refused"                     'protect wants <owner>/<repo>' run protect a/b notarepo
 check "  no gh call for a/b"                                bash -c '! grep -q "a/b" "$1"' _ "$GHLOG"
 newstate; touch "$STATE/collab" "$STATE/has-allen-dev"
-OUT=$(run protect a/solo --vault agent-p1 2>&1); rc=$?
+OUT=$(run protect allen/solo --vault agent-p1 2>&1); rc=$?
 check "one repo: exit 0"                                    test "$rc" -eq 0
 check "  one protect: ok line"                              test "$(grep -c 'protect: ok' <<<"$OUT")" -eq 1
-newstate; touch "$STATE/collab" "$STATE/has-allen-dev"; echo a/solo > "$STATE/fail-repo"
-OUT=$(run protect a/solo --vault agent-p1 2>&1); rc=$?
+newstate; touch "$STATE/collab" "$STATE/has-allen-dev"; echo allen/solo > "$STATE/fail-repo"
+OUT=$(run protect allen/solo --vault agent-p1 2>&1); rc=$?
 check "one repo failing: exit non-zero"                     test "$rc" -ne 0
+
+echo "== protect: whose repository, the order of the steps, the machine user's access =="
+WRITES='api -X (POST|PUT|PATCH|DELETE) '
+newstate
+refuses "owner starting with a non-alphanumeric: refused"   'protect wants <owner>/<repo>' run protect _x/repo1
+refuses "repo named ..: refused"                            'protect wants <owner>/<repo>' run protect allen/..
+check "  no gh call"                                        bash -c '[ ! -s "$1" ]' _ "$GHLOG"
+newstate; touch "$STATE/collab"; echo someone-else > "$STATE/repo-owner"
+refuses "repo owned by another account: refused"            'only sets up repositories you own' run protect allen/repo1 --vault agent-p1
+check "  nothing written"                                   lacks "$GHLOG" "$WRITES"
+newstate; touch "$STATE/collab" "$STATE/not-admin"
+refuses "you are not an admin of the repo: refused"         'only sets up repositories you own' run protect allen/repo1 --vault agent-p1
+check "  nothing written"                                   lacks "$GHLOG" "$WRITES"
+newstate; touch "$STATE/info-fail"
+refuses "repo lookup fails: refused with gh's error"        'could not read allen/repo1 on GitHub as you: gh: Not Found' run protect allen/repo1
+check "  nothing written"                                   lacks "$GHLOG" "$WRITES"
+newstate; touch "$STATE/collab"; echo Allen/Repo1 > "$STATE/full-name"; echo Allen > "$STATE/repo-owner"
+OUT=$(run protect allen/repo1 --vault agent-p1 2>&1); rc=$?
+check "GitHub spells owner and repo differently: accepted"  test "$rc" -eq 0
+check "  every later call uses GitHub's spelling"           bash -c 'grep -q "POST repos/Allen/Repo1/rulesets" "$1" && ! grep -q "repos/allen/repo1/" "$1"' _ "$GHLOG"
+for d in feature/x allen-dev; do
+  newstate; touch "$STATE/collab"; echo "$d" > "$STATE/default-branch"
+  refuses "default branch $d: refused"                      "default branch $d of allen/repo1 would be outside the fence" run protect allen/repo1 --vault agent-p1
+  check "  nothing written"                                 lacks "$GHLOG" "$WRITES"
+done
+newstate; touch "$STATE/collab"; echo admin > "$STATE/collab-permission"
+refuses "machine user is a collaborator with admin: refused" 'must have Write, not Admin or Maintain' run protect allen/repo1 --vault agent-p1
+newstate; echo someone-else > "$STATE/mu-login"
+refuses "vault token for another login: refused"            "for 'someone-else', not the machine user 'agent-allen'" run protect allen/repo1 --vault agent-p1
+check "  no invitation sent"                                lacks "$GHLOG" 'collaborators/'
+check "  nothing written"                                   lacks "$GHLOG" "$WRITES"
+newstate; echo ALLEN/REPO1 > "$STATE/invited-as"
+check "invitation listed under another spelling: accepted"  run protect allen/repo1 --vault agent-p1
+check "  PATCHed as the machine user"                       grep -q '^GH(mu): api -X PATCH /user/repository_invitations/42' "$GHLOG"
+newstate; touch "$STATE/collab" "$STATE/autodelete-get-fail"
+refuses "auto-delete setting cannot be read: refused with gh's error" 'could not read the settings of allen/repo1: gh: Bad Gateway' run protect allen/repo1 --vault agent-p1
+check "  no PATCH"                                          test ! -f "$STATE/autodelete-patched"
+newstate; touch "$STATE/collab" "$STATE/branch-probe-fail"
+refuses "allen-dev lookup fails (not a 404): refused with gh's error" 'could not tell whether allen-dev exists on allen/repo1: gh: Server Error' run protect allen/repo1 --vault agent-p1
+check "  no branch created"                                 lacks "$GHLOG" 'git/refs'
+newstate; touch "$STATE/rulesets-list-fail"
+refuses "fence cannot be set up: refused"                   'could not list rulesets' run protect allen/repo1 --vault agent-p1
+check "  no invitation sent"                                lacks "$GHLOG" 'collaborators/'
+newstate
+run protect allen/repo1 --vault agent-p1 >/dev/null 2>&1
+check "fresh repo: the invitation is the last write to the repo" \
+  bash -c 'w=$(grep -E "api -X (POST|PUT|PATCH|DELETE) repos/" "$1"); [ "$(grep -c . <<<"$w")" -ge 5 ] && tail -n1 <<<"$w" | grep -q "PUT repos/allen/repo1/collaborators/agent-allen"' _ "$GHLOG"
+: > "$GHLOG"
+OUT=$(run protect allen/repo1 --vault agent-p1 2>&1); rc=$?
+check "second protect run on the same repo: exit 0"         test "$rc" -eq 0
+check "  changes nothing (no POST, PUT, PATCH or DELETE)"   lacks "$GHLOG" "$WRITES"
+check "  every step reported done"                          test "$(grep -c 'SKIP (done)' <<<"$OUT")" -ge 5
+newstate
+refuses "shell tracing on: refused"                         'refusing to run with shell tracing on' env HOME="$H" AGENT_CONTAINERS_CONFIG="$CFGROOT" PATH="$T/bin:$PATH" bash -x "$AN" protect allen/repo1
+check "  ...before any gh call"                             bash -c '[ ! -s "$1" ]' _ "$GHLOG"
+newstate; touch "$STATE/collab" "$STATE/has-gh-pages"
+OUT=$(run protect allen/repo1 --vault agent-p1 2>&1)
+check "gh-pages branch: warned"                             grep -q 'WARNING: allen/repo1 has a gh-pages branch: once the fence is on, pushes by GitHub Actions or Dependabot' <<<"$OUT"
+check "  ...before the fence is created"                    bash -c 'a=$(grep -n gh-pages <<<"$1" | head -n1 | cut -d: -f1); b=$(grep -n "creating ruleset agent-fence " <<<"$1" | cut -d: -f1); [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]' _ "$OUT"
+newstate; touch "$STATE/collab" "$STATE/has-dependabot"
+OUT=$(run protect allen/repo1 --vault agent-p1 2>&1)
+check "dependabot.yml: warned"                              grep -q 'WARNING: allen/repo1 has .github/dependabot.yml' <<<"$OUT"
+newstate; touch "$STATE/collab"
+OUT=$(run protect allen/repo1 --vault agent-p1 2>&1)
+check "no gh-pages, no dependabot, not a fork: no warning"  bash -c '! grep -q WARNING <<<"$1"' _ "$OUT"
+newstate; touch "$STATE/collab"; echo up/stream > "$STATE/parent"
+printf 'main\nfix/mine\nfeature/shared\ndevelopment\n' > "$STATE/branches-allen_repo1"; printf 'main\nfeature/shared\ndevelopment\nfix/theirs\n' > "$STATE/branches-up_stream"
+OUT=$(run protect allen/repo1 --vault agent-p1 2>&1); rc=$?
+check "fork: exit 0 (warn only)"                            test "$rc" -eq 0
+check "  upstream branch under a free name warned, by name" grep -q 'WARNING: allen/repo1 is a fork of up/stream, .*: feature/shared$' <<<"$OUT"
+check "  ...and only that one"                              bash -c '! grep -Eq "fork of.*(fix/mine|fix/theirs|development)" <<<"$1"' _ "$OUT"
+newstate; touch "$STATE/collab" "$STATE/branches-fail"; echo up/stream > "$STATE/parent"
+OUT=$(run protect allen/repo1 --vault agent-p1 2>&1); rc=$?
+check "fork, branch list fails: warned, not fatal"          bash -c '[ "$1" -eq 0 ] && grep -q "WARNING: could not list the branches of allen/repo1 and up/stream" <<<"$2"' _ "$rc" "$OUT"
 
 echo "== task 4: verify =="
 export AGENT_NEW_CHECK_TRIES=2 AGENT_NEW_CHECK_SLEEP=0
@@ -585,7 +703,7 @@ pr checks|0|gitleaks	pass
 PLAN
 }
 fence_in(){ grep -qF -- "$1" "$DLOG"; }     # $1 a fixed string the docker log must contain
-fence_not(){ ! grep -qF -- "$1" "$DLOG"; }  # ...or must not
+fence_not(){ [ -r "$DLOG" ] || { echo "no readable log: $DLOG"; return 1; }; ! grep -qF -- "$1" "$DLOG"; }  # ...or must not
 newstate; plan_fence
 VOUT=$(run verify p1 2>&1); VRC=$?
 check "fence on: verify passes"                         test "$VRC" -eq 0
