@@ -42,7 +42,8 @@ fast-forward the mirrors for me and flag that it has done so.")
   of `gh repo sync --branch <b>` without `--force`). `--no-sync` only reports.
 - **Report, per fork:** mirrors fast-forwarded in this run and by how many commits; mirrors that
   have diverged (not synced); how many commits `allen-dev` is behind each mirror the owner's work
-  targets; the owner's and the machine user's open PRs upstream, with age in days. A fork with
+  targets; the owner's open PRs upstream, with age in days; `upstream/` branches whose PR
+  upstream is merged or closed, as ready to delete (it deletes nothing itself). A fork with
   nothing to say prints one "up to date" line.
 - **Exit status:** 0 when every fork was read; non-zero if any could not be, with the others still
   reported.

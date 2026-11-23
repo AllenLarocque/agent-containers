@@ -62,10 +62,15 @@ mirror:
 - The owner's projects run `AllenLarocque/<repo>@allen-dev`, so a run includes all of the owner's
   work whether or not upstream has merged it. Upstream is often slow to merge; nothing here waits
   on it.
-- Work goes upstream as small PRs made from a topic branch: cut from the mirror, carrying only the
-  commits for one change. When changes are too entangled to separate, a snapshot branch cut from
-  `allen-dev` is sent instead. `allen-dev` itself is never the head of an upstream PR, because it
-  keeps moving. The agent prepares these branches when asked; the owner opens the upstream PR.
+- Work goes upstream as small PRs, each from an `upstream/<topic>` branch on the fork: cut from
+  the mirror, carrying only the commits for one change. When changes are too entangled to
+  separate, a snapshot cut from `allen-dev` is sent instead. `allen-dev` itself is never the head
+  of an upstream PR, because it keeps moving.
+- **The agent drafts, the owner sends.** When asked, the agent pushes the `upstream/<topic>` branch
+  and gives the owner a link to GitHub's compare page on the upstream repo with the title and
+  description pre-filled (`.../compare/<base>...AllenLarocque:<branch>?expand=1&title=…&body=…`).
+  The owner reads the diff there, edits the text and creates the PR under their own name. The
+  agent never opens a PR on an upstream repo. Later pushes to the branch update the open PR.
 - A change that builds on a PR upstream has not merged is either held on `allen-dev` until then,
   or sent stacked on that PR's branch with "depends on #N" in its description. Owner's choice per
   change.
@@ -84,9 +89,12 @@ and refuses a repo with no commits. `--no-working-branch` skips it.
 | `agent-fence-tags` | all tags | no creation, update or deletion | always |
 
 - **Free names** (the `exclude` list of `agent-fence`): `refs/heads/allen-dev` and
-  `refs/heads/<p>/**` for `<p>` in `fix`, `feature`, `feat`, `chore`, `docs`, `test`, `ci`,
-  `refactor`. *Author's call; the owner has not yet chosen between this and "any name except a
-  protected list".*
+  `refs/heads/<p>/**` for `<p>` in `fix`, `feature`, `chore`, `docs`, `test`, `ci`, `refactor`,
+  `perf`, `revert`, `upstream`, `sync`, `experiment` (owner's choice, 2026-11-23). `upstream/` is
+  for branches prepared to go to the upstream repo, `sync/` for merges of a mirror into
+  `allen-dev`, `experiment/` for throwaway work. There is no `feat` (one spelling only) and no
+  `release` (releases are the owner's). The list limits the agent only; the owner may name their
+  own branches anything.
 - The admin role is repository role id 5. The machine user is a collaborator with Write, never an
   admin, so the bypass never applies to it; the owner is the only admin.
 - Merging a PR is an update of the target branch, so the fence also stops the agent merging into
@@ -94,6 +102,16 @@ and refuses a repo with no commits. `--no-working-branch` skips it.
   a real repo before any `protect-main` is removed.**
 - These are the same two rulesets the owner made by hand as `protect-fork` and
   `protect-fork-tags`, with a wider `exclude` list and a name that says what they do.
+
+### Deleting branches
+
+- `agent-new protect` turns on the repo setting "Automatically delete head branches"
+  (`delete_branch_on_merge`), so a branch merged into `allen-dev` is deleted at merge time.
+- An `upstream/` branch is kept until upstream merges or closes its PR. The fork check lists the
+  ones that can go.
+- `allen-dev` and the mirrors are never deleted; the fence stops the agent.
+- The agent decides by the PR's state, never by `git branch --merged` (after a squash git reports
+  the branch as unmerged), and never deletes a branch whose PR is not merged without asking.
 
 ### What is dropped
 
@@ -153,7 +171,9 @@ file is generated. The research profile's own instructions are unchanged. Its co
 - Keep each PR to one change. Open it against `allen-dev` and squash-merge it yourself. Where the
   repo has checks, merge only when they are green.
 - Never push to `allen-dev` directly, and never rewrite its history.
-- Never open a PR to any other branch unless the owner asks for it, and never merge one.
+- Never open a PR to any other branch unless the owner asks for it, and never merge one. Never
+  open a PR on a repo the owner does not own: prepare the `upstream/` branch and the link.
+- Never delete a branch whose PR is not merged without asking the owner.
 - If the repo has no `allen-dev`, push the branch, open the PR against the default branch and
   wait for the owner.
 
