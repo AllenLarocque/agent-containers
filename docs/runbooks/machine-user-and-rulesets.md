@@ -18,6 +18,10 @@ Terms used below:
 - **Bypass:** a role that a ruleset does not apply to. Both fence rulesets let the **Repository admin** role through (you are the only admin); the machine user is not an admin, so it is always bound.
 - **Pull request (PR):** a request to merge one branch into another, with a page for review.
 - **Squash:** a way of merging a PR that turns all its commits into one commit on the target branch.
+- **Tag:** a fixed label on one commit, such as a release number.
+- **Collaborator:** an account given access to a repo that it does not own.
+- **Force-push:** a push that overwrites a branch's history instead of adding to it.
+- **Fast-forward:** updating a branch by adding the commits it lacks, without rewriting anything.
 - **Prefix:** the part of a branch name before the first slash. In `fix/typo`, the prefix is `fix`.
 
 ## The two rulesets
@@ -102,13 +106,13 @@ It makes one empty commit and then tries, in order:
 2. creating a branch outside the allowed names (must be refused);
 3. creating a tag (must be refused);
 4. a PR from `chore/verify-fence` into the default branch, and merging it (the merge must be refused; the PR is then closed);
-5. if `allen-dev` exists: a PR from `chore/verify-fence-dev` into `allen-dev`, waiting for its checks, then a squash merge (must succeed, and its branch is deleted).
+5. if `allen-dev` exists: a PR from `chore/verify-fence-dev` into `allen-dev`, waiting for its checks, then a squash merge (must succeed, and its branch is deleted). If the PR reports no checks after the tool's retries, it merges without them and says so.
 
-You should see one line `OK (refused as expected): ...` for each refusal, then `OK (merged as expected): ...`, and last `FENCE VERIFIED on <repo>`. The temporary branches and PRs are removed, except that the last check leaves one empty commit on `allen-dev`. If `allen-dev` is missing, check 5 is skipped and the tool says so. If the repo's checks are red on the PR into `allen-dev`, it stops and asks you to fix CI first.
+You should see one line `OK (refused as expected): ...` for each refusal, then `OK (merged as expected): ...`, and last `FENCE VERIFIED on <repo>`. The branches it pushed and the PRs it opened are removed, except that the last check leaves one empty commit on `allen-dev`. If `allen-dev` is missing, check 5 is skipped and the tool says so. If the repo's checks are red on the PR into `allen-dev`, it stops and asks you to fix CI first.
 
 How to read a failure:
 
-- `GATE NOT BINDING: '<check>' SUCCEEDED`: a push or merge that should have been refused went through. Stop. The tool deletes what it created where it can, and prints the command to run if it cannot. Do not use the repo until the rulesets are fixed.
+- `GATE NOT BINDING: '<check>' SUCCEEDED`: a push or merge that should have been refused went through. Stop. The tool deletes the branch or tag that was wrongly accepted before it stops, and prints the command to run if that fails. Do not use the repo until the rulesets are fixed.
 - `GATE NOT BINDING: '<check>' was refused, but not for the expected reason`: GitHub refused, but its message did not say that a rule did it. The tool prints GitHub's message. Do not work around it; report the text.
 
 With `--main-gate`, `verify` runs the older merge-gate checks instead (step 6.2 below), not the fence checks.
@@ -117,8 +121,8 @@ With `--main-gate`, `verify` runs the older merge-gate checks instead (step 6.2 
 
 Do this order the first time, on the repos you already have.
 
-1. **Pick a first repo that has no ruleset on its default branch except the fence**: no `protect-main`, and no ruleset named `main`. Run `agent-new protect <owner>/<repo> --vault agent-<project>`, then `agent-new verify <project>`. *Why: `verify` has to show that the fence alone stops a merge into the default branch. On a repo that still has the older gate, a refusal could come from that gate instead, and the check would prove nothing about the fence.*
-2. **Note GitHub's exact refusal text for each check.** `verify` prints it when a refusal is "not for the expected reason". If `verify` stops with that message, that is a finding to report, not something to work around.
+1. **Pick a first repo that has no ruleset on its default branch except the fence.** It must have none of `protect-main`, `main`, `protect-fork` or `protect-fork-tags`, or else no rulesets at all. (`protect-fork` covers every branch, so it counts too.) Run `agent-new protect <owner>/<repo> --vault agent-<project>`, then `agent-new verify <project>`. *Why: `verify` has to show that the fence alone stops a merge into the default branch. On a repo that still has an older ruleset, a refusal could come from that ruleset instead, and the check would prove nothing about the fence.*
+2. **Note GitHub's exact refusal text for each check.** `verify` prints GitHub's message only when a check fails; on success it prints just `OK (refused as expected): <label>`. To record the exact texts on a clean first run, use the by-hand commands in section 6.1. If `verify` stops with "not for the expected reason", that is a finding to report, not something to work around.
 3. **Only after step 2 is clean:** take the other repos one at a time. For each: `agent-new protect <owner>/<repo> --migrate --vault agent-<project>`, answer the delete question, then `agent-new verify <project>`. Move to the next repo only when `FENCE VERIFIED` has printed.
 4. **`agent-containers` keeps its main gate:** `agent-new protect <owner>/agent-containers --main-gate`, never `--migrate` without `--main-gate`.
 
@@ -234,10 +238,12 @@ git push origin HEAD:refs/heads/not-a-free-name     # 2. expected: REJECTED, sam
 git push origin HEAD:refs/tags/verify-tag           # 3. expected: REJECTED, same kind of message
 git push -u origin chore/verify-fence               # 4. expected: succeeds
 gh pr create --base <default> --fill                # 5. expected: succeeds
-gh pr merge --squash                                # 6. expected: REFUSED
+gh api -X PUT repos/<owner>/<repo>/pulls/<n>/merge -f merge_method=squash   # 6. expected: REFUSED, by the rule (<n> is the PR number)
 gh pr close chore/verify-fence
 git push origin --delete chore/verify-fence         # clean up
 ```
+
+*Why the merge goes through `gh api`:* `gh pr merge` can decline by itself while a PR is merely waiting on something, and that would not be the rule's answer. The `gh api` call asks the server directly, as `agent-new verify` does.
 
 *Why the rejection message matters:* a push rejected as "non-fast-forward" is not the right reason. It means the branch merely diverged, and a rule was not what stopped you. Then repeat items 4 and 5 against `allen-dev` (`--base allen-dev`); there the squash merge must succeed.
 

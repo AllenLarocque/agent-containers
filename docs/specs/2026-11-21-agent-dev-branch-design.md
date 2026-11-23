@@ -118,8 +118,7 @@ and refuses a repo with no commits. `--no-working-branch` skips it.
 - **`protect-main`**: with the fence, it restrains only the owner. It is removed from the science
   repos, where it mostly requires a `gitleaks` check those repos have no workflow for. It **stays
   where `--main-gate` is given** (`agent-containers`: `agent-new protect --main-gate`), because a merge to `main` there publishes the images every project
-  runs. Accepted costs elsewhere: the fence is the only barrier, the owner's own stray or forced
-  push to a default branch is not caught, and nothing requires green checks before promotion.
+  runs.
 - **`CODEOWNERS`**: it only decides whose approval counts under `protect-main`. `agent-new` does
   not add it. The project template (`project-template/repo/.github/CODEOWNERS`) still ships it and
   `agent-up init` still copies it into a project, and existing files are left in place.

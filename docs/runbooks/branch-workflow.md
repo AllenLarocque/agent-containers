@@ -1,6 +1,6 @@
 # Runbook: working with `allen-dev`
 
-**Human procedure.** For you, the repo owner. The agent follows the same model from its own instructions (`project-template/instructions/builder.md`). Set-up of the rulesets that make this work is in [machine-user-and-rulesets.md](machine-user-and-rulesets.md), which also defines the terms (ruleset, fork, mirror, squash, default branch) used here.
+**Human procedure.** For you, the repo owner. The agent's standing rules for this model are in `project-template/instructions/builder.md`; the sync, snapshot and stacked-PR procedures below come from the design spec (`docs/specs/2026-11-21-agent-dev-branch-design.md`). Set-up of the rulesets that make this work is in [machine-user-and-rulesets.md](machine-user-and-rulesets.md), which also defines the terms (ruleset, fork, mirror, squash, default branch, fast-forward) used here.
 GitHub UI paths below are as of 2026-11 and may move; if a label differs, look for the nearest equivalent.
 
 **Why this exists.** The agent runs for long stretches. If every PR waited for you, it would build each piece on top of unmerged work. So the agent and you share one working branch, `allen-dev`: the agent lands small changes there by itself, and you decide when anything goes further.
