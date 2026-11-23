@@ -266,6 +266,13 @@ check "  fence has no release/**"             bash -c '! grep -qF "refs/heads/re
 check "  tags ruleset targets tags"           grep -q '"target": *"tag"' "$STATE/ruleset-posted-agent-fence-tags"
 check "  tags ruleset has empty exclude"      grep -q '"exclude": *\[\]' "$STATE/ruleset-posted-agent-fence-tags"
 check "  tags ruleset bypass is always"       grep -q '"bypass_mode": *"always"' "$STATE/ruleset-posted-agent-fence-tags"
+
+# the expected strings agent-new builds in bash must equal what its own NORM_JQ makes of each posted template
+NORM_JQ_SRC="$(sed -n "/^NORM_JQ='/,/^\] | join/p" "$AN" | sed "1s/^NORM_JQ='//; \$s/'\$//")"
+for n in agent-fence agent-fence-tags protect-main; do
+  case "$n" in agent-fence) want="$FENCE_NORM" ;; agent-fence-tags) want="$TAGS_NORM" ;; *) want="$EXPECT_NORM" ;; esac
+  check "template $n: posted JSON projects to the expected string" test "$(jq -r "$NORM_JQ_SRC" "$STATE/ruleset-posted-$n")" = "$want"
+done
 newstate; touch "$STATE/collab" "$STATE/has-codeowners" "$STATE/has-gitleaks"
 echo 8 > "$STATE/ruleset-id-agent-fence"; echo "$FENCE_NORM" > "$STATE/ruleset-norm-agent-fence"
 echo 9 > "$STATE/ruleset-id-agent-fence-tags"; echo "$TAGS_NORM" > "$STATE/ruleset-norm-agent-fence-tags"

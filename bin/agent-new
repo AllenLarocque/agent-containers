@@ -382,8 +382,19 @@ JSON
     *) die "no ruleset template named $1" ;;
   esac
 }
-ruleset_norm_expected(){ # $1 template name; the same projection NORM_JQ makes of a live ruleset
-  ruleset_json "$1" | jq -r "$NORM_JQ" | tr -d '\n'
+ruleset_norm_expected(){ # $1 template name; what NORM_JQ makes of that template's live ruleset
+  local ex
+  case "$1" in
+    protect-main)
+      printf 'branch|active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:false|%s|refs:~DEFAULT_BRANCH/|strict:false|merge,rebase,squash' \
+        "$(checks_sorted | paste -sd+ -)" ;;
+    agent-fence)
+      ex="$({ printf 'refs/heads/%s\n' "$WORK_BRANCH"; printf 'refs/heads/%s/**\n' "${FREE_PREFIXES[@]}"; } | LC_ALL=C sort | paste -sd, -)"
+      printf 'branch|active|RepositoryRole:5:always|creation,deletion,non_fast_forward,update|pr:-||refs:~ALL/%s|strict:-|' "$ex" ;;
+    agent-fence-tags)
+      printf 'tag|active|RepositoryRole:5:always|creation,deletion,update|pr:-||refs:~ALL/|strict:-|' ;;
+    *) die "no ruleset template named $1" ;;
+  esac
 }
 ruleset_id(){ # $1 owner/repo, $2 ruleset name: prints the id, or nothing when there is none
   local repo="$1" name="$2" out rc=0 errf sel; errf="$(mktemp)"
