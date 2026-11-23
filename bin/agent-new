@@ -31,7 +31,7 @@ usage:
   agent-new project <folder> [--image base|gis|bio] [--public] [--no-research]
                              [--t3 publish|1|0] [--token-from <vault>] [--machine-user <user>]
   agent-new protect <owner>/<repo> [--machine-user <user>] [--vault <op-vault>] [--require <check>]...
-                             [--main-gate] [--no-working-branch]
+                             [--main-gate] [--no-working-branch] [--migrate]
   agent-new verify  <project> | <owner>/<repo> [--vault <op-vault>]
 Runs AS THE OWNER. The runbooks in docs/runbooks/ remain the reference procedure.
 USAGE
@@ -48,7 +48,7 @@ ts_port(){ # $1 project.conf -> the Tailscale Serve HTTPS port (override or form
 }
 normalise(){ printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9_-]/-/g; s/^[^a-z0-9]*//'; }
 
-MAIN_GATE=0 WORK_BRANCH_ON=1
+MAIN_GATE=0 WORK_BRANCH_ON=1 MIGRATE=0
 MACHINE_USER_FLAG="" VAULT="" IMAGE="" VISIBILITY=private RESEARCH=1 T3MODE=publish TOKEN_FROM=""
 REQUIRE_CHECKS=(gitleaks)
 
@@ -437,14 +437,22 @@ protect_warnings(){ # $1 owner/repo
     && warn "$repo lets Actions approve PRs: turn it OFF (Settings -> Actions -> General, runbook step 2.3)" || true
 }
 protect_work_branch(){ # $1 owner/repo: create the working branch from the default branch's head unless it exists
-  local repo="$1" default sha
+  local repo="$1" default sha rc=0 errf
   if gh api "repos/$repo/branches/$WORK_BRANCH" >/dev/null 2>&1; then
     skip "branch $WORK_BRANCH exists on $repo"
     return
   fi
   default="$(gh api "repos/$repo" --jq .default_branch)"
-  sha="$(gh api "repos/$repo/git/ref/heads/$default" --jq .object.sha 2>/dev/null)" && [ -n "$sha" ] \
-    || die "$repo has no commits: nothing to branch $WORK_BRANCH from"
+  errf="$(mktemp)"
+  sha="$(gh api "repos/$repo/git/ref/heads/$default" --jq .object.sha 2>"$errf")" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$sha" ]; then
+    # an empty repository answers 409 "Git Repository is empty"; anything else is gh's own error
+    if grep -qi 'repository is empty' "$errf"; then
+      rm -f "$errf"; die "$repo has no commits: nothing to branch $WORK_BRANCH from"
+    fi
+    die "could not read the head of $default on $repo: $(cat "$errf"; rm -f "$errf")"
+  fi
+  rm -f "$errf"
   say "creating branch $WORK_BRANCH on $repo from $default"
   gh api -X POST "repos/$repo/git/refs" -f ref="refs/heads/$WORK_BRANCH" -f sha="$sha" >/dev/null
 }
@@ -457,9 +465,70 @@ protect_autodelete(){ # $1 owner/repo: merged PR branches delete themselves
     gh api -X PATCH "repos/$repo" -F delete_branch_on_merge=true >/dev/null
   fi
 }
+confirm(){ # $1 question: 0 for yes, 1 for no, 2 when there is nobody to ask (AGENT_NEW_CONFIRM=y|n is the test seam)
+  local ans=""
+  case "${AGENT_NEW_CONFIRM:-}" in
+    y|n) printf '%s %s\n' "$1" "$AGENT_NEW_CONFIRM" >&2; [ "$AGENT_NEW_CONFIRM" = y ]; return ;;
+  esac
+  [ -t 0 ] || return 2
+  printf '%s ' "$1" >&2
+  read -r ans || true
+  [[ "$ans" =~ ^[yY]$ ]]
+}
+migrate_fence(){ # $1 owner/repo: the hand-made protect-fork rulesets become the agent fence (the only rulesets this tool ever renames)
+  local repo="$1" pair old new oldnorm id fid have
+  for pair in "protect-fork agent-fence branch|active|RepositoryRole:5:always|creation,deletion,non_fast_forward,update|pr:-||refs:~ALL/refs/heads/feature/**,refs/heads/fix/**|strict:-|" \
+              "protect-fork-tags agent-fence-tags tag|active|RepositoryRole:5:always|creation,deletion,update|pr:-||refs:~ALL/|strict:-|"; do
+    read -r old new oldnorm <<<"$pair"
+    id="$(ruleset_id "$repo" "$old")"
+    [ -n "$id" ] || continue
+    fid="$(ruleset_id "$repo" "$new")"
+    if [ -n "$fid" ]; then
+      warn "$old still exists on $repo beside $new and still limits the agent to fix/ and feature/ branches: remove it by hand (GitHub UI)"
+      continue
+    fi
+    have="$(gh api "repos/$repo/rulesets/$id" --jq "$NORM_JQ")"
+    if [ "$have" != "$oldnorm" ]; then
+      [ "$MIGRATE" -eq 1 ] || continue   # not the hand-made shape, so not ours to report
+      warn "live:     $have"
+      warn "expected: $oldnorm"
+      die "ruleset $old on $repo is not the shape --migrate renames: refusing to modify it."
+    fi
+    if [ "$MIGRATE" -eq 1 ]; then
+      say "renaming ruleset $old on $repo to $new"
+      ruleset_json "$new" | gh api -X PUT "repos/$repo/rulesets/$id" --input - >/dev/null
+    else
+      warn "ruleset $old on $repo is the old hand-made shape: the agent is still limited to fix/ and feature/ until you re-run with --migrate (it then becomes $new)"
+    fi
+  done
+}
+migrate_main_gate(){ # $1 owner/repo: with --migrate and no --main-gate, offer to delete the old protect-main / main gate
+  local repo="$1" mid pid name id have rc
+  local -a f
+  mid="$(ruleset_id "$repo" main)"
+  pid="$(ruleset_id "$repo" protect-main)"   # also matches main
+  for name in protect-main main; do
+    case "$name" in protect-main) id="$pid"; [ "$pid" != "$mid" ] || id="" ;; *) id="$mid" ;; esac
+    [ -n "$id" ] || continue
+    have="$(gh api "repos/$repo/rulesets/$id" --jq "$NORM_JQ")"
+    IFS='|' read -ra f <<<"$have"
+    if [ "${f[6]:-}" != 'refs:~DEFAULT_BRANCH/' ]; then
+      warn "ruleset $name on $repo does not just target the default branch: leaving it alone ($have)"
+      continue
+    fi
+    say "ruleset $name on $repo: $have"
+    rc=0; confirm "delete ruleset '$name' on $repo? [y/N]" || rc=$?
+    case "$rc" in
+      0) say "deleting ruleset $name on $repo"; gh api -X DELETE "repos/$repo/rulesets/$id" >/dev/null ;;
+      2) warn "not a terminal: $name on $repo was NOT deleted; re-run --migrate at a terminal" ;;
+      *) skip "ruleset $name on $repo kept" ;;
+    esac
+  done
+}
 cmd_protect(){
   [ -z "$VAULT" ] || op_ready   # only --vault reads 1Password (the machine user's token)
   protect_collaborator "$1"
+  migrate_fence "$1"
   ensure_ruleset "$1" agent-fence
   ensure_ruleset "$1" agent-fence-tags
   [ "$WORK_BRANCH_ON" -eq 0 ] || protect_work_branch "$1"
@@ -467,6 +536,8 @@ cmd_protect(){
   if [ "$MAIN_GATE" -eq 1 ]; then
     ensure_ruleset "$1" protect-main
     protect_warnings "$1"
+  elif [ "$MIGRATE" -eq 1 ]; then
+    migrate_main_gate "$1"   # both fence rulesets were ensured above, in this run
   fi
   say "protect: done ($1)"
 }
@@ -586,6 +657,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --require)      REQUIRE_CHECKS+=("${2:?}"); shift 2 ;;
   --main-gate)    MAIN_GATE=1; shift ;;
   --no-working-branch) WORK_BRANCH_ON=0; shift ;;
+  --migrate)      MIGRATE=1; shift ;;
   -*)             usage ;;
   *)              args+=("$1"); shift ;;
 esac; done
