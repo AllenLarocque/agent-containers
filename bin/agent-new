@@ -6,6 +6,10 @@
 case $- in *x*) printf 'agent-new: %s\n' "refusing to run with shell tracing on (it would print secrets)" >&2; exit 1 ;; esac
 set -euo pipefail
 unset OP_SERVICE_ACCOUNT_TOKEN # agent-new acts as the owner; the SA token is only ever set explicitly, per command
+# every variable that ever holds a token starts unset and unexported: an inherited export attribute would otherwise
+# carry a value assigned later (a local of the same name included) into every child process
+set +a
+unset MU_TOK VTOK tok ghtok sat s REPLY
 
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 CFG_ROOT="${AGENT_CONTAINERS_CONFIG:-$HOME/.config/agent-containers}"
@@ -320,15 +324,16 @@ mu_token_checked(){ # sets MU_TOK: the machine user's token from the vault, once
 }
 
 protect_collaborator(){ # $1 owner/repo: the last step of protect, so a failure before it leaves no new access
-  local repo="$1" mu perm; mu="$(machine_user)"
-  if gh api "repos/$repo/collaborators/$mu" >/dev/null 2>&1; then
+  local repo="$1" mu perm err; mu="$(machine_user)"
+  if err="$(gh api "repos/$repo/collaborators/$mu" 2>&1 >/dev/null)"; then
     perm="$(gh_read "$mu's permission on $repo" api "repos/$repo/collaborators/$mu/permission" --jq .permission)"
     [ "$perm" = write ] \
       || die "$mu has '$perm' access to $repo: the account must have Write, not Admin or Maintain (Settings -> Collaborators), then re-run"
     skip "$mu is a collaborator on $repo (Write)"; return
   fi
+  grep -q 'HTTP 404' <<<"$err" || die "could not tell whether $mu is a collaborator on $repo: $err"
   say "inviting $mu to $repo (machine-user-and-rulesets.md step 2.1)"
-  gh api -X PUT "repos/$repo/collaborators/$mu" >/dev/null
+  gh api -X PUT "repos/$repo/collaborators/$mu" -f permission=push >/dev/null
   if [ -n "$VAULT" ]; then
     say "accepting the invitation as $mu (its token from op://$VAULT/github-agent/token, for this step only)"
     local inv lrepo; lrepo="$(lc "$repo")"
@@ -511,7 +516,7 @@ confirm(){ # $1 question: 0 for yes, 1 for no, 2 when there is nobody to ask. On
   local ans=""
   [ -t 0 ] || return 2
   printf '%s ' "$1" >&2
-  read -r ans || true
+  read -r ans || return 1   # only a complete line counts: end of input after a bare "y" is no answer
   [[ "$ans" =~ ^[yY]$ ]]
 }
 OLD_FENCE_NORM='branch|active|RepositoryRole:5:always|creation,deletion,non_fast_forward,update|pr:-||refs:~ALL/refs/heads/feature/**,refs/heads/fix/**|strict:-||upd:false'
@@ -572,9 +577,9 @@ retire_main_gate(){ # $1 owner/repo: with --retire-main-gate, offer to delete pr
     say "ruleset $name on $repo: $have"
     rc=0; confirm "delete ruleset '$name' on $repo? [y/N]" || rc=$?
     case "$rc" in
-      0) # the answer may have taken a while: the id must still be this ruleset's
+      0) # the answer may have taken a while: the ruleset must still be exactly the one shown
          again="$(ruleset_id_exact "$repo" "$name")"
-         [ "$again" = "$id" ] && [ "$(gh_read "ruleset $id on $repo" api "repos/$repo/rulesets/$id" --jq .name)" = "$name" ] \
+         [ "$again" = "$id" ] && [ "$(gh_read "ruleset $id on $repo" api "repos/$repo/rulesets/$id" --jq "$RULE_REF_JQ")" = "$info" ] \
            || die "ruleset $name on $repo changed while you answered: nothing was deleted; re-run"
          say "deleting ruleset $name on $repo"
          gh api -X DELETE "repos/$repo/rulesets/$id" >/dev/null ;;
@@ -1029,7 +1034,11 @@ fi
 [ "$REQUIRE_GIVEN" -eq 0 ] || [ "$MAIN_GATE" -eq 1 ] || warn "--require is ignored without --main-gate"
 
 case "$sub" in
-  project) [ $# -eq 1 ] && [ -n "$1" ] || usage; cmd_project "$1" ;;
+  project) [ $# -eq 1 ] && [ -n "$1" ] || usage
+           if [ "$MIGRATE" -eq 1 ] || [ "$RETIRE" -eq 1 ]; then
+             printf 'agent-new: --migrate and --retire-main-gate are for agent-new protect, not project\n' >&2; usage
+           fi
+           cmd_project "$1" ;;
   protect) [ $# -ge 1 ] || usage
            for r in "$@"; do repo_arg_ok "$r" || die "protect wants <owner>/<repo> (got: $r)"; done
            OWNER="$(preflight_owner)"

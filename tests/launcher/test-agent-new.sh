@@ -34,6 +34,8 @@ cat > "$T/bin/gh" <<'STUB'
 if [ -n "${GH_TOKEN:-}" ] && [ -s "$STATE/drop-token" ] && [[ "$*" =~ $(cat "$STATE/drop-token") ]]; then unset GH_TOKEN; fi
 echo "GH${GH_TOKEN:+(mu)}: $*" >> "$GHLOG"
 echo "${GH_TOKEN:-}" >> "$STATE/gh-tokens"
+# the vault token may reach gh only as GH_TOKEN: any other variable carrying it is a leak
+env | grep -v '^GH_TOKEN=' | grep -q fake-op-secret && env | grep -v '^GH_TOKEN=' | grep fake-op-secret | cut -d= -f1 >> "$STATE/env-leak"
 last="${@: -1}"
 # the machine user's call that a test lets through: $STATE/accept-gh holds an ERE matched against the arguments
 accepted(){ [ -n "${GH_TOKEN:-}" ] && [ -s "$STATE/accept-gh" ] && [[ "$ARGS" =~ $(cat "$STATE/accept-gh") ]]; }
@@ -81,7 +83,8 @@ case "$*" in
     if [ -f "$STATE/parent" ]; then echo true; cat "$STATE/parent"; else echo false; echo; fi
     cat "$STATE/default-branch" 2>/dev/null || echo main ;;
   "api repos/"*"/collaborators/"*"/permission --jq .permission") cat "$STATE/collab-permission" 2>/dev/null || echo write ;;
-  api\ repos/*/collaborators/*) [ -f "$STATE/collab" ] ;;
+  api\ repos/*/collaborators/*) [ -f "$STATE/collab-probe-fail" ] && { echo "gh: Server Error (HTTP 500)" >&2; exit 1; }
+    [ -f "$STATE/collab" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; } ;;
   api\ -X\ PUT\ repos/*/collaborators/*) r="${4#repos/}"; r="${r%/collaborators/*}"
     if [ -f "$STATE/invited-as" ]; then cp "$STATE/invited-as" "$STATE/invited"; else echo "$r" > "$STATE/invited"; fi ;;
   "api /user/repository_invitations --jq"*) [ -n "${GH_TOKEN:-}" ] || exit 1
@@ -108,7 +111,10 @@ case "$*" in
   "api -X DELETE repos/"*"/rulesets/"*) echo "${4##*/}" >> "$STATE/ruleset-deleted"; f="$(rsfind "${4##*/}")" && rm -f "$f" ;;
   "api repos/"*"/rulesets/"[0-9]*" --jq"*) f="$(rsfind "${2##*/}")" || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
     rn="${f##*/ruleset-id-}"; d="${f%/*}"
-    if [ -s "$d/ruleset-json-$rn" ]; then jq -r "$last" "$d/ruleset-json-$rn"
+    # ruleset-json-<name>.later replaces the JSON after the number of reads in ruleset-later-after-<name>
+    c=$(( $(cat "$d/.reads-$rn" 2>/dev/null || echo 0) + 1 )); echo "$c" > "$d/.reads-$rn"
+    if [ -s "$d/ruleset-json-$rn.later" ] && [ "$c" -gt "$(cat "$d/ruleset-later-after-$rn")" ]; then jq -r "$last" "$d/ruleset-json-$rn.later"
+    elif [ -s "$d/ruleset-json-$rn" ]; then jq -r "$last" "$d/ruleset-json-$rn"
     elif [ "$last" = "$NORM_JQ_SRC" ]; then cat "$d/ruleset-norm-$rn"
     elif [ "$last" = .name ]; then echo "$rn"
     else echo "stub: ruleset $rn has no JSON to answer --jq $last" >&2; exit 1; fi ;;
@@ -362,7 +368,7 @@ refuses "gh not logged in" 'not logged in' run protect o/r
 echo "== task 2: protect / collaborator =="
 newstate
 check "fresh: invite + accept as machine user" run protect allen/repo1 --vault agent-p1
-check "  invite was PUT as owner"            grep -q '^GH: api -X PUT repos/allen/repo1/collaborators/agent-allen' "$GHLOG"
+check "  invite was PUT as owner, for Write"  grep -q '^GH: api -X PUT repos/allen/repo1/collaborators/agent-allen -f permission=push$' "$GHLOG"
 check "  accept listed+patched AS machine user" grep -q '^GH(mu): api -X PATCH /user/repository_invitations/42' "$GHLOG"
 check "  token came from the project vault"  grep -q '^OP: read op://agent-p1/github-agent/token' "$OPLOG"
 newstate; touch "$STATE/collab"
@@ -600,12 +606,18 @@ check "protect-main + --retire-main-gate, typed y at a terminal: exits 0" test "
 check "  prints the ruleset and asks"                     grep -q "delete ruleset 'protect-main' on allen/repo1? \[y/N\]" <<<"$OUT"
 check "  exactly one DELETE, of its id"                   test "$(cat "$STATE/ruleset-deleted")" = 7
 check "  DELETE comes after the fence calls"              bash -c 'a=$(grep -n "rulesets/9 --jq" "$1" | head -n1 | cut -d: -f1); b=$(grep -n "api -X DELETE" "$1" | cut -d: -f1); [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]' _ "$GHLOG"
-check "  the ruleset is read again right before the DELETE" bash -c 'tail -n4 "$1" | head -n3 | grep -q "rulesets/7 --jq .name" && tail -n2 "$1" | grep -q "api -X DELETE repos/allen/repo1/rulesets/7"' _ "$(grep -v collaborators "$GHLOG" > "$T/ghlog.nocollab"; echo "$T/ghlog.nocollab")"
+check "  the ruleset (name, target, include, exclude) is read again right before the DELETE" bash -c 'tail -n4 "$1" | head -n3 | grep -q "rulesets/7 --jq \[.name, .target" && tail -n2 "$1" | grep -q "api -X DELETE repos/allen/repo1/rulesets/7"' _ "$(grep -v collaborators "$GHLOG" > "$T/ghlog.nocollab"; echo "$T/ghlog.nocollab")"
 for typed in 'n\n' '' 'yes please\n'; do
   retstate; gate protect-main 7
   OUT=$(runtty "$typed" protect allen/repo1 --vault agent-p1 --retire-main-gate); rc=$?
   check "typed '${typed%\\n}' at the terminal: exit 0, nothing deleted" bash -c '[ "$1" -eq 0 ] && [ ! -f "$2" ]' _ "$rc" "$STATE/ruleset-deleted"
 done
+retstate; gate protect-main 7
+OUT=$(runtty 'y\004\004' protect allen/repo1 --vault agent-p1 --retire-main-gate); rc=$?
+check "typed y, then end of input without ENTER: nothing deleted" bash -c '[ "$1" -eq 0 ] && [ ! -f "$2" ]' _ "$rc" "$STATE/ruleset-deleted"
+retstate; gate protect-main 7; pmjson protect-main '["~ALL"]' > "$STATE/ruleset-json-protect-main.later"; echo 2 > "$STATE/ruleset-later-after-protect-main"
+OUT=$(runtty 'y\n' protect allen/repo1 --vault agent-p1 --retire-main-gate); rc=$?
+check "ruleset changed between the prompt and the DELETE: dies, nothing deleted" bash -c '[ "$1" -ne 0 ] && grep -q "changed while you answered: nothing was deleted" <<<"$2" && [ ! -f "$3" ]' _ "$rc" "$OUT" "$STATE/ruleset-deleted"
 retstate; gate protect-main 7
 OUT=$(run protect allen/repo1 --vault agent-p1 --retire-main-gate </dev/null 2>&1); rc=$?
 check "stdin not a terminal: exit 0"                      test "$rc" -eq 0
@@ -725,6 +737,12 @@ newstate; echo someone-else > "$STATE/mu-login"
 refuses "vault token for another login: refused"            "for 'someone-else', not the machine user 'agent-allen'" run protect allen/repo1 --vault agent-p1
 check "  no invitation sent"                                lacks "$GHLOG" 'collaborators/'
 check "  nothing written"                                   lacks "$GHLOG" "$WRITES"
+newstate; touch "$STATE/collab-probe-fail"
+refuses "collaborator lookup fails (not a 404): refused with gh's error" 'could not tell whether agent-allen is a collaborator on allen/repo1: gh: Server Error' run protect allen/repo1 --vault agent-p1
+check "  no invitation sent"                                lacks "$GHLOG" 'PUT repos/allen/repo1/collaborators'
+newstate
+OUT=$(MU_TOK=inherited VTOK=inherited tok=inherited s=inherited REPLY=inherited run protect allen/repo1 --vault agent-p1 2>&1); rc=$?
+check "token variables exported by the caller: the token still reaches gh only as GH_TOKEN" bash -c '[ "$1" -eq 0 ] && [ ! -s "$2" ] && grep -q fake-op-secret "$3"' _ "$rc" "$STATE/env-leak" "$STATE/gh-tokens"
 newstate; echo ALLEN/REPO1 > "$STATE/invited-as"
 check "invitation listed under another spelling: accepted"  run protect allen/repo1 --vault agent-p1
 check "  PATCHed as the machine user"                       grep -q '^GH(mu): api -X PATCH /user/repository_invitations/42' "$GHLOG"
@@ -1287,6 +1305,11 @@ check "  nothing POSTed" test ! -f "$STATE/ruleset-posted-protect-main"
 
 newstate
 refuses "project --vault refused" 'project always uses vault agent-<project>' run project NoVault --vault foo < /dev/null
+for f in --migrate --retire-main-gate; do
+  newstate
+  refuses "project $f: usage error"                  'are for agent-new protect, not project' run project NoFlag "$f" < /dev/null
+  check "  nothing ran"                               bash -c '[ ! -s "$1" ]' _ "$GHLOG"
+done
 
 rm -rf "$PROJHOME/NewProj" "$CFGROOT/newproj"
 fullstate
