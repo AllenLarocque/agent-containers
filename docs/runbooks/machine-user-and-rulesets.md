@@ -86,7 +86,7 @@ agent-new verify <owner>/<repo> --vault agent-<project> [--main-gate ...]   # fr
 For each repo, `protect` does these in order, and prints `SKIP (done)` for anything that is already right:
 
 1. Checks the repo: yours, and its default branch is not `allen-dev` and does not start with an allowed prefix (such a default branch would be outside the fence; the tool stops).
-2. Warns, without stopping, about what the fence will affect: a `gh-pages` branch or a `.github/dependabot.yml` (pushes by GitHub Actions or Dependabot to branches outside the allowed names are refused once the fence is on), and, on a fork, branches that came from upstream and have an allowed name (the agent can write to those).
+2. Warns, without stopping, about what the fence will affect: a `gh-pages` branch or a `.github/dependabot.yml` (pushes by GitHub Actions or Dependabot to branches outside the allowed names are refused once the fence is on), and, on a fork, the branches that came from upstream and have an allowed name (it lists them).
 3. With `--migrate`: renames the older rulesets (below).
 4. Creates the ruleset `agent-fence`, then `agent-fence-tags`.
 5. Creates the branch `allen-dev` from the head of the default branch, unless it exists, and gives it the ruleset `agent-working-branch`. It stops with a message for a repo that has no commits yet. `--no-working-branch` skips both.
