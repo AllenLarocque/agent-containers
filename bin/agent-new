@@ -612,17 +612,20 @@ read_repo_info(){ # $1 owner/repo, as the owner: sets RI_NAME (GitHub's spelling
   [[ $RI_DEFAULT =~ ^[A-Za-z0-9._/-]+$ ]] || die "could not read the default branch of $1 (got: '$RI_DEFAULT')"
 }
 protect_preflight(){ # $1 owner/repo as typed: the owner's own repo, with its default branch inside the fence; sets P_REPO, P_DEFAULT
-  local p
   read_repo_info "$1"
   if [ "$RI_ADMIN" != true ] || [ "$(lc "$RI_OWNER")" != "$(lc "$OWNER")" ]; then
     die "agent-new protect only sets up repositories you own: $RI_NAME is owned by $RI_OWNER (signed in: $OWNER, admin: ${RI_ADMIN:-?})"
   fi
   P_REPO="$RI_NAME" P_DEFAULT="$RI_DEFAULT"
-  [ "$P_DEFAULT" != "$WORK_BRANCH" ] \
-    || die "the default branch $P_DEFAULT of $P_REPO would be outside the fence (the agent may write to it): make another branch the default first"
+  default_in_fence "$P_REPO" "$P_DEFAULT"
+}
+default_in_fence(){ # $1 owner/repo, $2 its default branch: dies when the fence would leave that branch free
+  local p
+  [ "$2" != "$WORK_BRANCH" ] \
+    || die "the default branch $2 of $1 would be outside the fence (the agent may write to it): make another branch the default first"
   for p in "${FREE_PREFIXES[@]}"; do
-    case "$P_DEFAULT" in "$p"/*)
-      die "the default branch $P_DEFAULT of $P_REPO would be outside the fence ($p/ is a name the agent may write to): make another branch the default first" ;;
+    case "$2" in "$p"/*)
+      die "the default branch $2 of $1 would be outside the fence ($p/ is a name the agent may write to): make another branch the default first" ;;
     esac
   done
 }
@@ -673,11 +676,11 @@ protect_repo(){ # $1 owner/repo, in this order: the fence and the branch setting
 # verify works against throwaway refs that you (the owner) create and remove. The machine user's attempts on them must be
 # refused; if one is wrongly accepted, only a throwaway ref changes. All of verify's state is global: the EXIT trap runs
 # after the functions' locals are gone.
-FENCE_RE='GH013|repository rule|rule violations|protected'
+FENCE_RE='GH013|repository rule|rule violations|protected (branch|ref)'
 VREFS=() VPRS=()        # refs (heads/<b> | tags/<t>) and PR numbers verify made or let through and has not removed yet
 VON_ACCEPT="" VDIE_EXTRA=""   # a function run when an attempt is wrongly accepted, and what it adds to the message
 expect_refusal(){ # $1 label, $2 reason ERE, $3 command (runs via RUN_IN), $4 optional: the ref $3 creates if it is accepted
-  local label="$1" re="$2" cmd="$3" made="${4:-}" out rc=0
+  local label="$1" re="$2" cmd="$3" made="${4:-}" out rc=0 seen
   out="$(RUN_IN "$cmd" 2>&1)" || rc=$?
   if [ "$rc" -eq 0 ]; then
     [ -z "$out" ] || printf '%s\n' "$out" >&2
@@ -685,7 +688,9 @@ expect_refusal(){ # $1 label, $2 reason ERE, $3 command (runs via RUN_IN), $4 op
     [ -z "$VON_ACCEPT" ] || "$VON_ACCEPT"
     die "GATE NOT BINDING: '$label' SUCCEEDED on $VREPO — stop, fix the rulesets before any real work${VDIE_EXTRA:+. $VDIE_EXTRA}"
   fi
-  grep -Eqi -- "$re" <<<"$out" || {
+  # the repository's own name (in its URL) must not be what matches the reason
+  seen="${out//"$VREPO"/<repo>}"; seen="${seen//"$(lc "$VREPO")"/<repo>}"
+  grep -Eqi -- "$re" <<<"$seen" || {
     printf '%s\n' "$out" >&2
     die "GATE NOT BINDING: '$label' was refused, but not for the expected reason (/$re/) — investigate before trusting the gate"
   }
@@ -706,11 +711,15 @@ wait_checks(){ # $1 the gh pr checks command; retries only on "no checks reporte
 owner_ref_sha(){ # $1 heads/<b>: the commit it points at, read as the owner
   gh_read "refs/$1 on $VREPO" api "repos/$VREPO/git/ref/$1" --jq .object.sha
 }
-owner_create_ref(){ # $1 heads/<b> | tags/<t>, $2 sha: created as the owner, and registered for removal before it exists
+owner_create_ref(){ # $1 heads/<b> | tags/<t>, $2 sha: created as the owner, only if absent; registered for removal once it exists
   local err
-  VREFS+=("$1")
+  if err="$(gh api "repos/$VREPO/git/ref/$1" --jq .ref 2>&1 >/dev/null)"; then
+    die "verify: refs/$1 already exists on $VREPO: refusing to use it (re-run verify)"
+  fi
+  grep -q 'HTTP 404' <<<"$err" || die "verify: could not tell whether refs/$1 exists on $VREPO: $err"
   err="$(gh api -X POST "repos/$VREPO/git/refs" -f ref="refs/$1" -f sha="$2" 2>&1 >/dev/null)" \
     || die "verify: could not create refs/$1 on $VREPO as you: $err"
+  VREFS+=("$1")
 }
 verify_cleanup(){ # as the owner: closes verify's open PRs and deletes its refs; warns about, and returns 1 for, anything left
   local n st r err left=()
@@ -782,16 +791,19 @@ verify_rulesets(){ # as the owner, before any push: the fence is exactly its tem
 }
 
 verify_fence(){ # the machine user is refused on fenced refs and merges into the working branch; the default branch is never touched
-  local vb="verify-fence-$VID" sha orphan
+  local vb="zz-agent-new-verify-$VID" sha rewind
   say "verifying the agent fence on $VREPO as $VMU (a throwaway branch and tag $vb, which you create and remove)"
   sha="$(owner_ref_sha "heads/$VDEF")"
   owner_create_ref "heads/$vb" "$sha"
   owner_create_ref "tags/$vb" "$sha"
   detached_commit "$vb" "chore: verify fence"
-  orphan="$(RUN_IN "git commit-tree -m 'chore: verify fence (unrelated history)' 'HEAD^{tree}'" 2>/dev/null)" || orphan=""
-  [[ $orphan =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || die "verify: could not make an unrelated commit (got: '$orphan')"
+  # the non-fast-forward attempt: a one-commit rewind to the default head's parent, or, when the head is a root commit,
+  # an unrelated commit
+  rewind="$(RUN_IN 'git rev-parse -q --verify "HEAD~2^{commit}"' 2>/dev/null)" || rewind=""
+  [ -n "$rewind" ] || rewind="$(RUN_IN "git commit-tree -m 'chore: verify fence (unrelated history)' 'HEAD^{tree}'" 2>/dev/null)" || rewind=""
+  [[ $rewind =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || die "verify: could not find a commit for the non-fast-forward attempt (got: '$rewind')"
   expect_refusal "fast-forward push to $vb"   "$FENCE_RE" "git push $VURL HEAD:refs/heads/$vb"
-  expect_refusal "force-push to $vb"          "$FENCE_RE" "git push --force $VURL $orphan:refs/heads/$vb"
+  expect_refusal "force-push to $vb"          "$FENCE_RE" "git push --force $VURL $rewind:refs/heads/$vb"
   expect_refusal "delete $vb"                 "$FENCE_RE" "git push $VURL --delete refs/heads/$vb"
   expect_refusal "create a branch outside the free names" "$FENCE_RE" "git push $VURL HEAD:refs/heads/$vb-new" "heads/$vb-new"
   expect_refusal "create a tag"               "$FENCE_RE" "git push $VURL HEAD:refs/tags/$vb-new" "tags/$vb-new"
@@ -854,11 +866,11 @@ restore_work_branch(){ # a delete or force-push of the working branch was accept
   fi
 }
 
-gate_restore_hint(){ # an attempt on the default branch was accepted: how you put the branch back
+gate_restore_hint(){ # an attempt on the default branch was accepted: what is now on it
   local now
   now="$(gh api "repos/$VREPO/git/ref/heads/$VDEF" --jq .object.sha 2>/dev/null)" || now=""
   if [ "$now" = "$VGATE_OLD" ]; then VDIE_EXTRA="$VDEF did not move (still $VGATE_OLD)"; return 0; fi
-  VDIE_EXTRA="$VDEF was $VGATE_OLD before this run. To put it back, as yourself, from a clone that has that commit (git fetch first): git push --force-with-lease=refs/heads/$VDEF:${now:-<its current sha>} $VURL $VGATE_OLD:refs/heads/$VDEF"
+  VDIE_EXTRA="$VDEF now holds verify's empty commit ${now:-(could not read its sha)} on top of $VGATE_OLD. It changes no files. Removing it needs a revert PR, or the ruleset switched off first"
 }
 verify_main_gate(){ # after verify_fence: the review gate on the default branch binds the machine user
   local n
@@ -900,7 +912,7 @@ github_repo(){ # $1 a GitHub remote URL (https, ssh or scp form) -> prints owner
   repo_arg_ok "$r" || return 1
   printf '%s' "$r"
 }
-url_shown(){ printf '%s' "$1" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://)[^/@]*@#\1#'; }   # a URL without user[:password]@, for messages
+url_shown(){ printf '%s' "$1" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://)[^/]*@#\1#'; }   # a URL without user[:password]@, for messages
 read_origin_repo(){ # sets VORIGIN: the owner/repo origin points at; fetch and push URL must agree, and it must be https
   local url purl p
   url="$(RUN_IN 'git remote get-url origin')" || die "verify: could not read origin's URL in $VTARGET"
@@ -914,6 +926,7 @@ verify_owner_side(){ # $1 owner/repo: as the owner, GitHub's spelling and defaul
   read_repo_info "$1"
   [ "$RI_ADMIN" = true ] || die "verify: you are not an admin of $RI_NAME: verify creates and removes throwaway refs there as you"
   VREPO="$RI_NAME" VDEF="$RI_DEFAULT" VURL="https://github.com/$RI_NAME.git"
+  default_in_fence "$VREPO" "$VDEF"
 }
 
 # RUN_IN runs a command as the machine user: in the temporary clone (repo mode) or in the container (project mode).
@@ -922,7 +935,7 @@ cmd_verify(){ # $1 <project> | <owner>/<repo>, $2 optional: the repository the c
   VTARGET="$1"; local want="${2:-}" who
   VMU="$(machine_user)"
   OWNER="$(preflight_owner)"
-  VID="$(date +%s)-$$" VPROJ=""
+  VID="$(date +%s)-$$-$RANDOM" VPROJ=""
   if [[ "$VTARGET" == */* ]]; then
     [ -n "$VAULT" ] || die "verify <owner>/<repo> needs --vault <op-vault> (the project vault holding github-agent)"
     repo_arg_ok "$VTARGET" || die "verify wants <owner>/<repo> (got: $VTARGET)"
