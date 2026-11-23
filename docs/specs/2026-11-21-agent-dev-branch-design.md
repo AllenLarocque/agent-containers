@@ -110,8 +110,8 @@ and refuses a repo with no commits. `--no-working-branch` skips it.
 ### The working branch's ruleset
 
 `agent-working-branch` applies to `refs/heads/allen-dev` only, with the rules deletion and
-non_fast_forward and no bypass, so neither the agent nor the owner can delete `allen-dev` or rewrite
-its history. `agent-new protect` creates it right after the working branch exists (skipped with
+non_fast_forward. It stops the agent's account from deleting `allen-dev` or rewriting its history;
+the owner, as repository admin, can bypass it (admin role 5, mode always). `agent-new protect` creates it right after the working branch exists (skipped with
 `--no-working-branch`) and before it turns on automatic deletion of merged branches, which would
 otherwise delete `allen-dev` when a promotion PR from it is merged.
 
@@ -121,8 +121,8 @@ otherwise delete `allen-dev` when a promotion PR from it is merged.
   (`delete_branch_on_merge`), so a branch merged into `allen-dev` is deleted at merge time.
 - An `upstream/` branch is kept until upstream merges or closes its PR. The fork check lists the
   ones that can go.
-- The mirrors are fenced, so the agent cannot delete them. `allen-dev` cannot be deleted by
-  anyone: `agent-working-branch`.
+- The mirrors are fenced, so the agent cannot delete them. The agent's account cannot delete
+  `allen-dev`: `agent-working-branch`.
 - The agent decides by the PR's state, never by `git branch --merged` (after a squash git reports
   the branch as unmerged), and never deletes a branch whose PR is not merged without asking.
 

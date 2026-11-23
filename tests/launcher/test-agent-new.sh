@@ -441,7 +441,7 @@ check "  tags ruleset has empty exclude"      grep -q '"exclude": *\[\]' "$STATE
 check "  tags ruleset bypass is always"       grep -q '"bypass_mode": *"always"' "$STATE/ruleset-posted-agent-fence-tags"
 
 # the expected strings agent-new builds in bash must equal what its own NORM_JQ makes of each posted template
-WB_NORM='branch|active||deletion,non_fast_forward|pr:-||refs:refs/heads/allen-dev/|strict:-||upd:-'
+WB_NORM='branch|active|RepositoryRole:5:always|deletion,non_fast_forward|pr:-||refs:refs/heads/allen-dev/|strict:-||upd:-'
 for n in agent-fence agent-fence-tags protect-main agent-working-branch; do
   case "$n" in agent-fence) want="$FENCE_NORM" ;; agent-fence-tags) want="$TAGS_NORM" ;; agent-working-branch) want="$WB_NORM" ;; *) want="$EXPECT_NORM" ;; esac
   check "template $n: posted JSON projects to the expected string" test "$(jq -r "$NORM_JQ_SRC" "$STATE/ruleset-posted-$n")" = "$want"
@@ -476,7 +476,7 @@ OUT=$(run protect allen/repo1 --vault agent-p1 2>&1); rc=$?
 check "fresh repo: agent-working-branch POSTed"         bash -c '[ "$1" -eq 0 ] && [ -s "$2" ]' _ "$rc" "$STATE/ruleset-posted-agent-working-branch"
 check "  it covers exactly refs/heads/allen-dev"        grep -q '"include": \["refs/heads/allen-dev"\], "exclude": \[\]' "$STATE/ruleset-posted-agent-working-branch"
 check "  rules: deletion and non_fast_forward only"     bash -c 'grep -q "\"type\": \"deletion\"" "$1" && grep -q "\"type\": \"non_fast_forward\"" "$1" && [ "$(grep -o "\"type\":" "$1" | wc -l)" -eq 2 ]' _ "$STATE/ruleset-posted-agent-working-branch"
-check "  nobody bypasses it"                            grep -q '"bypass_actors": \[\]' "$STATE/ruleset-posted-agent-working-branch"
+check "  the repository admin bypasses it, mode always" grep -q '"bypass_actors": \[{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}\]' "$STATE/ruleset-posted-agent-working-branch"
 check "  after allen-dev is created, before auto-delete is switched on" \
   bash -c 'a=$(grep -n "POST repos/allen/repo1/git/refs" "$1" | cut -d: -f1); b=$(grep -n "POST repos/allen/repo1/rulesets" "$1" | tail -n1 | cut -d: -f1); c=$(grep -n "PATCH repos/allen/repo1 -F delete_branch_on_merge" "$1" | cut -d: -f1); [ "$a" -lt "$b" ] && [ "$b" -lt "$c" ]' _ "$GHLOG"
 newstate; touch "$STATE/collab" "$STATE/has-allen-dev"
@@ -488,9 +488,10 @@ check "  not POSTed"                                    test ! -f "$STATE/rulese
 newstate; touch "$STATE/collab" "$STATE/has-allen-dev"; echo 10 > "$STATE/ruleset-id-agent-working-branch"; echo "$WB_NORM" > "$STATE/ruleset-norm-agent-working-branch"
 OUT=$(run protect allen/repo1 --vault agent-p1 2>&1)
 check "live working-branch ruleset equals the template: SKIP" grep -q 'SKIP.*ruleset agent-working-branch' <<<"$OUT"
-newstate; touch "$STATE/collab" "$STATE/has-allen-dev"; echo 10 > "$STATE/ruleset-id-agent-working-branch"; echo "${WB_NORM/'branch|active||'/'branch|active|RepositoryRole:5:always|'}" > "$STATE/ruleset-norm-agent-working-branch"
-refuses "working-branch ruleset with an admin bypass: refused, not modified" 'ruleset agent-working-branch on allen/repo1 differs from the template' run protect allen/repo1 --vault agent-p1
+newstate; touch "$STATE/collab" "$STATE/has-allen-dev"; echo 10 > "$STATE/ruleset-id-agent-working-branch"; echo "${WB_NORM/'branch|active|RepositoryRole:5:always|'/'branch|active||'}" > "$STATE/ruleset-norm-agent-working-branch"
+refuses "working-branch ruleset with an EMPTY bypass list: refused, not modified" 'ruleset agent-working-branch on allen/repo1 differs from the template' run protect allen/repo1 --vault agent-p1
 check "  no write to it"                                lacks "$GHLOG" 'api -X (PUT|DELETE) repos/allen/repo1/rulesets'
+check "  nothing POSTed"                                test ! -f "$STATE/ruleset-posted-agent-working-branch"
 
 echo "== fence: protect =="
 newstate; touch "$STATE/collab"; echo master > "$STATE/default-branch"

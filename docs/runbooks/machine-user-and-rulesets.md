@@ -51,15 +51,15 @@ The list limits the agent only. You may name your own branches anything.
 
 ### The working branch's ruleset
 
-A third ruleset, `agent-working-branch`, applies to `allen-dev` alone. It forbids deleting the branch and force-pushing it, and **nobody bypasses it, you included**: commits are added to `allen-dev` (by merging PRs, or by your own fast-forward pushes), never removed. It also keeps `allen-dev` in place when you merge a promotion PR from it, which "Automatically delete head branches" would otherwise delete.
+A third ruleset, `agent-working-branch`, applies to `allen-dev` alone. It stops the agent's account from deleting `allen-dev` or rewriting its history; you, as repository admin, can bypass it. It also keeps `allen-dev` in place when you merge a promotion PR from it, which "Automatically delete head branches" would otherwise delete.
 
 ## Resetting `allen-dev`
 
-Nobody can force-push or delete `allen-dev`, you included. To reset it on purpose:
+You can force-push `allen-dev` directly (the admin bypass allows it); no ruleset needs to be deleted:
 
-1. Repo → Settings → Rules → Rulesets → `agent-working-branch` → **Delete ruleset** (delete it; do not just disable it).
-2. Reset the branch as you need (for example, force-push it to the commit you want).
-3. Re-run `agent-new protect <owner>/<repo>`. It recreates `agent-working-branch`.
+```
+git push --force-with-lease origin <commit>:allen-dev
+```
 
 ## Branch deletion
 
@@ -159,7 +159,8 @@ Do this order the first time, on the repos you already have.
 1. **Start with a repo you own outright** (not a fork, not `agent-containers`). **Migrate first:** `verify` refuses to run while an older `protect-fork` or `protect-fork-tags` ruleset exists, so convert those first: `agent-new protect <owner>/<repo> --migrate --vault agent-<project>`, then `agent-new verify <owner>/<repo> --vault agent-<project>`.
 2. **Note GitHub's exact refusal text for each check on the first repo.** `verify` prints GitHub's message only when a check fails; on success it prints just `OK (refused as expected): <label>`. To record the exact texts on a clean first run, use the by-hand commands in section 6.1. If `verify` stops with "not for the expected reason", that is a finding to report, not something to work around.
 3. **Then take the other repos one at a time.** For each: `agent-new protect <owner>/<repo> --migrate --vault agent-<project>`, then `agent-new verify <owner>/<repo> --vault agent-<project>`; only when `FENCE VERIFIED` has printed, `agent-new protect <owner>/<repo> --retire-main-gate` and answer the delete question. Move to the next repo after that.
-4. **`agent-containers` keeps its main gate:** `agent-new protect <owner>/agent-containers --main-gate --require build-test --require lint`, never `--retire-main-gate`.
+4. **After the first promotion on the first repository** (merging the `allen-dev` pull request into the default branch), check that `allen-dev` still exists: `gh api repos/<owner>/<repo>/branches/allen-dev --jq .name`. If it is gone, re-run `agent-new protect <owner>/<repo>` to recreate it, and report it before promoting on any other repository.
+5. **`agent-containers` keeps its main gate:** `agent-new protect <owner>/agent-containers --main-gate --require build-test --require lint`, never `--retire-main-gate`.
 
 The numbered steps that follow are the by-hand procedure. Step 1 is done once, step 3 once per project, steps 2, 4 and 5 per repo (`agent-new protect` does 2.1, 4 and 5), step 6 per project after its container is up, and step 7 once, for `agent-containers`.
 
@@ -253,7 +254,7 @@ Repo → Settings → Rules → Rulesets → New ruleset → **New branch rulese
 ### 4.4 `agent-working-branch` (New branch ruleset)
 
 1. Ruleset name: `agent-working-branch`. Enforcement status: **Active**.
-2. **Bypass list:** leave it empty.
+2. **Bypass list:** Add bypass → **Repository admin** role → bypass mode **Always allow**.
 3. Target branches → Add target → **Include by pattern** → `allen-dev`.
 4. Tick: **Restrict deletions**, **Block force pushes**. Tick nothing else.
 5. Create.

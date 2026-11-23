@@ -412,11 +412,11 @@ JSON
 }
 JSON
       ;;
-    agent-working-branch)   # nobody bypasses it, you included: allen-dev is never deleted or rewritten
+    agent-working-branch)   # the agent's account cannot delete allen-dev or rewrite it; the repo admin (the owner) bypasses
       cat <<JSON
 {
   "name": "agent-working-branch", "target": "branch", "enforcement": "active",
-  "bypass_actors": [],
+  "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}],
   "conditions": {"ref_name": {"include": ["refs/heads/$WORK_BRANCH"], "exclude": []}},
   "rules": [{"type": "deletion"}, {"type": "non_fast_forward"}]
 }
@@ -437,7 +437,7 @@ ruleset_norm_expected(){ # $1 template name; what NORM_JQ makes of that template
     agent-fence-tags)
       printf 'tag|active|RepositoryRole:5:always|creation,deletion,update|pr:-||refs:~ALL/|strict:-||upd:false' ;;
     agent-working-branch)
-      printf 'branch|active||deletion,non_fast_forward|pr:-||refs:refs/heads/%s/|strict:-||upd:-' "$WORK_BRANCH" ;;
+      printf 'branch|active|RepositoryRole:5:always|deletion,non_fast_forward|pr:-||refs:refs/heads/%s/|strict:-||upd:-' "$WORK_BRANCH" ;;
     *) die "no ruleset template named $1" ;;
   esac
 }
