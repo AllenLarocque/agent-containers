@@ -5,9 +5,10 @@ This folder is **not copied into your project by hand.** `bin/agent-up init` use
 | Seed | Copied to | Who edits it |
 |---|---|---|
 | `config/compose.yaml`, `config/project.env`, `config/allowlist` (+ `config/allowlist.bio-example` for `--image bio`) | `~/.config/agent-containers/<project>/` | you, the owner. **Never mounted** into the container, except `allowlist` (read-only) and, with `T3_CONNECT=1` or `publish` / `RSTUDIO=1` / `FTP_HOSTS`, the generated switches, RStudio password and FTP host list (read-only) |
-| `repo/.github/CODEOWNERS`, `repo/.github/workflows/gitleaks.yml`, `repo/.gitignore` | the project folder (only where absent) | you; commit them |
+| `repo/.github/CODEOWNERS`, `repo/.github/workflows/gitleaks.yml`, `repo/.gitignore` | the project folder (only where absent) | you; commit them. `CODEOWNERS` matters only on a repo with the main gate (`agent-containers`); the agent fence does not use it |
 | `config/compose.research.yaml` | `~/.config/agent-containers/research/compose.yaml` (`init --profile research`) | you |
 | `config/compose.fetcher.yaml`, `config/fetcher-seccomp.json` | `~/.config/agent-containers/fetcher/` (`init --profile fetcher`) | you (`compose.yaml`); the seccomp profile only by copying it again from here |
+| `instructions/builder.md` | mounted **read-only** for every builder as Claude's managed `CLAUDE.md` and Codex's `AGENTS.md` (with `builder-research.md` appended when `RESEARCH=1`): the branch workflow, i.e. work on `<prefix>/<name>` branches and squash-merge into `allen-dev` | change it here (PR) |
 | `instructions/research.md`, `instructions/builder-research.md` | `<config>/.generated/agent-instructions.md` at every `agent-up` run, mounted **read-only** as Claude's managed `CLAUDE.md` and Codex's `AGENTS.md` (research container; builders with `RESEARCH=1`) | change them here (PR) |
 
 **Why outside the project:** the project folder is the agent's read-write workspace. Anything
@@ -228,6 +229,8 @@ TAILSCALE_HOST=<machine>.<tailnet>.ts.net
 
 `agent-new` also reads `MACHINE_USER=<machine-user-login>` from this file (docs/runbooks/new-project.md).
 
+**GitHub wiring.** `agent-new protect <owner>/<repo>...` sets a repo up so that the machine user can write only to branches with an allowed prefix and to `allen-dev` (two rulesets, `agent-fence` and `agent-fence-tags`; it also creates `allen-dev` and turns on deletion of merged branches), and `agent-new verify <project>` proves it as the machine user (it should end with `FENCE VERIFIED`). The model, the rollout order and the main gate that `agent-containers` keeps (`--main-gate`) are in docs/runbooks/machine-user-and-rulesets.md; the daily routine is in docs/runbooks/branch-workflow.md.
+
 **Per project:**
 1. `agent-up up <project>` prints the command, e.g.
    `tailscale serve --bg --https=8442 3773`. Run it once in Windows PowerShell (Tailscale runs on the
@@ -405,7 +408,7 @@ Docs, and Drive, mail etc. if you enabled them), so a page that manipulates it c
 docs or connector data and send them out (open egress), or put its own text into a doc it writes for
 you. Its instructions forbid both; they are the only control. Keep the connectors on your claude.ai
 account to the ones you need (**not the GitHub connector**: it acts as you, the admin, so any
-container that reaches it could bypass the machine user and the merge gate), and read a research doc before you share it; treat `~/agent-research/` as untrusted on the host too (never run or
+container that reaches it could bypass the machine user and the fence), and read a research doc before you share it; treat `~/agent-research/` as untrusted on the host too (never run or
 `source` anything from it, and beware tools that execute content).
 
 **Upgrading a builder created before the research container:** nothing to do to keep it off

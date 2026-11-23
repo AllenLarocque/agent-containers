@@ -1047,7 +1047,7 @@ bind_yaml(){ # $1 source, $2 target, $3 ro|rw
   if [ "$3" = ro ]; then echo "        read_only: true"; fi
   echo "        bind: {create_host_path: false}"
 }
-write_research(){ # the research profile's switch + instructions + exchange; a builder's RESEARCH=1 mounts; else nothing
+write_research(){ # the research profile's switch + instructions + exchange; a builder's instructions, plus its RESEARCH=1 mounts
   local g="$1/.generated" rd p name; name="$(basename "$1")"
   mkdir -p "$g"; chmod 700 "$g"
   rd="$(research_dir "$1")"; if [ -d "$rd" ]; then rd="$(cd "$rd" && pwd -P)"; fi
@@ -1097,17 +1097,21 @@ write_research(){ # the research profile's switch + instructions + exchange; a b
       bind_yaml "$rd/$name/briefs" /research/briefs rw
       bind_yaml "$rd/$name/reports" /research/reports ro
       bind_yaml "$rd/$name/downloads" /research/downloads ro
-    else
-      echo "  agent: {}"
+    else   # a builder without research: the instructions only, no research folder
+      echo "  agent:"
+      echo "    volumes:"
+      echo "      # the owner's instructions (the branch workflow), read-only"
+      bind_yaml ./.generated/agent-instructions.md /etc/claude-code/CLAUDE.md ro
+      bind_yaml ./.generated/agent-instructions.md /home/agent/.codex/AGENTS.md ro
     fi
   } > "$g/research.yaml"
   if [ "$(profile "$1")" = research ]; then echo "PROFILE=research" > "$g/profile"; else rm -f "$g/profile"; fi
   if [ "$(profile "$1")" = research ]; then
     cp "$SEEDS/instructions/research.md" "$g/agent-instructions.md"; chmod 644 "$g/agent-instructions.md"
-  elif research_on "$1"; then
-    cp "$SEEDS/instructions/builder-research.md" "$g/agent-instructions.md"; chmod 644 "$g/agent-instructions.md"
-  else
-    rm -f "$g/agent-instructions.md"
+  else   # a builder: the branch workflow, then the research rules when research is on
+    { cat "$SEEDS/instructions/builder.md"
+      if research_on "$1"; then echo; cat "$SEEDS/instructions/builder-research.md"; fi
+    } > "$g/agent-instructions.md"; chmod 644 "$g/agent-instructions.md"
   fi
 }
 write_rstudio(){ # RSTUDIO=1 (rstudio_on): port, volume, read-only switch + password. Otherwise: nothing.

@@ -48,10 +48,17 @@ MACHINE_USER=<machine-user-login>
 3. **Run the vault runbook** (when storing the GitHub token with `read -rs`, run that line ON ITS OWN: pasted together with the next line, `read` swallows that line as the "token"): [1password-project-vault.md](1password-project-vault.md) (vault,
    service account, host token). `project.env` already names the vault `agent-<project>`.
 4. **Machine user, "set up" half (before `agent-up up`):**
-   [machine-user-and-rulesets.md](machine-user-and-rulesets.md) steps 2 to 4.
+   [machine-user-and-rulesets.md](machine-user-and-rulesets.md) steps 2 to 5, or
+   `agent-new protect <owner>/<repo> --vault agent-<project>`. That one command creates the two fence
+   rulesets (`agent-fence`, `agent-fence-tags`), creates the working branch `allen-dev`, turns on
+   automatic deletion of merged branches, and invites the machine user last. It sets up only repos
+   you own. An existing repo that still has the older rulesets is moved over with `--migrate`, then
+   `verify`, then `--retire-main-gate`, following the rollout order in that runbook.
    - In the project repo: replace `@OWNER` in `.github/CODEOWNERS`, then commit it together with
-     `.github/workflows/gitleaks.yml` and `.gitignore`.
-   - Push the project's `.github/` changes first and let CI run once: GitHub only offers a check for the ruleset after it has run. Then add `gitleaks` (and `build-test`, once the project has CI) as required checks, and re-run the gate verification (step 8) so the checks are covered.
+     `.github/workflows/gitleaks.yml` and `.gitignore`. (The fence does not use `CODEOWNERS`; it
+     only matters on a repo with the main gate, which is `agent-containers`.)
+   - Push the project's `.github/` changes and let CI run once, so that the `gitleaks` workflow has run.
+     It is a required check only where the main gate is used.
 5. **Project domains:** add the extra domains the project needs to
    `~/.config/agent-containers/<project>/allowlist`.
    - One domain per line; a domain also matches its subdomains.
@@ -73,9 +80,12 @@ MACHINE_USER=<machine-user-login>
 
    With no `OP_SERVICE_ACCOUNT_TOKEN` set, `agent-up up` checks your 1Password sign-in and reads
    **this** project's token itself (see the vault runbook).
-8. **Machine user, "verify the gate" (after `agent-up up`):** run
-   [machine-user-and-rulesets.md](machine-user-and-rulesets.md) step 6 inside the container
-   (`agent-up shell <project>`). Don't start real work until it passes.
+8. **Machine user, "verify the fence" (after `agent-up up`):** run `agent-new verify <project>`
+   (or follow [machine-user-and-rulesets.md](machine-user-and-rulesets.md) step 6.1 by hand inside
+   `agent-up shell <project>`). It tries the forbidden pushes and merges as the machine user, on a
+   throwaway branch and tag it creates and removes, and should end with `FENCE VERIFIED on
+   <owner>/<repo>`. Don't start real work until it does. The agent's daily
+   routine on `allen-dev` is in [branch-workflow.md](branch-workflow.md).
 9. **Attach and work:**
    - VS Code: **Dev Containers: Attach to Running Container…** → `<project>-agent-1`, then open
      `/workspace`.

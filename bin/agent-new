@@ -3,8 +3,13 @@
 # (docs/specs/2026-10-15-agent-new-design.md). Counterpart of bin/agent-up: agent-up runs the
 # sandbox with a project's read-only token; agent-new runs AS THE OWNER (gh repo admin, op
 # session) and automates docs/runbooks/new-project.md + machine-user-and-rulesets.md §2-4, §6.
+case $- in *x*) printf 'agent-new: %s\n' "refusing to run with shell tracing on (it would print secrets)" >&2; exit 1 ;; esac
 set -euo pipefail
 unset OP_SERVICE_ACCOUNT_TOKEN # agent-new acts as the owner; the SA token is only ever set explicitly, per command
+# every variable that ever holds a token starts unset and unexported: an inherited export attribute would otherwise
+# carry a value assigned later (a local of the same name included) into every child process
+set +a
+unset MU_TOK VTOK tok ghtok sat s REPLY
 
 HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 CFG_ROOT="${AGENT_CONTAINERS_CONFIG:-$HOME/.config/agent-containers}"
@@ -30,8 +35,10 @@ usage(){
 usage:
   agent-new project <folder> [--image base|gis|bio] [--public] [--no-research]
                              [--t3 publish|1|0] [--token-from <vault>] [--machine-user <user>]
-  agent-new protect <owner>/<repo> [--machine-user <user>] [--vault <op-vault>] [--require <check>]...
-  agent-new verify  <project> | <owner>/<repo> [--vault <op-vault>]
+  agent-new protect <owner>/<repo>... [--machine-user <user>] [--vault <op-vault>]
+                             [--main-gate [--require <check>]...] [--no-working-branch]
+                             [--migrate] [--retire-main-gate]
+  agent-new verify  <project> | <owner>/<repo> [--vault <op-vault>] [--main-gate [--require <check>]...]
 Runs AS THE OWNER. The runbooks in docs/runbooks/ remain the reference procedure.
 USAGE
   exit 2
@@ -46,7 +53,17 @@ ts_port(){ # $1 project.conf -> the Tailscale Serve HTTPS port (override or form
   printf '%s' "$v"
 }
 normalise(){ printf '%s' "$1" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9_-]/-/g; s/^[^a-z0-9]*//'; }
+lc(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }   # GitHub names compare case-insensitively
+REPO_RE='^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+$'
+repo_arg_ok(){ [[ $1 =~ $REPO_RE ]] && [[ ${1#*/} != . && ${1#*/} != .. ]]; }
+gh_read(){ # $1 what is read (for the message), then gh's arguments: prints gh's output; dies with gh's own error
+  local what="$1" out rc=0 errf; shift; errf="$(mktemp)"
+  out="$(gh "$@" 2>"$errf")" || rc=$?
+  if [ "$rc" -ne 0 ]; then out="$(cat "$errf")${out:+ $out}"; rm -f "$errf"; die "could not read $what: $out"; fi
+  rm -f "$errf"; printf '%s' "$out"
+}
 
+MAIN_GATE=0 WORK_BRANCH_ON=1 MIGRATE=0 RETIRE=0 REQUIRE_GIVEN=0 MU_TOK=""
 MACHINE_USER_FLAG="" VAULT="" IMAGE="" VISIBILITY=private RESEARCH=1 T3MODE=publish TOKEN_FROM=""
 REQUIRE_CHECKS=(gitleaks)
 
@@ -60,8 +77,9 @@ preflight_owner(){ # prints the owner login; dies if gh is absent/anonymous/the 
   local who mu
   who="$(gh api user --jq .login 2>/dev/null)" || die "gh is not logged in as you (gh auth login)"
   [ -n "$who" ] || die "gh is not logged in as you (gh auth login)"
-  mu="$(machine_user)"
-  [ "$who" != "$mu" ] || die "gh is logged in as the machine user ($who): agent-new runs as the OWNER"
+  # this runs inside $(...), where errexit is off: a failed lookup must end the run here, not return an owner
+  mu="$(machine_user)" || exit 1
+  [ "$(lc "$who")" != "$(lc "$mu")" ] || die "gh is logged in as the machine user ($who): agent-new runs as the OWNER"
   printf '%s' "$who"
 }
 
@@ -259,8 +277,10 @@ EOF
   cat <<EOF
   agent-up pair $PROJ           # pairing code for the apps
   phone (Tailscale on): https://${host:-<machine>.<tailnet>.ts.net}:$port
-Close or approve-and-merge the verification PR in the browser. Allowlist extra domains in
-$CFG_ROOT/$PROJ/allowlist as the project needs them, then: agent-up up $PROJ
+EOF
+  [ "$MAIN_GATE" -eq 0 ] || echo "Close or approve-and-merge the verification PR in the browser."
+  cat <<EOF
+Allowlist extra domains in $CFG_ROOT/$PROJ/allowlist as the project needs them, then: agent-up up $PROJ
 EOF
 }
 cmd_project(){
@@ -284,7 +304,7 @@ cmd_project(){
   cmd_protect "$REPO"
   project_tailscale
   project_up
-  cmd_verify "$PROJ"
+  cmd_verify "$PROJ" "$REPO"
   project_checklist
 }
 
@@ -293,28 +313,40 @@ mu_token(){ # machine-user PAT from the project vault; owner op session; ONE cal
   op read "op://$VAULT/github-agent/token"
 }
 
-protect_collaborator(){ # $1 owner/repo
-  local repo="$1" mu; mu="$(machine_user)"
-  if gh api "repos/$repo/collaborators/$mu" >/dev/null 2>&1; then
-    skip "$mu is a collaborator on $repo"; return
+mu_token_checked(){ # sets MU_TOK: the machine user's token from the vault, once per run, after checking whose it is
+  local who mu
+  mu="$(machine_user)"
+  MU_TOK="$(mu_token)" || die "could not read op://$VAULT/github-agent/token"
+  [ -n "$MU_TOK" ] || die "op://$VAULT/github-agent/token is empty"
+  who="$(GH_TOKEN="$MU_TOK" gh api user --jq .login)" || die "the token in op://$VAULT/github-agent/token does not work"
+  [ "$(lc "$who")" = "$(lc "$mu")" ] \
+    || die "the token in op://$VAULT/github-agent/token is for '$who', not the machine user '$mu': refusing to accept invitations with it"
+}
+
+protect_collaborator(){ # $1 owner/repo: the last step of protect, so a failure before it leaves no new access
+  local repo="$1" mu perm err; mu="$(machine_user)"
+  if err="$(gh api "repos/$repo/collaborators/$mu" 2>&1 >/dev/null)"; then
+    perm="$(gh_read "$mu's permission on $repo" api "repos/$repo/collaborators/$mu/permission" --jq .permission)"
+    [ "$perm" = write ] \
+      || die "$mu has '$perm' access to $repo: the account must have Write, not Admin or Maintain (Settings -> Collaborators), then re-run"
+    skip "$mu is a collaborator on $repo (Write)"; return
   fi
+  grep -q 'HTTP 404' <<<"$err" || die "could not tell whether $mu is a collaborator on $repo: $err"
   say "inviting $mu to $repo (machine-user-and-rulesets.md step 2.1)"
-  gh api -X PUT "repos/$repo/collaborators/$mu" >/dev/null
+  gh api -X PUT "repos/$repo/collaborators/$mu" -f permission=push >/dev/null
   if [ -n "$VAULT" ]; then
-    say "accepting the invitation as $mu (token read from op://$VAULT/github-agent/token for this step only)"
-    local tok inv
-    tok="$(mu_token)"
-    inv="$(GH_TOKEN="$tok" gh api /user/repository_invitations \
-           --jq ".[] | select(.repository.full_name==\"$repo\") | .id" | head -n1)"
+    say "accepting the invitation as $mu (its token from op://$VAULT/github-agent/token, for this step only)"
+    local inv lrepo; lrepo="$(lc "$repo")"
+    inv="$(GH_TOKEN="$MU_TOK" gh api /user/repository_invitations \
+           --jq ".[] | select((.repository.full_name | ascii_downcase) == \"$lrepo\") | .id" | head -n1)"
     [ -n "$inv" ] || die "no invitation for $repo visible to $mu (invite pending elsewhere?)"
-    GH_TOKEN="$tok" gh api -X PATCH "/user/repository_invitations/$inv" >/dev/null
-    tok=""
+    GH_TOKEN="$MU_TOK" gh api -X PATCH "/user/repository_invitations/$inv" >/dev/null
   else
     warn "no --vault given: accept the invitation as $mu yourself (https://github.com/$repo/invitations) or re-run with --vault agent-<project>"
   fi
 }
 
-NORM_JQ='[.enforcement,
+NORM_JQ='[.target, .enforcement,
  (.bypass_actors | map("\(.actor_type):\(.actor_id):\(.bypass_mode)") | sort | join(",")),
  (.rules | map(.type) | sort | join(",")),
  ((.rules[] | select(.type=="pull_request") | .parameters |
@@ -322,14 +354,25 @@ NORM_JQ='[.enforcement,
  ((.rules[] | select(.type=="required_status_checks") | .parameters.required_status_checks | map(.context) | sort | join("+")) // ""),
  ((.conditions.ref_name | "refs:\(.include|sort|join(","))/\(.exclude|sort|join(","))") // "refs:-"),
  ((.rules[] | select(.type=="required_status_checks") | .parameters | "strict:\(.strict_required_status_checks_policy)") // "strict:-"),
- ((.rules[] | select(.type=="pull_request") | .parameters.allowed_merge_methods | sort | join(",")) // "")
+ ((.rules[] | select(.type=="pull_request") | .parameters.allowed_merge_methods | sort | join(",")) // ""),
+ ((.rules[] | select(.type=="update") | "upd:\(.parameters.update_allows_fetch_and_merge // false)") // "upd:-")
 ] | join("|")'
 
+FREE_PREFIXES=(fix feature chore docs test ci refactor perf revert upstream sync experiment)
+WORK_BRANCH=allen-dev
+
 checks_sorted(){ printf '%s\n' "${REQUIRE_CHECKS[@]}" | LC_ALL=C sort -u; }
-ruleset_json(){
+fence_excludes(){ # the branch names the fence leaves free, as a JSON list body
+  local out="\"refs/heads/$WORK_BRANCH\"" p
+  for p in "${FREE_PREFIXES[@]}"; do out+=", \"refs/heads/$p/**\""; done
+  printf '%s' "$out"
+}
+ruleset_json(){ # $1 protect-main | agent-fence | agent-fence-tags | agent-working-branch
   local checks="" c
-  while IFS= read -r c; do checks+="{\"context\": \"$c\"},"; done < <(checks_sorted)
-  cat <<JSON
+  case "$1" in
+    protect-main)
+      while IFS= read -r c; do checks+="{\"context\": \"$c\"},"; done < <(checks_sorted)
+      cat <<JSON
 {
   "name": "protect-main", "target": "branch", "enforcement": "active",
   "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}],
@@ -348,32 +391,85 @@ ruleset_json(){
   ]
 }
 JSON
+      ;;
+    agent-fence)
+      cat <<JSON
+{
+  "name": "agent-fence", "target": "branch", "enforcement": "active",
+  "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}],
+  "conditions": {"ref_name": {"include": ["~ALL"], "exclude": [$(fence_excludes)]}},
+  "rules": [{"type": "creation"}, {"type": "update"}, {"type": "deletion"}, {"type": "non_fast_forward"}]
 }
-ruleset_norm_expected(){
-  printf 'active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:false|%s|refs:~DEFAULT_BRANCH/|strict:false|merge,rebase,squash' \
-    "$(checks_sorted | paste -sd+ -)"
+JSON
+      ;;
+    agent-fence-tags)
+      cat <<'JSON'
+{
+  "name": "agent-fence-tags", "target": "tag", "enforcement": "active",
+  "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}],
+  "conditions": {"ref_name": {"include": ["~ALL"], "exclude": []}},
+  "rules": [{"type": "creation"}, {"type": "update"}, {"type": "deletion"}]
 }
-protect_ruleset(){ # $1 owner/repo
-  local repo="$1" id have
-  local out rc=0 errf; errf="$(mktemp)"
+JSON
+      ;;
+    agent-working-branch)   # the agent's account cannot delete allen-dev or rewrite it; the repo admin (the owner) bypasses
+      cat <<JSON
+{
+  "name": "agent-working-branch", "target": "branch", "enforcement": "active",
+  "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}],
+  "conditions": {"ref_name": {"include": ["refs/heads/$WORK_BRANCH"], "exclude": []}},
+  "rules": [{"type": "deletion"}, {"type": "non_fast_forward"}]
+}
+JSON
+      ;;
+    *) die "no ruleset template named $1" ;;
+  esac
+}
+ruleset_norm_expected(){ # $1 template name; what NORM_JQ makes of that template's live ruleset
+  local ex
+  case "$1" in
+    protect-main)
+      printf 'branch|active|RepositoryRole:5:pull_request|deletion,non_fast_forward,pull_request,required_status_checks|pr:1:true:true:false|%s|refs:~DEFAULT_BRANCH/|strict:false|merge,rebase,squash|upd:-' \
+        "$(checks_sorted | paste -sd+ -)" ;;
+    agent-fence)
+      ex="$({ printf 'refs/heads/%s\n' "$WORK_BRANCH"; printf 'refs/heads/%s/**\n' "${FREE_PREFIXES[@]}"; } | LC_ALL=C sort | paste -sd, -)"
+      printf 'branch|active|RepositoryRole:5:always|creation,deletion,non_fast_forward,update|pr:-||refs:~ALL/%s|strict:-||upd:false' "$ex" ;;
+    agent-fence-tags)
+      printf 'tag|active|RepositoryRole:5:always|creation,deletion,update|pr:-||refs:~ALL/|strict:-||upd:false' ;;
+    agent-working-branch)
+      printf 'branch|active|RepositoryRole:5:always|deletion,non_fast_forward|pr:-||refs:refs/heads/%s/|strict:-||upd:-' "$WORK_BRANCH" ;;
+    *) die "no ruleset template named $1" ;;
+  esac
+}
+ruleset_id(){ # $1 owner/repo, $2 template name: prints the id, or nothing when there is none (a ruleset named main is protect-main)
+  if [ "$2" = protect-main ]; then ruleset_id_exact "$1" protect-main main; else ruleset_id_exact "$1" "$2"; fi
+}
+ruleset_id_exact(){ # $1 owner/repo, then one or more exact ruleset names: prints the first match's id, or nothing
+  local repo="$1" out rc=0 errf sel="" n; shift; errf="$(mktemp)"
+  for n in "$@"; do sel="${sel:+$sel or }.name==\"$n\""; done
   # stdout only is parsed (a stray stderr line must not become the id); stderr shown on failure
-  out="$(gh api "repos/$repo/rulesets" --jq '.[] | select(.name=="protect-main") | .id' 2>"$errf")" || rc=$?
+  out="$(gh api "repos/$repo/rulesets" --jq ".[] | select($sel) | .id" 2>"$errf")" || rc=$?
   [ "$rc" -eq 0 ] || die "could not list rulesets on $repo (needs admin; private repos on GitHub Free have no rulesets): $out$(cat "$errf"; rm -f "$errf")
 re-running resumes from here."
   rm -f "$errf"
-  id="$(head -n1 <<<"$out")"
+  head -n1 <<<"$out"
+}
+ensure_ruleset(){ # $1 owner/repo, $2 template name: create when absent, skip when equal, refuse when different
+  local repo="$1" name="$2" id have ref=""
+  [ "$name" != protect-main ] || ref="machine-user-and-rulesets.md step 4"
+  id="$(ruleset_id "$repo" "$name")"
   if [ -z "$id" ]; then
-    say "creating ruleset protect-main on $repo (machine-user-and-rulesets.md step 4)"
-    ruleset_json | gh api -X POST "repos/$repo/rulesets" --input - >/dev/null
+    say "creating ruleset $name on $repo${ref:+ ($ref)}"
+    ruleset_json "$name" | gh api -X POST "repos/$repo/rulesets" --input - >/dev/null
     return
   fi
   have="$(gh api "repos/$repo/rulesets/$id" --jq "$NORM_JQ")"
-  if [ "$have" = "$(ruleset_norm_expected)" ]; then
-    skip "ruleset protect-main on $repo matches the template"
+  if [ "$have" = "$(ruleset_norm_expected "$name")" ]; then
+    skip "ruleset $name on $repo matches the template"
   else
     warn "live:     $have"
-    warn "template: $(ruleset_norm_expected)"
-    die "ruleset protect-main on $repo differs from the template: refusing to modify it (never weaken). Edit it in the GitHub UI if the difference is intended."
+    warn "template: $(ruleset_norm_expected "$name")"
+    die "ruleset $name on $repo differs from the template: refusing to modify it (never weaken). Edit it in the GitHub UI if the difference is intended."
   fi
 }
 protect_warnings(){ # $1 owner/repo
@@ -385,113 +481,509 @@ protect_warnings(){ # $1 owner/repo
   [ "$(gh api "repos/$repo/actions/permissions/workflow" --jq .can_approve_pull_request_reviews 2>/dev/null)" = true ] \
     && warn "$repo lets Actions approve PRs: turn it OFF (Settings -> Actions -> General, runbook step 2.3)" || true
 }
-cmd_protect(){
-  [ -z "$VAULT" ] || op_ready   # only --vault reads 1Password (the machine user's token)
-  protect_collaborator "$1"
-  protect_ruleset "$1"
-  protect_warnings "$1"
-  say "protect: done ($1)"
+protect_work_branch(){ # $1 owner/repo, $2 its default branch: create the working branch from the default branch's head unless it exists
+  local repo="$1" default="$2" sha rc=0 errf err
+  err="$(gh api "repos/$repo/branches/$WORK_BRANCH" 2>&1 >/dev/null)" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    skip "branch $WORK_BRANCH exists on $repo"
+    return
+  fi
+  grep -q 'HTTP 404' <<<"$err" || die "could not tell whether $WORK_BRANCH exists on $repo: $err"
+  rc=0; errf="$(mktemp)"
+  sha="$(gh api "repos/$repo/git/ref/heads/$default" --jq .object.sha 2>"$errf")" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$sha" ]; then
+    # an empty repository answers 409 "Git Repository is empty"; anything else is gh's own error
+    if grep -qi 'repository is empty' "$errf"; then
+      rm -f "$errf"; die "$repo has no commits: nothing to branch $WORK_BRANCH from"
+    fi
+    die "could not read the head of $default on $repo: $(cat "$errf"; rm -f "$errf")"
+  fi
+  rm -f "$errf"
+  say "creating branch $WORK_BRANCH on $repo from $default"
+  gh api -X POST "repos/$repo/git/refs" -f ref="refs/heads/$WORK_BRANCH" -f sha="$sha" >/dev/null
+}
+protect_autodelete(){ # $1 owner/repo: merged PR branches delete themselves
+  local repo="$1" v
+  v="$(gh_read "the settings of $repo" api "repos/$repo" --jq .delete_branch_on_merge)"
+  case "$v" in
+    true)  skip "$repo already deletes merged branches" ;;
+    false) say "turning on delete_branch_on_merge for $repo"
+           gh api -X PATCH "repos/$repo" -F delete_branch_on_merge=true >/dev/null ;;
+    *)     die "could not read delete_branch_on_merge of $repo (got: '$v')" ;;
+  esac
+}
+confirm(){ # $1 question: 0 for yes, 1 for no, 2 when there is nobody to ask. Only a line typed at a terminal answers yes.
+  local ans=""
+  [ -t 0 ] || return 2
+  printf '%s ' "$1" >&2
+  read -r ans || return 1   # only a complete line counts: end of input after a bare "y" is no answer
+  [[ "$ans" =~ ^[yY]$ ]]
+}
+OLD_FENCE_NORM='branch|active|RepositoryRole:5:always|creation,deletion,non_fast_forward,update|pr:-||refs:~ALL/refs/heads/feature/**,refs/heads/fix/**|strict:-||upd:false'
+OLD_TAGS_NORM='tag|active|RepositoryRole:5:always|creation,deletion,update|pr:-||refs:~ALL/|strict:-||upd:false'
+FENCE_SKIP=()   # fence rulesets this run leaves uncreated: an older hand-made one stands in their place until --migrate
+free_names(){ local p out="$WORK_BRANCH"; for p in "${FREE_PREFIXES[@]}"; do out+=", $p/**"; done; printf '%s' "$out"; }
+migrate_fence(){ # $1 owner/repo: the hand-made protect-fork rulesets become the agent fence (the only rulesets this tool ever renames)
+  local repo="$1" pair old new oldnorm id fid have t todo=()
+  FENCE_SKIP=()
+  # both are checked before the first PUT: a refusal changes neither
+  for pair in "protect-fork agent-fence $OLD_FENCE_NORM" "protect-fork-tags agent-fence-tags $OLD_TAGS_NORM"; do
+    read -r old new oldnorm <<<"$pair"
+    id="$(ruleset_id_exact "$repo" "$old")"
+    [ -n "$id" ] || continue
+    fid="$(ruleset_id "$repo" "$new")"
+    if [ -n "$fid" ]; then
+      warn "$old still exists on $repo beside $new and still limits the agent to fix/ and feature/ branches: remove it by hand (GitHub UI)"
+      continue
+    fi
+    have="$(gh api "repos/$repo/rulesets/$id" --jq "$NORM_JQ")"
+    if [ "$have" != "$oldnorm" ]; then
+      [ "$MIGRATE" -eq 1 ] || continue   # not the hand-made shape, so not ours to report
+      warn "live:     $have"
+      warn "expected: $oldnorm"
+      die "ruleset $old on $repo is not the shape --migrate renames: refusing to modify it (nothing was changed)."
+    fi
+    if [ "$MIGRATE" -eq 1 ]; then
+      todo+=("$old $new $id")
+    else
+      warn "ruleset $old on $repo is the older, narrower hand-made shape (the agent is limited to fix/ and feature/): $new is not created beside it; re-run with --migrate to convert it"
+      FENCE_SKIP+=("$new")
+    fi
+  done
+  for t in ${todo[@]+"${todo[@]}"}; do
+    read -r old new id <<<"$t"
+    say "renaming ruleset $old on $repo to $new"
+    if [ "$new" = agent-fence ]; then
+      say "  free names before: fix/**, feature/**"
+      say "  free names after:  $(free_names)"
+    fi
+    ruleset_json "$new" | gh api -X PUT "repos/$repo/rulesets/$id" --input - >/dev/null
+  done
+}
+fence_skipped(){ local n; for n in ${FENCE_SKIP[@]+"${FENCE_SKIP[@]}"}; do [ "$n" != "$1" ] || return 0; done; return 1; }
+RULE_REF_JQ='[.name, .target, (.conditions.ref_name.include | tojson), (.conditions.ref_name.exclude | tojson)] | join("\n")'
+retire_main_gate(){ # $1 owner/repo: with --retire-main-gate, offer to delete protect-main and main, each found by its exact name
+  local repo="$1" name id info have again rc f=()
+  for name in protect-main main; do
+    id="$(ruleset_id_exact "$repo" "$name")"
+    if [ -z "$id" ]; then say "no ruleset named $name on $repo"; continue; fi
+    info="$(gh_read "ruleset $name on $repo" api "repos/$repo/rulesets/$id" --jq "$RULE_REF_JQ")"
+    mapfile -t f <<<"$info"
+    if [ "${f[0]:-}" != "$name" ] || [ "${f[1]:-}" != branch ] || [ "${f[2]:-}" != '["~DEFAULT_BRANCH"]' ] || [ "${f[3]:-}" != '[]' ]; then
+      warn "ruleset $name on $repo does not apply to just the default branch: leaving it alone (target ${f[1]:-?}, include ${f[2]:-?}, exclude ${f[3]:-?})"
+      continue
+    fi
+    have="$(gh_read "ruleset $name on $repo" api "repos/$repo/rulesets/$id" --jq "$NORM_JQ")"
+    say "ruleset $name on $repo: $have"
+    rc=0; confirm "delete ruleset '$name' on $repo? [y/N]" || rc=$?
+    case "$rc" in
+      0) # the answer may have taken a while: the ruleset must still be exactly the one shown
+         again="$(ruleset_id_exact "$repo" "$name")"
+         [ "$again" = "$id" ] && [ "$(gh_read "ruleset $id on $repo" api "repos/$repo/rulesets/$id" --jq "$RULE_REF_JQ")" = "$info" ] \
+           || die "ruleset $name on $repo changed while you answered: nothing was deleted; re-run"
+         say "deleting ruleset $name on $repo"
+         gh api -X DELETE "repos/$repo/rulesets/$id" >/dev/null ;;
+      2) warn "not a terminal: $name on $repo was NOT deleted; re-run --retire-main-gate at a terminal" ;;
+      *) skip "ruleset $name on $repo kept" ;;
+    esac
+  done
+}
+cmd_protect(){ # one repo, signed in to 1Password first when --vault asks for it
+  if [ -n "$VAULT" ]; then op_ready; mu_token_checked; fi   # only --vault reads 1Password (the machine user's token)
+  protect_repo "$1"
+  MU_TOK=""
+}
+cmd_protect_many(){ # $@ owner/repo...: each repo in its own subshell, so a die ends only that repo
+  local r rc ok=() bad=()
+  if [ -n "$VAULT" ]; then op_ready; mu_token_checked; fi   # one read of the token serves every repo
+  for r in "$@"; do
+    # errexit is switched off around the subshell and on again inside it: a subshell run under || or if
+    # would otherwise ignore errexit; stdin stays the terminal for confirm
+    set +e; ( set -e; protect_repo "$r" ); rc=$?; set -e
+    if [ "$rc" -eq 0 ]; then ok+=("$r"); else bad+=("$r"); fi
+  done
+  for r in "${ok[@]:-}"; do [ -z "$r" ] || say "protect: ok $r"; done
+  for r in "${bad[@]:-}"; do [ -z "$r" ] || say "protect: FAILED $r"; done
+  MU_TOK=""
+  [ "${#bad[@]}" -eq 0 ]
+}
+REPO_INFO_JQ='[.full_name, (.permissions.admin | tostring), .owner.login, (.fork | tostring), (.parent.full_name // ""), .default_branch] | join("\n")'
+read_repo_info(){ # $1 owner/repo, as the owner: sets RI_NAME (GitHub's spelling), RI_ADMIN, RI_OWNER, RI_FORK, RI_PARENT, RI_DEFAULT
+  local out f=()
+  out="$(gh_read "$1 on GitHub as you" api "repos/$1" --jq "$REPO_INFO_JQ")"
+  mapfile -t f <<<"$out"
+  RI_NAME="${f[0]:-}" RI_ADMIN="${f[1]:-}" RI_OWNER="${f[2]:-}" RI_FORK="${f[3]:-}" RI_PARENT="${f[4]:-}" RI_DEFAULT="${f[5]:-}"
+  repo_arg_ok "$RI_NAME" || die "GitHub's answer for $1 names no repository (got: '$RI_NAME')"
+  [[ $RI_DEFAULT =~ ^[A-Za-z0-9._/-]+$ ]] || die "could not read the default branch of $1 (got: '$RI_DEFAULT')"
+}
+protect_preflight(){ # $1 owner/repo as typed: the owner's own repo, with its default branch inside the fence; sets P_REPO, P_DEFAULT
+  read_repo_info "$1"
+  if [ "$RI_ADMIN" != true ] || [ "$(lc "$RI_OWNER")" != "$(lc "$OWNER")" ]; then
+    die "agent-new protect only sets up repositories you own: $RI_NAME is owned by $RI_OWNER (signed in: $OWNER, admin: ${RI_ADMIN:-?})"
+  fi
+  P_REPO="$RI_NAME" P_DEFAULT="$RI_DEFAULT"
+  default_in_fence "$P_REPO" "$P_DEFAULT"
+}
+default_in_fence(){ # $1 owner/repo, $2 its default branch: dies when the fence would leave that branch free
+  local p
+  [ "$2" != "$WORK_BRANCH" ] \
+    || die "the default branch $2 of $1 would be outside the fence (the agent may write to it): make another branch the default first"
+  for p in "${FREE_PREFIXES[@]}"; do
+    case "$2" in "$p"/*)
+      die "the default branch $2 of $1 would be outside the fence ($p/ is a name the agent may write to): make another branch the default first" ;;
+    esac
+  done
+}
+protect_notices(){ # warnings only, before the fence goes on (uses read_repo_info's RI_* values)
+  local repo="$P_REPO" mine theirs shared re
+  if gh api "repos/$repo/branches/gh-pages" >/dev/null 2>&1; then
+    warn "$repo has a gh-pages branch: once the fence is on, pushes by GitHub Actions or Dependabot to branches outside the free names are refused"
+  fi
+  if gh api "repos/$repo/contents/.github/dependabot.yml" >/dev/null 2>&1; then
+    warn "$repo has .github/dependabot.yml: once the fence is on, pushes by GitHub Actions or Dependabot to branches outside the free names are refused"
+  fi
+  [ "$RI_FORK" = true ] && [ -n "$RI_PARENT" ] || return 0
+  if ! mine="$(gh api --paginate "repos/$repo/branches?per_page=100" --jq '.[].name' 2>/dev/null)" \
+     || ! theirs="$(gh api --paginate "repos/$RI_PARENT/branches?per_page=100" --jq '.[].name' 2>/dev/null)"; then
+    warn "could not list the branches of $repo and $RI_PARENT: not checked for upstream branches under the free names"
+    return 0
+  fi
+  re="^($(IFS='|'; printf '%s' "${FREE_PREFIXES[*]}"))/"
+  shared="$(LC_ALL=C comm -12 <(LC_ALL=C sort -u <<<"$mine") <(LC_ALL=C sort -u <<<"$theirs") | grep -E "$re" | paste -sd' ' -)" || true
+  [ -z "$shared" ] \
+    || warn "$repo is a fork of $RI_PARENT, and these branches from upstream have free names, so the agent can write to them: $shared"
+}
+protect_repo(){ # $1 owner/repo, in this order: the fence and the branch settings first, the machine user's access last
+  local repo
+  protect_preflight "$1"; repo="$P_REPO"
+  protect_notices
+  migrate_fence "$repo"
+  local n
+  for n in agent-fence agent-fence-tags; do
+    if ! fence_skipped "$n"; then ensure_ruleset "$repo" "$n"; fi
+  done
+  if [ "$WORK_BRANCH_ON" -eq 1 ]; then
+    protect_work_branch "$repo" "$P_DEFAULT"
+    ensure_ruleset "$repo" agent-working-branch   # before auto-delete: a merged promotion PR must not delete allen-dev
+  fi
+  protect_autodelete "$repo"
+  if [ "$MAIN_GATE" -eq 1 ]; then
+    ensure_ruleset "$repo" protect-main
+    protect_warnings "$repo"
+  elif [ "$RETIRE" -eq 1 ]; then
+    if [ "${#FENCE_SKIP[@]}" -eq 0 ]; then retire_main_gate "$repo"   # both fence rulesets were ensured above, in this run
+    else warn "the older protect-fork ruleset still stands in for the fence on $repo: not retiring the main gate (run --migrate first)"; fi
+  fi
+  protect_collaborator "$repo"
+  say "protect: done ($repo)"
 }
 
-expect_refusal(){ # $1 label, $2 reason ERE, $3 command string (runs via RUN_IN)
-  local label="$1" re="$2" cmd="$3" out rc=0
+# verify works against throwaway refs that you (the owner) create and remove. The machine user's attempts on them must be
+# refused; if one is wrongly accepted, only a throwaway ref changes. All of verify's state is global: the EXIT trap runs
+# after the functions' locals are gone.
+FENCE_RE='GH013|repository rule|rule violations|protected (branch|ref)'
+VREFS=() VPRS=()        # refs (heads/<b> | tags/<t>) and PR numbers verify made or let through and has not removed yet
+VON_ACCEPT="" VDIE_EXTRA=""   # a function run when an attempt is wrongly accepted, and what it adds to the message
+expect_refusal(){ # $1 label, $2 reason ERE, $3 command (runs via RUN_IN), $4 optional: the ref $3 creates if it is accepted
+  local label="$1" re="$2" cmd="$3" made="${4:-}" out rc=0 seen
   out="$(RUN_IN "$cmd" 2>&1)" || rc=$?
   if [ "$rc" -eq 0 ]; then
-    printf '%s\n' "$out" >&2
-    die "GATE NOT BINDING: '$label' SUCCEEDED on $VTARGET — stop, fix the ruleset before any real work"
+    [ -z "$out" ] || printf '%s\n' "$out" >&2
+    [ -z "$made" ] || VREFS+=("$made")
+    [ -z "$VON_ACCEPT" ] || "$VON_ACCEPT"
+    die "GATE NOT BINDING: '$label' SUCCEEDED on $VREPO — stop, fix the rulesets before any real work${VDIE_EXTRA:+. $VDIE_EXTRA}"
   fi
-  grep -Eqi -- "$re" <<<"$out" || {
+  # the repository's own name (in its URL) must not be what matches the reason
+  seen="${out//"$VREPO"/<repo>}"; seen="${seen//"$(lc "$VREPO")"/<repo>}"
+  grep -Eqi -- "$re" <<<"$seen" || {
     printf '%s\n' "$out" >&2
     die "GATE NOT BINDING: '$label' was refused, but not for the expected reason (/$re/) — investigate before trusting the gate"
   }
   say "OK (refused as expected): $label"
 }
 
-cmd_verify(){
-  VTARGET="$1"
-  local mu; mu="$(machine_user)"
+wait_checks(){ # $1 the gh pr checks command; retries only on "no checks reported"; sets CHECKS, CHECKS_RC, CHECKS_TRIES
+  # CI may not have registered yet right after pr create
+  local tries="${AGENT_NEW_CHECK_TRIES:-6}"
+  CHECKS_TRIES=1
+  while :; do
+    CHECKS_RC=0; CHECKS="$(RUN_IN "$1" 2>&1)" || CHECKS_RC=$?
+    [ "$CHECKS_RC" -ne 0 ] && grep -qi 'no checks reported' <<<"$CHECKS" && [ "$CHECKS_TRIES" -lt "$tries" ] || break
+    CHECKS_TRIES=$((CHECKS_TRIES+1)); sleep "${AGENT_NEW_CHECK_SLEEP:-10}"
+  done
+}
+
+owner_ref_sha(){ # $1 heads/<b>: the commit it points at, read as the owner
+  gh_read "refs/$1 on $VREPO" api "repos/$VREPO/git/ref/$1" --jq .object.sha
+}
+owner_create_ref(){ # $1 heads/<b> | tags/<t>, $2 sha: created as the owner, only if absent; registered for removal once it exists
+  local err
+  if err="$(gh api "repos/$VREPO/git/ref/$1" --jq .ref 2>&1 >/dev/null)"; then
+    die "verify: refs/$1 already exists on $VREPO: refusing to use it (re-run verify)"
+  fi
+  grep -q 'HTTP 404' <<<"$err" || die "verify: could not tell whether refs/$1 exists on $VREPO: $err"
+  err="$(gh api -X POST "repos/$VREPO/git/refs" -f ref="refs/$1" -f sha="$2" 2>&1 >/dev/null)" \
+    || die "verify: could not create refs/$1 on $VREPO as you: $err"
+  VREFS+=("$1")
+}
+verify_cleanup(){ # as the owner: closes verify's open PRs and deletes its refs; warns about, and returns 1 for, anything left
+  local n st r err left=()
+  for n in ${VPRS[@]+"${VPRS[@]}"}; do
+    st="$(gh pr view "$n" -R "$VREPO" --json state --jq .state 2>/dev/null)" || st=""
+    case "$st" in MERGED|CLOSED) continue ;; esac
+    if gh pr close "$n" -R "$VREPO" >/dev/null 2>&1; then say "closed pull request #$n on $VREPO"
+    else left+=("pull request #$n: close it at https://github.com/$VREPO/pull/$n"); fi
+  done
+  VPRS=()
+  for r in ${VREFS[@]+"${VREFS[@]}"}; do
+    if err="$(gh api -X DELETE "repos/$VREPO/git/refs/$r" 2>&1 >/dev/null)"; then say "removed refs/$r from $VREPO"
+    elif ! grep -qi 'Reference does not exist' <<<"$err"; then   # already gone (a merge deleted it, or it was never made)
+      left+=("refs/$r: delete it with: gh api -X DELETE repos/$VREPO/git/refs/$r ($err)")
+    fi
+  done
+  VREFS=()
+  [ "${#left[@]}" -gt 0 ] || return 0
+  for r in "${left[@]}"; do warn "left on $VREPO: $r"; done
+  return 1
+}
+fence_push(){ # $1 a branch with a free name: push HEAD there as the machine user; it must succeed
+  local out
+  out="$(RUN_IN "git push $VURL HEAD:refs/heads/$1" 2>&1)" \
+    || die "verify: could not push $1 (a free name the fence leaves open): $out"
+  VREFS+=("heads/$1")
+}
+fence_pr(){ # $1 head, $2 base, $3 title, $4 body: open a PR on $VREPO as the machine user; sets FENCE_PR_NUM
+  local out
+  out="$(RUN_IN "gh pr create -R $VREPO --base $2 --head $1 --title '$3' --body '$4'" 2>&1)" \
+    || die "verify: could not open the PR from $1 into $2: $out"
+  # gh prints the PR's URL; it must be a PR on $VREPO
+  FENCE_PR_NUM="$(grep -oiE "https://github\.com/${VREPO//./\\.}/pull/[0-9]+" <<<"$out" | tail -n1)" || true
+  FENCE_PR_NUM="${FENCE_PR_NUM##*/}"
+  [[ $FENCE_PR_NUM =~ ^[0-9]+$ ]] || die "verify: no PR on $VREPO in gh's answer for $1 -> $2: $out"
+  VPRS+=("$FENCE_PR_NUM")
+}
+detached_commit(){ # $1 a branch, $2 commit message: the machine user's empty commit on top of that branch, as fetched just now
+  local out
+  out="$(RUN_IN "git fetch -q $VURL refs/heads/$1 && git checkout -q --detach FETCH_HEAD && git commit -q --allow-empty -m '$2'" 2>&1)" \
+    || die "verify: could not make a commit on top of $1: $out"
+}
+
+work_branch_on_github(){ # $1 owner/repo, as the owner: 0 when the working branch exists, 1 when GitHub says it does not
+  local err
+  err="$(gh api "repos/$1/branches/$WORK_BRANCH" 2>&1 >/dev/null)" && return 0
+  grep -q 'HTTP 404' <<<"$err" || die "could not tell whether $WORK_BRANCH exists on $1: $err"
+  return 1
+}
+verify_rulesets(){ # as the owner, before any push: the fence is exactly its templates, and no older ruleset is left
+  local n id have names=(agent-fence agent-fence-tags)
+  [ "$MAIN_GATE" -eq 0 ] || names+=(protect-main)
+  if work_branch_on_github "$VREPO"; then names+=(agent-working-branch); fi
+  for n in protect-fork protect-fork-tags; do
+    id="$(ruleset_id_exact "$VREPO" "$n")"
+    [ -z "$id" ] || die "verify: $VREPO still has the older ruleset $n: migrate first (agent-new protect $VREPO --migrate), then re-run verify"
+  done
+  for n in "${names[@]}"; do
+    id="$(ruleset_id "$VREPO" "$n")"
+    [ -n "$id" ] || die "verify: $VREPO has no ruleset $n: run agent-new protect $VREPO first"
+    have="$(gh_read "ruleset $n on $VREPO" api "repos/$VREPO/rulesets/$id" --jq "$NORM_JQ")"
+    if [ "$have" != "$(ruleset_norm_expected "$n")" ]; then
+      warn "live:     $have"
+      warn "template: $(ruleset_norm_expected "$n")"
+      die "verify: ruleset $n on $VREPO differs from its template: fix it first (agent-new protect $VREPO shows the difference)"
+    fi
+  done
+  say "rulesets on $VREPO match their templates: ${names[*]}"
+}
+
+verify_fence(){ # the machine user is refused on fenced refs and merges into the working branch; the default branch is never touched
+  local vb="zz-agent-new-verify-$VID" sha rewind
+  say "verifying the agent fence on $VREPO as $VMU (a throwaway branch and tag $vb, which you create and remove)"
+  sha="$(owner_ref_sha "heads/$VDEF")"
+  owner_create_ref "heads/$vb" "$sha"
+  owner_create_ref "tags/$vb" "$sha"
+  detached_commit "$vb" "chore: verify fence"
+  # the non-fast-forward attempt: a one-commit rewind to the default head's parent, or, when the head is a root commit,
+  # an unrelated commit
+  rewind="$(RUN_IN 'git rev-parse -q --verify "HEAD~2^{commit}"' 2>/dev/null)" || rewind=""
+  [ -n "$rewind" ] || rewind="$(RUN_IN "git commit-tree -m 'chore: verify fence (unrelated history)' 'HEAD^{tree}'" 2>/dev/null)" || rewind=""
+  [[ $rewind =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || die "verify: could not find a commit for the non-fast-forward attempt (got: '$rewind')"
+  expect_refusal "fast-forward push to $vb"   "$FENCE_RE" "git push $VURL HEAD:refs/heads/$vb"
+  expect_refusal "force-push to $vb"          "$FENCE_RE" "git push --force $VURL $rewind:refs/heads/$vb"
+  expect_refusal "delete $vb"                 "$FENCE_RE" "git push $VURL --delete refs/heads/$vb"
+  expect_refusal "create a branch outside the free names" "$FENCE_RE" "git push $VURL HEAD:refs/heads/$vb-new" "heads/$vb-new"
+  expect_refusal "create a tag"               "$FENCE_RE" "git push $VURL HEAD:refs/tags/$vb-new" "tags/$vb-new"
+  expect_refusal "move a tag"                 "$FENCE_RE" "git push --force $VURL HEAD:refs/tags/$vb"
+  expect_refusal "delete a tag"               "$FENCE_RE" "git push $VURL --delete refs/tags/$vb"
+  fence_push "chore/verify-fence-$VID"
+  fence_pr "chore/verify-fence-$VID" "$vb" 'chore: verify fence' 'Opened by agent-new verify, which closes it.'
+  # the merge goes to the server (not gh pr merge, which refuses on its own while the PR is merely blocked),
+  # so the refusal is the rule's own answer
+  expect_refusal "merge a PR into $vb"        "$FENCE_RE" "gh api -X PUT repos/$VREPO/pulls/$FENCE_PR_NUM/merge -f merge_method=squash"
+  verify_work_branch
+  verify_cleanup || die "FENCE VERIFIED, but cleanup is incomplete on $VREPO: remove what is listed above"
+  say "FENCE VERIFIED on $VREPO${VPROJ:+ (project $VPROJ)}"
+}
+verify_work_branch(){ # when the working branch exists: a PR into it is squash-merged by the machine user
+  local out rc=0 n st
+  out="$(RUN_IN "git ls-remote --exit-code $VURL refs/heads/$WORK_BRANCH" 2>&1)" || rc=$?
+  case "$rc" in
+    0) ;;
+    2) say "$WORK_BRANCH is not on $VREPO: the working-branch check was skipped"; return 0 ;;
+    *) die "verify: could not ask $VREPO whether $WORK_BRANCH exists: $out" ;;
+  esac
+  detached_commit "$WORK_BRANCH" "chore: verify fence ($WORK_BRANCH)"
+  fence_push "chore/verify-fence-$VID-dev"
+  fence_pr "chore/verify-fence-$VID-dev" "$WORK_BRANCH" "chore: verify fence ($WORK_BRANCH)" 'Opened and squash-merged by agent-new verify.'
+  n="$FENCE_PR_NUM"
+  say "waiting for checks on the PR into $WORK_BRANCH"
+  wait_checks "gh pr checks $n -R $VREPO --watch"
+  if [ "$CHECKS_RC" -ne 0 ]; then
+    grep -qi 'no checks reported' <<<"$CHECKS" \
+      || die "verify: checks are not green on the PR into $WORK_BRANCH — fix CI first, then re-run verify: $(tail -n5 <<<"$CHECKS")"
+    say "no checks reported on the PR into $WORK_BRANCH after $CHECKS_TRIES tries: merging without them"
+  fi
+  out="$(RUN_IN "gh pr merge $n -R $VREPO --squash --delete-branch" 2>&1)" \
+    || die "verify: could not squash-merge the PR into $WORK_BRANCH: $out"
+  st="$(gh_read "the state of PR #$n on $VREPO" pr view "$n" -R "$VREPO" --json state --jq .state)"
+  [ "$st" = MERGED ] || die "verify: the PR into $WORK_BRANCH (#$n) is '$st' after the merge, not MERGED"
+  say "OK (merged as expected): PR #$n into $WORK_BRANCH, squashed, its branch deleted (it leaves one empty commit on $WORK_BRANCH)"
+}
+
+gate_restore_hint(){ # an attempt on the default branch was accepted: what is now on it
+  local now
+  now="$(gh api "repos/$VREPO/git/ref/heads/$VDEF" --jq .object.sha 2>/dev/null)" || now=""
+  if [ "$now" = "$VGATE_OLD" ]; then VDIE_EXTRA="$VDEF did not move (still $VGATE_OLD)"; return 0; fi
+  VDIE_EXTRA="$VDEF now holds verify's empty commit ${now:-(could not read its sha)} on top of $VGATE_OLD. It changes no files. Removing it needs a revert PR, or the ruleset switched off first"
+}
+verify_main_gate(){ # after verify_fence: the review gate on the default branch binds the machine user
+  local n
+  say "verifying the merge gate on $VREPO (machine-user-and-rulesets.md step 6; a PR from chore/verify-gate-$VID as the machine user)"
+  VGATE_OLD="$(owner_ref_sha "heads/$VDEF")"
+  detached_commit "$VDEF" "chore: verify ruleset"
+  fence_push "chore/verify-gate-$VID"
+  fence_pr "chore/verify-gate-$VID" "$VDEF" 'chore: verify ruleset' 'Opened by agent-new verify: approve-and-merge or close it.'
+  n="$FENCE_PR_NUM"
+  say "waiting for required checks on the verification PR"
+  wait_checks "gh pr checks $n -R $VREPO --watch"
+  if [ "$CHECKS_RC" -ne 0 ]; then
+    if grep -qi 'no checks reported' <<<"$CHECKS"; then
+      warn "no required check reported after $CHECKS_TRIES tries: the required-check rule stays UNTESTED (re-run verify once CI exists)"
+    else
+      die "required checks are not green on the verification PR — fix CI first, then re-run verify: $(tail -n5 <<<"$CHECKS")"
+    fi
+  fi
+  printf '%s\n' "$CHECKS" | tail -n2
+  VON_ACCEPT=gate_restore_hint
+  expect_refusal "merge own PR"          'base branch policy|review' "gh pr merge $n -R $VREPO --squash"
+  expect_refusal "approve own PR"        'approve your own'          "gh pr review $n -R $VREPO --approve"
+  expect_refusal "push straight to $VDEF" 'GH013|repository rule'    "git push $VURL HEAD:refs/heads/$VDEF"
+  expect_refusal "admin-merge own PR"    'rule violations|not.*admin' "gh pr merge $n -R $VREPO --squash --admin"
+  VON_ACCEPT=""
+  VPRS=() VREFS=()   # the verification PR and its branch stay: only your approval can merge it
+  say "GATE VERIFIED on $VREPO. Approve-and-merge or close PR #$n in the browser (only your approval counts): https://github.com/$VREPO/pull/$n"
+}
+
+github_repo(){ # $1 a GitHub remote URL (https, ssh or scp form) -> prints owner/repo; fails on anything else
+  local r
+  case "$1" in
+    https://github.com/*)     r="${1#https://github.com/}" ;;
+    ssh://git@github.com/*)   r="${1#ssh://git@github.com/}" ;;
+    git@github.com:*)         r="${1#git@github.com:}" ;;
+    *) return 1 ;;
+  esac
+  r="${r%/}"; r="${r%.git}"
+  repo_arg_ok "$r" || return 1
+  printf '%s' "$r"
+}
+url_shown(){ printf '%s' "$1" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://)[^/]*@#\1#'; }   # a URL without user[:password]@, for messages
+read_origin_repo(){ # sets VORIGIN: the owner/repo origin points at; fetch and push URL must agree, and it must be https
+  local url purl p
+  url="$(RUN_IN 'git remote get-url origin')" || die "verify: could not read origin's URL in $VTARGET"
+  purl="$(RUN_IN 'git remote get-url --push origin')" || die "verify: could not read origin's push URL in $VTARGET"
+  VORIGIN="$(github_repo "$url")" || die "verify: cannot tell which GitHub repo origin is (origin: '$(url_shown "$url")'): refusing to verify"
+  case "$url" in https://*) ;; *) die "verify needs an https origin (origin in $VTARGET: '$(url_shown "$url")'): refusing to verify" ;; esac
+  p="$(github_repo "$purl")" || die "verify: cannot tell which GitHub repo origin pushes to (push URL: '$(url_shown "$purl")'): refusing to verify"
+  [ "$(lc "$p")" = "$(lc "$VORIGIN")" ] || die "verify: origin in $VTARGET fetches from $VORIGIN but pushes to $p: refusing to verify"
+}
+verify_owner_side(){ # $1 owner/repo: as the owner, GitHub's spelling and default branch; you must be admin (you make the throwaway refs)
+  read_repo_info "$1"
+  [ "$RI_ADMIN" = true ] || die "verify: you are not an admin of $RI_NAME: verify creates and removes throwaway refs there as you"
+  VREPO="$RI_NAME" VDEF="$RI_DEFAULT" VURL="https://github.com/$RI_NAME.git"
+  default_in_fence "$VREPO" "$VDEF"
+}
+
+# RUN_IN runs a command as the machine user: in the temporary clone (repo mode) or in the container (project mode).
+# Every push and fetch it runs names $VURL, never origin.
+cmd_verify(){ # $1 <project> | <owner>/<repo>, $2 optional: the repository the caller expects the project to be on
+  VTARGET="$1"; local want="${2:-}" who
+  VMU="$(machine_user)"
+  OWNER="$(preflight_owner)"
+  VID="$(date +%s)-$$-$RANDOM" VPROJ=""
   if [[ "$VTARGET" == */* ]]; then
     [ -n "$VAULT" ] || die "verify <owner>/<repo> needs --vault <op-vault> (the project vault holding github-agent)"
+    repo_arg_ok "$VTARGET" || die "verify wants <owner>/<repo> (got: $VTARGET)"
+    verify_owner_side "$VTARGET"
+    verify_rulesets
     # trap value frozen at set time: an EXIT trap outlives this function's locals,
     # so deferred '$tmp' would be unbound under set -u. || true: a failing cleanup
     # must not overwrite the script's real exit status.
     local tmp; tmp="$(mktemp -d)"
     # shellcheck disable=SC2064
-    trap "rm -rf '$tmp' || true" EXIT
+    trap "verify_cleanup || true; rm -rf '$tmp' || true" EXIT
     op_ready   # top level, not in mu_token: a sign-in inside $(...) would be lost
-    local tok who; tok="$(mu_token)"
-    who="$(GH_TOKEN="$tok" gh api user --jq .login)" || die "the machine-user token from op://$VAULT/github-agent/token does not work"
-    [ "$who" = "$mu" ] || die "the token in op://$VAULT/github-agent/token is for '$who', not the machine user '$mu': refusing to verify as the wrong identity"
+    VTOK="$(mu_token)"
+    who="$(GH_TOKEN="$VTOK" gh api user --jq .login)" || die "the machine-user token from op://$VAULT/github-agent/token does not work"
+    [ "$(lc "$who")" = "$(lc "$VMU")" ] || die "the token in op://$VAULT/github-agent/token is for '$who', not the machine user '$VMU': refusing to verify as the wrong identity"
     # git isolated from the owner's config and credentials; the helper is single-quoted so git's
     # shell expands $GH_TOKEN at run time (the token lives in the environment only, never argv/disk)
     vgit_env(){
-      export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 GH_TOKEN="$tok" \
+      export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 GH_TOKEN="$VTOK" \
         GIT_CONFIG_COUNT=3 \
         GIT_CONFIG_KEY_0=credential.helper \
         GIT_CONFIG_VALUE_0='!f(){ echo username=x-access-token; echo "password=$GH_TOKEN"; }; f' \
-        GIT_CONFIG_KEY_1=user.name GIT_CONFIG_VALUE_1="$mu" \
-        GIT_CONFIG_KEY_2=user.email GIT_CONFIG_VALUE_2="$mu@users.noreply.github.com"
+        GIT_CONFIG_KEY_1=user.name GIT_CONFIG_VALUE_1="$VMU" \
+        GIT_CONFIG_KEY_2=user.email GIT_CONFIG_VALUE_2="$VMU@users.noreply.github.com"
       # env identity outranks config: drop the owner's so the machine user is what gets recorded
       unset BASH_ENV GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
     }
-    say "cloning $VTARGET as $mu (temp, removed after)"
-    (vgit_env; git clone -q "https://github.com/$VTARGET" "$tmp/repo") >/dev/null
+    say "cloning $VREPO as $VMU (temp, removed after)"
+    VDIR="$tmp/repo"
+    (vgit_env; git clone -q "$VURL" "$VDIR") >/dev/null
     # bash -c, not -lc: the owner's login profile must not be able to re-export GH_TOKEN
-    RUN_IN(){ (cd "$tmp/repo" && vgit_env && bash -c "$1"); }
-    RUN_IN 'git fetch -q origin && git checkout -q -B verify-ruleset origin/main'
+    RUN_IN(){ (cd "$VDIR" && vgit_env && bash -c "$1"); }
+    read_origin_repo
+    [ "$(lc "$VORIGIN")" = "$(lc "$VREPO")" ] || die "verify: the clone's origin is $VORIGIN, not $VREPO: refusing to verify"
   else
-    local c="${VTARGET}-agent-1" wd=/workspace who
-    docker ps --format '{{.Names}}' | grep -qx "$c" || die "container $c is not running (agent-up up $VTARGET first)"
-    RUN_IN(){ docker exec -w "$wd" "$c" bash -lc "$1"; }
+    VPROJ="$VTARGET" VC="${VTARGET}-agent-1" VWD=/workspace
+    docker ps --format '{{.Names}}' | grep -qx "$VC" || die "container $VC is not running (agent-up up $VTARGET first)"
+    RUN_IN(){ docker exec -w "$VWD" "$VC" bash -lc "$1"; }
     # a container just started by `agent-up up` may still be in agent-init, which wires git to gh last:
     # until then git has no credentials ("could not read Username"). Wait for that, not a fixed sleep.
-    local iw="${AGENT_NEW_INIT_WAIT:-300}" waited=0
+    local iw="${AGENT_NEW_INIT_WAIT:-300}" waited=0 out
     [[ $iw =~ ^[1-9][0-9]*$ ]] || iw=300
     until RUN_IN 'git config --global --get credential.https://github.com.helper' >/dev/null 2>&1; do
-      [ "$waited" -lt "$iw" ] || die "git in $c has no GitHub credentials after $iw s: agent-init has not finished or gh setup-git failed (docker logs $c | grep agent-init)"
-      [ "$waited" -gt 0 ] || say "waiting for $c to finish its first-start setup (agent-init)..."
+      [ "$waited" -lt "$iw" ] || die "git in $VC has no GitHub credentials after $iw s: agent-init has not finished or gh setup-git failed (docker logs $VC | grep agent-init)"
+      [ "$waited" -gt 0 ] || say "waiting for $VC to finish its first-start setup (agent-init)..."
       sleep 2; waited=$((waited + 2))
     done
-    who="$(RUN_IN 'gh api user --jq .login')" || die "gh in $c is not logged in"
-    [ "$who" = "$mu" ] || die "gh in $c is '$who', not the machine user '$mu': refusing to verify as the wrong identity"
-    [ "$(RUN_IN 'git branch --show-current')" != verify-ruleset ] \
-      || die "/workspace in $c is on verify-ruleset (left by an older agent-new): run 'git switch main' in the container, then re-run"
-    # a temporary worktree: the owner's /workspace checkout (branch, index, files) is never touched.
-    # The worktree goes first: a branch checked out in it cannot be deleted.
+    who="$(RUN_IN 'gh api user --jq .login')" || die "gh in $VC is not logged in"
+    [ "$(lc "$who")" = "$(lc "$VMU")" ] || die "gh in $VC is '$who', not the machine user '$VMU': refusing to verify as the wrong identity"
+    read_origin_repo
+    verify_owner_side "$VORIGIN"
+    [ -z "$want" ] || [ "$(lc "$VREPO")" = "$(lc "$want")" ] \
+      || die "verify: the container $VC works on $VREPO, not $want: refusing to verify"
+    verify_rulesets
+    # a temporary worktree, detached: the owner's /workspace checkout (branch, index, files) is never touched.
+    # verify_cleanup works as the owner, outside the container; the worktree goes after it.
+    VWT="/tmp/agent-new-verify-$VID"
     # shellcheck disable=SC2064 # expand now on purpose: the locals are gone when the EXIT trap runs
-    trap "docker exec -w /workspace '$c' git worktree remove --force /tmp/agent-new-verify 2>/dev/null || true; docker exec -w /workspace '$c' git branch -D verify-ruleset 2>/dev/null || true" EXIT
-    RUN_IN 'git worktree remove --force /tmp/agent-new-verify 2>/dev/null; git worktree prune; rm -rf /tmp/agent-new-verify' >/dev/null
-    RUN_IN 'git fetch -q origin && git worktree add -f -B verify-ruleset /tmp/agent-new-verify origin/main' >/dev/null
-    wd=/tmp/agent-new-verify
+    trap "verify_cleanup || true; docker exec -w /workspace '$VC' git worktree remove --force '$VWT' 2>/dev/null || true" EXIT
+    out="$(RUN_IN "git worktree prune && git fetch -q $VURL refs/heads/$VDEF && git worktree add -q --detach $VWT FETCH_HEAD" 2>&1)" \
+      || die "verify: could not make a temporary worktree in $VC: $out"
+    VWD="$VWT"
   fi
-  say "verifying the merge gate (machine-user-and-rulesets.md step 6; a throwaway PR as the machine user)"
-  RUN_IN 'git commit --allow-empty -m "chore: verify ruleset"' >/dev/null
-  # -f: replaces a leftover from an earlier run; the branch starts at origin/main, so the later
-  # push to main is a fast-forward and a refusal can only be the ruleset
-  RUN_IN 'git push -f -u origin verify-ruleset' >/dev/null
-  local pr_out; pr_out="$(RUN_IN 'gh pr create --fill' 2>&1)" \
-    || grep -q 'already exists' <<<"$pr_out" || die "could not open the verification PR: $pr_out"
-  say "waiting for required checks on the verification PR"
-  # CI may not have registered yet right after pr create: retry only on "no checks reported"
-  local checks crc tries="${AGENT_NEW_CHECK_TRIES:-6}" n=1
-  while :; do
-    crc=0; checks="$(RUN_IN 'gh pr checks --watch' 2>&1)" || crc=$?
-    [ "$crc" -ne 0 ] && grep -qi 'no checks reported' <<<"$checks" && [ "$n" -lt "$tries" ] || break
-    n=$((n+1)); sleep "${AGENT_NEW_CHECK_SLEEP:-10}"
-  done
-  if [ "$crc" -ne 0 ]; then
-    if grep -qi 'no checks reported' <<<"$checks"; then
-      warn "no required check reported after $n tries: the required-check rule stays UNTESTED (re-run verify once CI exists)"
-    else
-      die "required checks are not green on the verification PR — fix CI first, then re-run verify: $(tail -n5 <<<"$checks")"
-    fi
-  fi
-  printf '%s\n' "$checks" | tail -n2
-  expect_refusal "merge own PR"        'base branch policy|review'        'gh pr merge --squash'
-  expect_refusal "approve own PR"      'approve your own'                 'gh pr review --approve'
-  expect_refusal "push straight to main" 'GH013|repository rule'         'git push origin HEAD:main'
-  expect_refusal "admin-merge own PR"  'rule violations|not.*admin'       'gh pr merge --squash --admin'
-  say "GATE VERIFIED on $VTARGET. Approve-and-merge or close the verification PR in the browser (only your approval counts)."
+  verify_fence
+  if [ "$MAIN_GATE" -eq 1 ]; then verify_main_gate; fi
 }
 
 [ $# -ge 1 ] || usage
@@ -505,16 +997,34 @@ while [ $# -gt 0 ]; do case "$1" in
   --no-research)  RESEARCH=0; shift ;;
   --t3)           case "${2:?}" in publish|1|0) T3MODE="$2" ;; *) die "--t3 must be publish, 1 or 0 (got: $2)" ;; esac; shift 2 ;;
   --token-from)   TOKEN_FROM="${2:?}"; shift 2 ;;
-  --require)      REQUIRE_CHECKS+=("${2:?}"); shift 2 ;;
+  --require)      REQUIRE_CHECKS+=("${2:?}"); REQUIRE_GIVEN=1; shift 2 ;;
+  --main-gate)    MAIN_GATE=1; shift ;;
+  --no-working-branch) WORK_BRANCH_ON=0; shift ;;
+  --migrate)      MIGRATE=1; shift ;;
+  --retire-main-gate) RETIRE=1; shift ;;
   -*)             usage ;;
   *)              args+=("$1"); shift ;;
 esac; done
 set -- "${args[@]:-}"
+if [ "$RETIRE" -eq 1 ] && [ "$MAIN_GATE" -eq 1 ]; then
+  printf 'agent-new: --retire-main-gate and --main-gate cannot be used together\n' >&2; usage
+fi
+[ "$REQUIRE_GIVEN" -eq 0 ] || [ "$MAIN_GATE" -eq 1 ] || warn "--require is ignored without --main-gate"
 
 case "$sub" in
-  project) [ $# -eq 1 ] && [ -n "$1" ] || usage; cmd_project "$1" ;;
-  protect) [ $# -eq 1 ] || usage; [[ "$1" == */* ]] || die "protect wants <owner>/<repo>"
-           preflight_owner >/dev/null; cmd_protect "$1" ;;
+  project) [ $# -eq 1 ] && [ -n "$1" ] || usage
+           if [ "$MIGRATE" -eq 1 ] || [ "$RETIRE" -eq 1 ]; then
+             printf 'agent-new: --migrate and --retire-main-gate are for agent-new protect, not project\n' >&2; usage
+           fi
+           cmd_project "$1" ;;
+  protect) [ $# -ge 1 ] || usage
+           for r in "$@"; do repo_arg_ok "$r" || die "protect wants <owner>/<repo> (got: $r)"; done
+           OWNER="$(preflight_owner)"
+           if [ $# -gt 1 ]; then
+             [ "$MAIN_GATE" -eq 0 ] || warn "--main-gate applies to every repo named: $*"
+             [ "$RETIRE" -eq 0 ] || warn "--retire-main-gate applies to every repo named: $*"
+           fi
+           cmd_protect_many "$@" ;;
   verify)  [ $# -eq 1 ] || usage; cmd_verify "$1" ;;
   *) usage ;;
 esac
