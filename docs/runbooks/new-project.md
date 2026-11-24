@@ -50,8 +50,8 @@ MACHINE_USER=<machine-user-login>
 4. **Machine user, "set up" half (before `agent-up up`):**
    [machine-user-and-rulesets.md](machine-user-and-rulesets.md) steps 2 to 5, or
    `agent-new protect <owner>/<repo> --vault agent-<project>`. That one command creates the two fence
-   rulesets (`agent-fence`, `agent-fence-tags`), creates the working branch `allen-dev`, turns on
-   automatic deletion of merged branches, and invites the machine user last. It sets up only repos
+   rulesets (`agent-fence`, `agent-fence-tags`), creates the working branch `allen-dev` with its
+   ruleset `agent-working-branch`, makes sure automatic deletion of merged branches is off, and invites the machine user last. It sets up only repos
    you own. An existing repo that still has the older rulesets is moved over with `--migrate`, then
    `verify`, then `--retire-main-gate`, following the rollout order in that runbook.
    - In the project repo: replace `@OWNER` in `.github/CODEOWNERS`, then commit it together with

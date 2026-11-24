@@ -144,9 +144,10 @@ case "$*" in
     if [ -s "$STATE/ref-delete-fail" ] && [[ $r == *"$(cat "$STATE/ref-delete-fail")"* ]]; then echo "gh: Server Error (HTTP 500)" >&2; exit 1; fi
     ref_exists "$r" || { echo "gh: Reference does not exist (HTTP 422)" >&2; exit 1; }
     echo "$r" >> "$STATE/refs-deleted"; echo "$r" >> "$STATE/refs-gone" ;;
-  "api -X PATCH repos/"*" -F delete_branch_on_merge=true") touch "$STATE/autodelete-patched"; echo true > "$STATE/autodelete" ;;
+  "api -X PATCH repos/"*" -F delete_branch_on_merge=false") touch "$STATE/autodelete-patched"; echo false > "$STATE/autodelete" ;;
+  "api -X PATCH repos/"*" -F delete_branch_on_merge="*) echo "stub: delete_branch_on_merge must only ever be set to false" >&2; exit 1 ;;
   "api repos/"*" --jq .delete_branch_on_merge") [ -f "$STATE/autodelete-get-fail" ] && { echo "gh: Bad Gateway (HTTP 502)" >&2; exit 1; }
-    cat "$STATE/autodelete" 2>/dev/null || echo false ;;
+    cat "$STATE/autodelete" 2>/dev/null || echo true ;;
   "repo view "*" --json defaultBranchRef --jq .defaultBranchRef.name") cat "$STATE/default-branch" 2>/dev/null || echo main ;;
   "repo view "*) [ -f "$STATE/repo-exists" ] ;;
   "repo create "*)
@@ -477,8 +478,8 @@ check "fresh repo: agent-working-branch POSTed"         bash -c '[ "$1" -eq 0 ] 
 check "  it covers exactly refs/heads/allen-dev"        grep -q '"include": \["refs/heads/allen-dev"\], "exclude": \[\]' "$STATE/ruleset-posted-agent-working-branch"
 check "  rules: deletion and non_fast_forward only"     bash -c 'grep -q "\"type\": \"deletion\"" "$1" && grep -q "\"type\": \"non_fast_forward\"" "$1" && [ "$(grep -o "\"type\":" "$1" | wc -l)" -eq 2 ]' _ "$STATE/ruleset-posted-agent-working-branch"
 check "  the repository admin bypasses it, mode always" grep -q '"bypass_actors": \[{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}\]' "$STATE/ruleset-posted-agent-working-branch"
-check "  after allen-dev is created, before auto-delete is switched on" \
-  bash -c 'a=$(grep -n "POST repos/allen/repo1/git/refs" "$1" | cut -d: -f1); b=$(grep -n "POST repos/allen/repo1/rulesets" "$1" | tail -n1 | cut -d: -f1); c=$(grep -n "PATCH repos/allen/repo1 -F delete_branch_on_merge" "$1" | cut -d: -f1); [ "$a" -lt "$b" ] && [ "$b" -lt "$c" ]' _ "$GHLOG"
+check "  after allen-dev is created, before auto-delete is switched off" \
+  bash -c 'a=$(grep -n "POST repos/allen/repo1/git/refs" "$1" | cut -d: -f1); b=$(grep -n "POST repos/allen/repo1/rulesets" "$1" | tail -n1 | cut -d: -f1); c=$(grep -n "PATCH repos/allen/repo1 -F delete_branch_on_merge=false" "$1" | cut -d: -f1); [ "$a" -lt "$b" ] && [ "$b" -lt "$c" ]' _ "$GHLOG"
 newstate; touch "$STATE/collab" "$STATE/has-allen-dev"
 check "allen-dev exists already: the ruleset is still ensured" run protect allen/repo1 --vault agent-p1
 check "  POSTed"                                        test -s "$STATE/ruleset-posted-agent-working-branch"
@@ -506,12 +507,29 @@ newstate; touch "$STATE/collab" "$STATE/has-allen-dev"
 OUT=$(run protect allen/repo1 --vault agent-p1 2>&1)
 check "allen-dev exists: SKIP"                         grep -q 'SKIP.*allen-dev' <<<"$OUT"
 check "  no POST to git/refs"                          bash -c '! grep -q "git/refs" "$1"' _ "$GHLOG"
-newstate; touch "$STATE/collab"; echo true > "$STATE/autodelete"
+newstate; touch "$STATE/collab"; echo false > "$STATE/autodelete"
 OUT=$(run protect allen/repo1 --vault agent-p1 2>&1)
-check "auto-delete already true: SKIP"                 grep -q 'SKIP.*merged branches' <<<"$OUT"
+check "auto-delete already false: SKIP"                grep -q 'SKIP.*does not delete merged branches automatically' <<<"$OUT"
 check "  no PATCH"                                     test ! -f "$STATE/autodelete-patched"
+newstate; touch "$STATE/collab"; echo true > "$STATE/autodelete"
+OUT=$(run protect allen/repo1 --vault agent-p1 2>&1); rc=$?
+check "auto-delete true: exits 0"                      test "$rc" -eq 0
+check "  says it is turning it off"                    grep -q 'turning off delete_branch_on_merge for allen/repo1 (it would delete allen-dev when it is promoted)' <<<"$OUT"
+check "  one PATCH, delete_branch_on_merge=false"      test "$(grep -c 'PATCH repos/allen/repo1 -F delete_branch_on_merge=false' "$GHLOG")" -eq 1
+check "  no PATCH to true"                             lacks "$GHLOG" 'delete_branch_on_merge=true'
+for st in true false; do
+  newstate; touch "$STATE/collab"; echo "$st" > "$STATE/autodelete"
+  run protect allen/repo1 --vault agent-p1 >/dev/null 2>&1; rc=$?
+  : > "$GHLOG"; rm -f "$STATE/autodelete-patched"
+  OUT=$(run protect allen/repo1 --vault agent-p1 2>&1); rc2=$?
+  check "second run starting from $st: exits 0, no PATCH, no POST" bash -c '[ "$1" -eq 0 ] && [ "$2" -eq 0 ] && [ ! -f "$3" ] && ! grep -qE "PATCH|POST" "$4"' _ "$rc" "$rc2" "$STATE/autodelete-patched" "$GHLOG"
+done
+newstate; touch "$STATE/collab" "$STATE/autodelete-get-fail"
+run protect allen/repo1 --vault agent-p1 >/dev/null 2>&1; rc=$?
+check "setting unreadable: dies, no PATCH"             bash -c '[ "$1" -ne 0 ] && [ ! -f "$2" ]' _ "$rc" "$STATE/autodelete-patched"
 newstate; touch "$STATE/collab"
 check "--no-working-branch accepted"                   run protect allen/repo1 --vault agent-p1 --no-working-branch
+check "  auto-delete still switched off"               test -f "$STATE/autodelete-patched"
 check "  no call to branches/allen-dev"                bash -c '! grep -q "branches/allen-dev" "$1"' _ "$GHLOG"
 check "  no call to git/refs"                          bash -c '! grep -q "git/ref" "$1"' _ "$GHLOG"
 newstate; touch "$STATE/collab"

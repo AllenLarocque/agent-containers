@@ -16,7 +16,8 @@ Read-only instructions from the owner. They apply to every change you make here.
   `experiment`. The repository rejects any other branch name.
 - A `fix`, `feature`, `chore`, `docs`, `test`, `ci`, `refactor`, `perf`, `revert` or `experiment`
   branch starts from the current `allen-dev`: run `git fetch origin`, then start the branch from
-  `origin/allen-dev`. Open its pull request against `allen-dev` and squash-merge it yourself.
+  `origin/allen-dev`. Open its pull request against `allen-dev` and squash-merge it yourself. Deleting your
+  branch is part of the merge: `gh pr merge <number> --repo <owner>/<repo> --squash --delete-branch`.
 - One change per pull request. Where the repository has checks, merge only when they are green.
 - Never push to `allen-dev` directly and never rewrite its history.
 - `sync/<name>`: only when the owner asks you to bring upstream changes in. Start the `sync/` branch
@@ -24,7 +25,7 @@ Read-only instructions from the owner. They apply to every change you make here.
   the branch the owner names (the fork's copy of an upstream branch, for example `origin/development`).
   Do not fetch from the upstream repository yourself. Open its pull request into `allen-dev`.
   The owner merges the sync pull request, unless they tell you to merge it; it is merged with a
-  merge commit, never squashed.
+  merge commit, never squashed. Whoever merges it deletes its branch.
 - `upstream/<topic>`: only when the owner asks. Cut it from the fork's copy of the upstream
   repository's target branch (for example `origin/development`), never from `allen-dev`. It carries
   only that one change, and it is never merged anywhere in the fork. Give the owner this link instead

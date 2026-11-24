@@ -3,6 +3,9 @@
 Date: 2026-11-21, rewritten 2026-11-23 after discussion with the owner. Status: draft for the
 owner's approval.
 
+Amendment 2026-11-23: Automatic deletion of merged branches is switched off: a live test showed it
+deletes `allen-dev` after a promotion.
+
 ## Intent
 
 The agent runs unattended for long stretches. Today every pull request targets the default branch
@@ -82,12 +85,13 @@ The branch is named `allen-dev` on every repo (owner's choice, 2026-11-23). `age
 creates it from the default branch's head when it does not exist, leaves an existing one alone,
 and refuses a repo with no commits. `--no-working-branch` skips it.
 
-### The fence: two rulesets, on every agent repo, fork or not
+### The fence: rulesets on every agent repo, fork or not
 
 | Ruleset | Applies to | Rules | Admin bypass |
 |---|---|---|---|
 | `agent-fence` | all branches except the free names | no creation, update or deletion; no force push | always |
 | `agent-fence-tags` | all tags | no creation, update or deletion | always |
+| `agent-working-branch` | `allen-dev` alone | no deletion, no force push | always |
 
 - **Free names** (the `exclude` list of `agent-fence`): `refs/heads/allen-dev` and
   `refs/heads/<p>/**` for `<p>` in `fix`, `feature`, `chore`, `docs`, `test`, `ci`, `refactor`,
@@ -104,7 +108,7 @@ and refuses a repo with no commits. `--no-working-branch` skips it.
 - `agent-new protect` sets up only repositories the signed-in owner owns and administers, and
   refuses a repository whose default branch is `allen-dev` or starts with a free prefix (that
   branch would be outside the fence).
-- These are the same two rulesets the owner made by hand as `protect-fork` and
+- `agent-fence` and `agent-fence-tags` are the same two rulesets the owner made by hand as `protect-fork` and
   `protect-fork-tags`, with a wider `exclude` list and a name that says what they do.
 
 ### The working branch's ruleset
@@ -112,13 +116,15 @@ and refuses a repo with no commits. `--no-working-branch` skips it.
 `agent-working-branch` applies to `refs/heads/allen-dev` only, with the rules deletion and
 non_fast_forward. It stops the agent's account from deleting `allen-dev` or rewriting its history;
 the owner, as repository admin, can bypass it (admin role 5, mode always). `agent-new protect` creates it right after the working branch exists (skipped with
-`--no-working-branch`) and before it turns on automatic deletion of merged branches, which would
-otherwise delete `allen-dev` when a promotion PR from it is merged.
+`--no-working-branch`).
 
 ### Deleting branches
 
-- `agent-new protect` turns on the repo setting "Automatically delete head branches"
-  (`delete_branch_on_merge`), so a branch merged into `allen-dev` is deleted at merge time.
+- `agent-new protect` turns the repo setting "Automatically delete head branches"
+  (`delete_branch_on_merge`) off, on every repository it sets up (`--no-working-branch` too).
+  The agent deletes its own branch when it merges a pull request
+  (`gh pr merge <number> --repo <owner>/<repo> --squash --delete-branch`); the branch of a
+  `sync/` pull request is deleted by whoever merges it.
 - An `upstream/` branch is kept until upstream merges or closes its PR. The fork check lists the
   ones that can go.
 - The mirrors are fenced, so the agent cannot delete them. The agent's account cannot delete
@@ -221,7 +227,7 @@ file is generated. The research profile's own instructions are unchanged. Its co
 
 ### Runbook
 
-`docs/runbooks/machine-user-and-rulesets.md` is rewritten around the fence: what the two rulesets
+`docs/runbooks/machine-user-and-rulesets.md` is rewritten around the fence: what the three rulesets
 do, the free names, the workflow above including the fork steps, where `protect-main` still
 applies and why, the `--migrate` and `--retire-main-gate` procedure, and what `verify` creates and
 removes.

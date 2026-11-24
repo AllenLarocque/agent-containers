@@ -502,13 +502,13 @@ protect_work_branch(){ # $1 owner/repo, $2 its default branch: create the workin
   say "creating branch $WORK_BRANCH on $repo from $default"
   gh api -X POST "repos/$repo/git/refs" -f ref="refs/heads/$WORK_BRANCH" -f sha="$sha" >/dev/null
 }
-protect_autodelete(){ # $1 owner/repo: merged PR branches delete themselves
+protect_autodelete_off(){ # $1 owner/repo: merged PR branches are not deleted automatically (the agent deletes its own)
   local repo="$1" v
   v="$(gh_read "the settings of $repo" api "repos/$repo" --jq .delete_branch_on_merge)"
   case "$v" in
-    true)  skip "$repo already deletes merged branches" ;;
-    false) say "turning on delete_branch_on_merge for $repo"
-           gh api -X PATCH "repos/$repo" -F delete_branch_on_merge=true >/dev/null ;;
+    false) skip "$repo does not delete merged branches automatically" ;;
+    true)  say "turning off delete_branch_on_merge for $repo (it would delete $WORK_BRANCH when it is promoted)"
+           gh api -X PATCH "repos/$repo" -F delete_branch_on_merge=false >/dev/null ;;
     *)     die "could not read delete_branch_on_merge of $repo (got: '$v')" ;;
   esac
 }
@@ -664,9 +664,9 @@ protect_repo(){ # $1 owner/repo, in this order: the fence and the branch setting
   done
   if [ "$WORK_BRANCH_ON" -eq 1 ]; then
     protect_work_branch "$repo" "$P_DEFAULT"
-    ensure_ruleset "$repo" agent-working-branch   # before auto-delete: a merged promotion PR must not delete allen-dev
+    ensure_ruleset "$repo" agent-working-branch
   fi
-  protect_autodelete "$repo"
+  protect_autodelete_off "$repo"
   if [ "$MAIN_GATE" -eq 1 ]; then
     ensure_ruleset "$repo" protect-main
     protect_warnings "$repo"
