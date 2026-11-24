@@ -127,17 +127,18 @@ Both are checked before either is changed: if either is not exactly the hand-mad
 
 Run it only after `verify` has printed `FENCE VERIFIED` on that repo. Per repo: `agent-new protect <owner>/<repo> --migrate`, then `agent-new verify <owner>/<repo> --vault agent-<project>`, then `agent-new protect <owner>/<repo> --retire-main-gate`.
 
-It first makes sure the fence is in place, in the same run. Then it looks up a ruleset named exactly `protect-main` and one named exactly `main`, separately. A ruleset qualifies only if it is a branch ruleset that applies to exactly the default branch; any other is left alone with a warning. For each one that qualifies, the tool describes it in plain words (what it applies to, what it requires, what else it blocks, who may bypass it), for example:
+It first makes sure the fence is in place, in the same run. Then it looks up a ruleset named exactly `protect-main` and one named exactly `main`, separately. A ruleset qualifies only if it is a branch ruleset that applies to exactly the default branch; any other is left alone with a warning. For each one that qualifies, the tool describes it in plain words (what it applies to, what it requires, what else it blocks, any other rules, who may bypass it, whether it is enforced), for example:
 
 ```
 agent-new: ruleset 'protect-main' on <owner>/<repo>:
 agent-new:   applies to: the default branch
-agent-new:   requires: a pull request with 1 approval; these checks: build-test, gitleaks
+agent-new:   requires: a pull request with 1 approval, a code-owner review, stale approvals dismissed on new commits; these checks: build-test, gitleaks
 agent-new:   also blocks: deleting the branch, force pushes
 agent-new:   who may bypass it: repository admins, through a pull request only
+agent-new:   enforcement: active
 ```
 
-and asks `delete ruleset '<name>' on <repo>? [y/N]`. Only `y` typed at a terminal deletes it; where there is no terminal, nothing is deleted and the tool says so. It reads the ruleset again just before deleting it, and stops if it changed. `--retire-main-gate` together with `--main-gate` is refused.
+and asks `delete ruleset '<name>' on <repo>? [y/N]`. Only `y` typed at a terminal deletes it; where there is no terminal, nothing is deleted and the tool says so. It reads the ruleset and its description again just before deleting it, and stops if either changed. `--retire-main-gate` together with `--main-gate` is refused.
 
 ### `agent-new verify`: proving the fence
 

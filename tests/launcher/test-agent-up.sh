@@ -356,7 +356,7 @@ check "builder.md: --repo on every gh pr, sync/ by merge commit, upstream/ from 
     && grep -qF "merge commit, never squashed" "$f" && grep -qF "origin/development" "$f" && grep -qF "never from \`allen-dev\`" "$f" \
     && grep -qF "On a fork, stop and ask the owner." "$f" && grep -qF "rejected by a repository rule, stop and tell the owner" "$f" \
     && grep -qF "Do not try another route." "$f"' _ "$BI"
-check "builder.md: the agent deletes its own branch in the merge, with --delete-branch; never allen-dev; an unmerged branch needs asking" \
+check "builder.md: the agent deletes its own branch in the merge, with --delete-branch, a sync/ branch by whoever merges it, an unmerged branch needs asking" \
   bash -c 'f="$1"; grep -qF "branch is part of the merge: \`gh pr merge" "$f" && grep -qF "<number> --repo <owner>/<repo> --squash --delete-branch" "$f" \
     && grep -qF "Whoever merges it deletes its branch." "$f" && grep -qF "Never delete a branch whose pull request is not merged without asking the owner." "$f"' _ "$BI"
 check "builder.md: origin/allen-dev after git fetch origin, sync/ from the branch the owner names and merged by the owner, a non-owned origin stops, no-allen-dev starts from the default branch" \

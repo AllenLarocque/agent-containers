@@ -3,8 +3,8 @@
 Date: 2026-11-21, rewritten 2026-11-23 after discussion with the owner. Status: draft for the
 owner's approval.
 
-Amendment 2026-11-23: Automatic deletion of merged branches is switched off: a live test showed it
-deletes `allen-dev` after a promotion.
+Amendment 2026-11-23: Automatic deletion of merged branches is switched off, so that promoting
+`allen-dev` does not delete it.
 
 ## Intent
 

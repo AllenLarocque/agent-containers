@@ -54,7 +54,7 @@ Do this when you want upstream's new work in your line.
 2. Ask the agent to bring the mirror into `allen-dev`, naming the mirror branch (for example `origin/development`). It pushes a branch `sync/<date-or-topic>`, started from `allen-dev`, that merges that branch in, and opens a PR from it into `allen-dev`.
 3. Check the PR page for conflicts and for green checks, then merge it yourself (or tell the agent to). A sync PR is merged with a **merge commit**, never squashed, so upstream's own commits stay recognisable in `allen-dev`'s history and the next sync merges cleanly.
 
-You see the upstream commits appear on `allen-dev` under one merge commit, and the `sync/` branch disappear.
+You see the upstream commits appear on `allen-dev` under one merge commit, and the `sync/` branch still there: delete it with the **Delete branch** button on the merged PR, or tell the agent to.
 
 ## Deleting branches
 

@@ -564,22 +564,32 @@ fence_skipped(){ local n; for n in ${FENCE_SKIP[@]+"${FENCE_SKIP[@]}"}; do [ "$n
 RULE_REF_JQ='[.name, .target, (.conditions.ref_name.include | tojson), (.conditions.ref_name.exclude | tojson)] | join("\n")'
 # the ruleset in plain words, one line each: where it applies, what it requires, what else it blocks, who may bypass it
 RULE_WORDS_JQ='def plural($n; $w): "\($n) \($w)" + (if $n == 1 then "" else "s" end);
-  .rules as $r
-  | ($r | map(select(.type == "pull_request")) | .[0].parameters.required_approving_review_count) as $n
-  | ([$r[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context] | sort | join(", ")) as $c
+  (.rules // []) as $r
   | ($r | map(.type)) as $t
+  | ($r | map(select(.type == "pull_request")) | .[0].parameters) as $pr
+  | ($r | map(select(.type == "required_status_checks")) | .[0].parameters) as $sc
+  | ([(if $pr.require_code_owner_review == true then "a code-owner review" else empty end),
+      (if $pr.require_last_push_approval == true then "approval of the latest push" else empty end),
+      (if $pr.dismiss_stale_reviews_on_push == true then "stale approvals dismissed on new commits" else empty end)] | join(", ")) as $x
+  | (($sc.required_status_checks // []) | map(.context) | sort | join(", ")) as $c
   | ([(if ($t | index("deletion")) then "deleting the branch" else empty end),
       (if ($t | index("non_fast_forward")) then "force pushes" else empty end)] | join(", ")) as $b
-  | (.bypass_actors | map(
-      (if .actor_type == "RepositoryRole" and .actor_id == 5 then "repository admins" else "\(.actor_type) \(.actor_id)" end)
+  | ([$t[] | select(. != "deletion" and . != "non_fast_forward" and . != "pull_request" and . != "required_status_checks")] | unique | join(", ")) as $o
+  | ((.bypass_actors // []) | map(
+      (if .actor_type == "RepositoryRole" and .actor_id == 5 then "repository admins"
+       elif .actor_type == "RepositoryRole" and .actor_id != null then "repository role \(.actor_id)"
+       elif .actor_id != null then "\(.actor_type) \(.actor_id)" else "\(.actor_type)" end)
       + (if .bypass_mode == "pull_request" then ", through a pull request only" else ", with no pull request needed" end)
     ) | join("; ")) as $y
-  | "  applies to: " + (if .conditions.ref_name.include == ["~DEFAULT_BRANCH"] and .conditions.ref_name.exclude == []
+  | [ "  applies to: " + (if .conditions.ref_name.include == ["~DEFAULT_BRANCH"] and .conditions.ref_name.exclude == []
         then "the default branch" else "\(.conditions.ref_name.include | join(", ")) (not \(.conditions.ref_name.exclude | join(", ")))" end),
-    "  requires: " + (if $n != null then "a pull request with " + plural($n; "approval") else "no pull request" end)
-        + "; " + (if $c != "" then "these checks: " + $c else "no checks" end),
-    "  also blocks: " + (if $b != "" then $b else "nothing" end),
-    "  who may bypass it: " + (if $y != "" then $y else "nobody" end)'
+      "  requires: " + (if $pr != null then "a pull request with " + plural($pr.required_approving_review_count; "approval") + (if $x != "" then ", " + $x else "" end) else "no pull request" end)
+        + "; " + (if $c != "" then "these checks: " + $c + (if $sc.strict_required_status_checks_policy == true then " (branch must be up to date)" else "" end) else "no checks" end),
+      (if $b != "" then "  also blocks: " + $b elif $o == "" then "  also blocks: nothing" else empty end),
+      (if $o != "" then "  other rules: " + $o else empty end),
+      "  who may bypass it: " + (if $y != "" then $y else "nobody" end),
+      "  enforcement: " + (.enforcement | tostring) + (if .enforcement != "active" then " (this ruleset is not being enforced)" else "" end)
+    ] | .[]'
 retire_main_gate(){ # $1 owner/repo: with --retire-main-gate, offer to delete protect-main and main, each found by its exact name
   local repo="$1" name id info words line again rc f=()
   for name in protect-main main; do
@@ -599,6 +609,7 @@ retire_main_gate(){ # $1 owner/repo: with --retire-main-gate, offer to delete pr
       0) # the answer may have taken a while: the ruleset must still be exactly the one shown
          again="$(ruleset_id_exact "$repo" "$name")"
          [ "$again" = "$id" ] && [ "$(gh_read "ruleset $id on $repo" api "repos/$repo/rulesets/$id" --jq "$RULE_REF_JQ")" = "$info" ] \
+           && [ "$(gh_read "ruleset $id on $repo" api "repos/$repo/rulesets/$id" --jq "$RULE_WORDS_JQ")" = "$words" ] \
            || die "ruleset $name on $repo changed while you answered: nothing was deleted; re-run"
          say "deleting ruleset $name on $repo"
          gh api -X DELETE "repos/$repo/rulesets/$id" >/dev/null ;;
