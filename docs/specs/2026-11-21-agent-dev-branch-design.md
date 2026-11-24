@@ -161,7 +161,7 @@ Retiring the main gate is a separate step, `--retire-main-gate`, run after `agen
 passed on that repo: `protect --migrate`, then `verify`, then `protect --retire-main-gate`. It
 looks up `protect-main` and `main` each by its exact name, and offers to delete one only if it is
 a branch ruleset on exactly the default branch, after the fence is in place in the same run. It
-prints the ruleset, asks `delete ruleset '<name>' on <repo>? [y/N]`, accepts only an answer typed
+describes the ruleset in plain words (where it applies, what it requires, what else it blocks, who may bypass it), asks `delete ruleset '<name>' on <repo>? [y/N]`, accepts only an answer typed
 at a terminal, and reads the ruleset again just before deleting it. It is never combined with
 `--main-gate` (which is how `agent-containers` keeps its gate).
 

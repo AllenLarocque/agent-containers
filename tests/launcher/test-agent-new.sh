@@ -621,6 +621,19 @@ check "  prints the ruleset and asks"                     grep -q "delete rulese
 check "  exactly one DELETE, of its id"                   test "$(cat "$STATE/ruleset-deleted")" = 7
 check "  DELETE comes after the fence calls"              bash -c 'a=$(grep -n "rulesets/9 --jq" "$1" | head -n1 | cut -d: -f1); b=$(grep -n "api -X DELETE" "$1" | cut -d: -f1); [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]' _ "$GHLOG"
 check "  the ruleset (name, target, include, exclude) is read again right before the DELETE" bash -c 'tail -n4 "$1" | head -n3 | grep -q "rulesets/7 --jq \[.name, .target" && tail -n2 "$1" | grep -q "api -X DELETE repos/allen/repo1/rulesets/7"' _ "$(grep -v collaborators "$GHLOG" > "$T/ghlog.nocollab"; echo "$T/ghlog.nocollab")"
+check "  describes it in plain words, not the internal string" bash -c 'grep -qF "applies to: the default branch" <<<"$1" && grep -qF "who may bypass it: repository admins, through a pull request only" <<<"$1" && grep -qF "also blocks: deleting the branch, force pushes" <<<"$1" && grep -qF "requires: no pull request; no checks" <<<"$1" && ! grep -qF "RepositoryRole:5:" <<<"$1"' _ "$OUT"
+retstate; echo 7 > "$STATE/ruleset-id-protect-main"
+cat > "$STATE/ruleset-json-protect-main" <<'JSON'
+{"id": 7, "name": "protect-main", "target": "branch", "enforcement": "active",
+ "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}],
+ "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+ "rules": [{"type": "deletion"}, {"type": "non_fast_forward"},
+  {"type": "pull_request", "parameters": {"required_approving_review_count": 1, "dismiss_stale_reviews_on_push": true, "require_code_owner_review": true, "require_last_push_approval": false}},
+  {"type": "required_status_checks", "parameters": {"strict_required_status_checks_policy": false, "required_status_checks": [{"context": "gitleaks"}, {"context": "build-test"}]}}]}
+JSON
+OUT=$(runtty 'n\n' protect allen/repo1 --vault agent-p1 --retire-main-gate); rc=$?
+check "full protect-main, answered n: exits 0, nothing deleted" bash -c '[ "$1" -eq 0 ] && [ ! -f "$2" ]' _ "$rc" "$STATE/ruleset-deleted"
+check "  the plain description, line by line" bash -c 'for l in "ruleset '"'"'protect-main'"'"' on allen/repo1:" "  applies to: the default branch" "  requires: a pull request with 1 approval; these checks: build-test, gitleaks" "  also blocks: deleting the branch, force pushes" "  who may bypass it: repository admins, through a pull request only"; do grep -qxF "agent-new: $l" <<<"$1" || { echo "missing: $l" >&2; exit 1; }; done; ! grep -qF "RepositoryRole:5:" <<<"$1"; a=$(grep -n "applies to" <<<"$1" | cut -d: -f1); b=$(grep -n "delete ruleset" <<<"$1" | cut -d: -f1); [ "$a" -lt "$b" ]' _ "$OUT"
 for typed in 'n\n' '' 'yes please\n'; do
   retstate; gate protect-main 7
   OUT=$(runtty "$typed" protect allen/repo1 --vault agent-p1 --retire-main-gate); rc=$?
