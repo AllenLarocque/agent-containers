@@ -23,7 +23,7 @@ When you are satisfied with `allen-dev`, you promote it to the default branch:
 
 1. Repo → Pull requests → New pull request. Base: the default branch (usually `main`). Compare: `allen-dev`.
 2. Read the diff, then **Create pull request** and merge it. (You can also merge locally and push; you are the only account allowed to write to the default branch.)
-3. Repo → Branches: `allen-dev` stays. The ruleset `agent-working-branch` stops the agent's account from deleting it or rewriting its history (you, as repository admin, can bypass it), so GitHub's automatic deletion of merged branches leaves it in place.
+3. Repo → Branches: `allen-dev` stays. The ruleset `agent-working-branch` stops the agent's account from deleting it or rewriting its history (you, as repository admin, can bypass it), and automatic deletion of merged branches is switched off, so merging a promotion pull request leaves it in place.
 
 Nothing promotes automatically. The default branch changes only when you do it.
 
@@ -54,11 +54,11 @@ Do this when you want upstream's new work in your line.
 2. Ask the agent to bring the mirror into `allen-dev`, naming the mirror branch (for example `origin/development`). It pushes a branch `sync/<date-or-topic>`, started from `allen-dev`, that merges that branch in, and opens a PR from it into `allen-dev`.
 3. Check the PR page for conflicts and for green checks, then merge it yourself (or tell the agent to). A sync PR is merged with a **merge commit**, never squashed, so upstream's own commits stay recognisable in `allen-dev`'s history and the next sync merges cleanly.
 
-You see the upstream commits appear on `allen-dev` under one merge commit, and the `sync/` branch disappear.
+You see the upstream commits appear on `allen-dev` under one merge commit, and the `sync/` branch still there: delete it with the **Delete branch** button on the merged PR, or tell the agent to.
 
 ## Deleting branches
 
-- A branch merged into `allen-dev` is deleted by GitHub at merge time (the repo setting "Automatically delete head branches").
+- The agent deletes its own branch when it merges a pull request into `allen-dev` (`gh pr merge ... --squash --delete-branch`). GitHub does not delete merged branches by itself: the repo setting "Automatically delete head branches" is off.
 - An `upstream/` branch is kept until upstream merges or closes the PR made from it. The fork check lists the ones that can go.
 - The mirrors are fenced, so the agent cannot delete them.
 - The agent's account cannot delete `allen-dev` or rewrite its history (the ruleset `agent-working-branch`); you, as repository admin, can bypass it. To reset it, force-push it yourself: `git push --force-with-lease origin <commit>:allen-dev`.

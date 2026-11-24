@@ -144,9 +144,10 @@ case "$*" in
     if [ -s "$STATE/ref-delete-fail" ] && [[ $r == *"$(cat "$STATE/ref-delete-fail")"* ]]; then echo "gh: Server Error (HTTP 500)" >&2; exit 1; fi
     ref_exists "$r" || { echo "gh: Reference does not exist (HTTP 422)" >&2; exit 1; }
     echo "$r" >> "$STATE/refs-deleted"; echo "$r" >> "$STATE/refs-gone" ;;
-  "api -X PATCH repos/"*" -F delete_branch_on_merge=true") touch "$STATE/autodelete-patched"; echo true > "$STATE/autodelete" ;;
+  "api -X PATCH repos/"*" -F delete_branch_on_merge=false") touch "$STATE/autodelete-patched"; echo false > "$STATE/autodelete" ;;
+  "api -X PATCH repos/"*" -F delete_branch_on_merge="*) echo "stub: delete_branch_on_merge must only ever be set to false" >&2; exit 1 ;;
   "api repos/"*" --jq .delete_branch_on_merge") [ -f "$STATE/autodelete-get-fail" ] && { echo "gh: Bad Gateway (HTTP 502)" >&2; exit 1; }
-    cat "$STATE/autodelete" 2>/dev/null || echo false ;;
+    cat "$STATE/autodelete" 2>/dev/null || echo true ;;
   "repo view "*" --json defaultBranchRef --jq .defaultBranchRef.name") cat "$STATE/default-branch" 2>/dev/null || echo main ;;
   "repo view "*) [ -f "$STATE/repo-exists" ] ;;
   "repo create "*)
@@ -477,8 +478,8 @@ check "fresh repo: agent-working-branch POSTed"         bash -c '[ "$1" -eq 0 ] 
 check "  it covers exactly refs/heads/allen-dev"        grep -q '"include": \["refs/heads/allen-dev"\], "exclude": \[\]' "$STATE/ruleset-posted-agent-working-branch"
 check "  rules: deletion and non_fast_forward only"     bash -c 'grep -q "\"type\": \"deletion\"" "$1" && grep -q "\"type\": \"non_fast_forward\"" "$1" && [ "$(grep -o "\"type\":" "$1" | wc -l)" -eq 2 ]' _ "$STATE/ruleset-posted-agent-working-branch"
 check "  the repository admin bypasses it, mode always" grep -q '"bypass_actors": \[{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}\]' "$STATE/ruleset-posted-agent-working-branch"
-check "  after allen-dev is created, before auto-delete is switched on" \
-  bash -c 'a=$(grep -n "POST repos/allen/repo1/git/refs" "$1" | cut -d: -f1); b=$(grep -n "POST repos/allen/repo1/rulesets" "$1" | tail -n1 | cut -d: -f1); c=$(grep -n "PATCH repos/allen/repo1 -F delete_branch_on_merge" "$1" | cut -d: -f1); [ "$a" -lt "$b" ] && [ "$b" -lt "$c" ]' _ "$GHLOG"
+check "  after allen-dev is created, before auto-delete is switched off" \
+  bash -c 'a=$(grep -n "POST repos/allen/repo1/git/refs" "$1" | cut -d: -f1); b=$(grep -n "POST repos/allen/repo1/rulesets" "$1" | tail -n1 | cut -d: -f1); c=$(grep -n "PATCH repos/allen/repo1 -F delete_branch_on_merge=false" "$1" | cut -d: -f1); [ "$a" -lt "$b" ] && [ "$b" -lt "$c" ]' _ "$GHLOG"
 newstate; touch "$STATE/collab" "$STATE/has-allen-dev"
 check "allen-dev exists already: the ruleset is still ensured" run protect allen/repo1 --vault agent-p1
 check "  POSTed"                                        test -s "$STATE/ruleset-posted-agent-working-branch"
@@ -506,12 +507,29 @@ newstate; touch "$STATE/collab" "$STATE/has-allen-dev"
 OUT=$(run protect allen/repo1 --vault agent-p1 2>&1)
 check "allen-dev exists: SKIP"                         grep -q 'SKIP.*allen-dev' <<<"$OUT"
 check "  no POST to git/refs"                          bash -c '! grep -q "git/refs" "$1"' _ "$GHLOG"
-newstate; touch "$STATE/collab"; echo true > "$STATE/autodelete"
+newstate; touch "$STATE/collab"; echo false > "$STATE/autodelete"
 OUT=$(run protect allen/repo1 --vault agent-p1 2>&1)
-check "auto-delete already true: SKIP"                 grep -q 'SKIP.*merged branches' <<<"$OUT"
+check "auto-delete already false: SKIP"                grep -q 'SKIP.*does not delete merged branches automatically' <<<"$OUT"
 check "  no PATCH"                                     test ! -f "$STATE/autodelete-patched"
+newstate; touch "$STATE/collab"; echo true > "$STATE/autodelete"
+OUT=$(run protect allen/repo1 --vault agent-p1 2>&1); rc=$?
+check "auto-delete true: exits 0"                      test "$rc" -eq 0
+check "  says it is turning it off"                    grep -q 'turning off delete_branch_on_merge for allen/repo1 (it would delete allen-dev when it is promoted)' <<<"$OUT"
+check "  one PATCH, delete_branch_on_merge=false"      test "$(grep -c 'PATCH repos/allen/repo1 -F delete_branch_on_merge=false' "$GHLOG")" -eq 1
+check "  no PATCH to true"                             lacks "$GHLOG" 'delete_branch_on_merge=true'
+for st in true false; do
+  newstate; touch "$STATE/collab"; echo "$st" > "$STATE/autodelete"
+  run protect allen/repo1 --vault agent-p1 >/dev/null 2>&1; rc=$?
+  : > "$GHLOG"; rm -f "$STATE/autodelete-patched"
+  OUT=$(run protect allen/repo1 --vault agent-p1 2>&1); rc2=$?
+  check "second run starting from $st: exits 0, no PATCH, no POST" bash -c '[ "$1" -eq 0 ] && [ "$2" -eq 0 ] && [ ! -f "$3" ] && ! grep -qE "PATCH|POST" "$4"' _ "$rc" "$rc2" "$STATE/autodelete-patched" "$GHLOG"
+done
+newstate; touch "$STATE/collab" "$STATE/autodelete-get-fail"
+run protect allen/repo1 --vault agent-p1 >/dev/null 2>&1; rc=$?
+check "setting unreadable: dies, no PATCH of any value" bash -c '[ "$1" -ne 0 ] && [ ! -f "$2" ] && ! grep -q "PATCH repos/allen/repo1" "$3"' _ "$rc" "$STATE/autodelete-patched" "$GHLOG"
 newstate; touch "$STATE/collab"
 check "--no-working-branch accepted"                   run protect allen/repo1 --vault agent-p1 --no-working-branch
+check "  auto-delete still switched off"               test -f "$STATE/autodelete-patched"
 check "  no call to branches/allen-dev"                bash -c '! grep -q "branches/allen-dev" "$1"' _ "$GHLOG"
 check "  no call to git/refs"                          bash -c '! grep -q "git/ref" "$1"' _ "$GHLOG"
 newstate; touch "$STATE/collab"
@@ -602,7 +620,40 @@ check "protect-main + --retire-main-gate, typed y at a terminal: exits 0" test "
 check "  prints the ruleset and asks"                     grep -q "delete ruleset 'protect-main' on allen/repo1? \[y/N\]" <<<"$OUT"
 check "  exactly one DELETE, of its id"                   test "$(cat "$STATE/ruleset-deleted")" = 7
 check "  DELETE comes after the fence calls"              bash -c 'a=$(grep -n "rulesets/9 --jq" "$1" | head -n1 | cut -d: -f1); b=$(grep -n "api -X DELETE" "$1" | cut -d: -f1); [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]' _ "$GHLOG"
-check "  the ruleset (name, target, include, exclude) is read again right before the DELETE" bash -c 'tail -n4 "$1" | head -n3 | grep -q "rulesets/7 --jq \[.name, .target" && tail -n2 "$1" | grep -q "api -X DELETE repos/allen/repo1/rulesets/7"' _ "$(grep -v collaborators "$GHLOG" > "$T/ghlog.nocollab"; echo "$T/ghlog.nocollab")"
+check "  the ruleset (name, target, include, exclude) and its description are read again right before the DELETE" bash -c 'f="$1"; a=$(grep -n "rulesets/7 --jq \[.name, .target" "$f" | tail -n1 | cut -d: -f1); w=$(grep -n "def plural" "$f" | tail -n1 | cut -d: -f1); d=$(grep -n "api -X DELETE repos/allen/repo1/rulesets/7" "$f" | cut -d: -f1); [ "$(grep -c "rulesets/7 --jq \[.name, .target" "$f")" -eq 2 ] && [ "$a" -lt "$w" ] && [ "$w" -lt "$d" ]' _ "$(grep -v collaborators "$GHLOG" > "$T/ghlog.nocollab"; echo "$T/ghlog.nocollab")"
+check "  describes it in plain words, not the internal string" bash -c 'grep -qF "applies to: the default branch" <<<"$1" && grep -qF "who may bypass it: repository admins, through a pull request only" <<<"$1" && grep -qF "also blocks: deleting the branch, force pushes" <<<"$1" && grep -qF "requires: no pull request; no checks" <<<"$1" && ! grep -qF "RepositoryRole:5:" <<<"$1"' _ "$OUT"
+retstate; echo 7 > "$STATE/ruleset-id-protect-main"
+cat > "$STATE/ruleset-json-protect-main" <<'JSON'
+{"id": 7, "name": "protect-main", "target": "branch", "enforcement": "active",
+ "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}],
+ "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+ "rules": [{"type": "deletion"}, {"type": "non_fast_forward"},
+  {"type": "pull_request", "parameters": {"required_approving_review_count": 1, "dismiss_stale_reviews_on_push": true, "require_code_owner_review": true, "require_last_push_approval": false}},
+  {"type": "required_status_checks", "parameters": {"strict_required_status_checks_policy": false, "required_status_checks": [{"context": "gitleaks"}, {"context": "build-test"}]}}]}
+JSON
+OUT=$(runtty 'n\n' protect allen/repo1 --vault agent-p1 --retire-main-gate); rc=$?
+check "full protect-main, answered n: exits 0, nothing deleted" bash -c '[ "$1" -eq 0 ] && [ ! -f "$2" ]' _ "$rc" "$STATE/ruleset-deleted"
+check "  the plain description, line by line" bash -c 'for l in "ruleset '"'"'protect-main'"'"' on allen/repo1:" "  applies to: the default branch" "  requires: a pull request with 1 approval, a code-owner review, stale approvals dismissed on new commits; these checks: build-test, gitleaks" "  enforcement: active" "  also blocks: deleting the branch, force pushes" "  who may bypass it: repository admins, through a pull request only"; do grep -qxF "agent-new: $l" <<<"$1" || { echo "missing: $l" >&2; exit 1; }; done; ! grep -qF "RepositoryRole:5:" <<<"$1"; a=$(grep -n "applies to" <<<"$1" | cut -d: -f1); b=$(grep -n "delete ruleset" <<<"$1" | cut -d: -f1); [ "$a" -lt "$b" ]' _ "$OUT"
+retstate; echo 7 > "$STATE/ruleset-id-protect-main"
+cat > "$STATE/ruleset-json-protect-main" <<'JSON'
+{"id": 7, "name": "protect-main", "target": "branch", "enforcement": "disabled",
+ "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}, {"actor_id": null, "actor_type": "OrganizationAdmin", "bypass_mode": "always"}, {"actor_id": 2, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}],
+ "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+ "rules": [{"type": "update"}, {"type": "required_signatures"},
+  {"type": "pull_request", "parameters": {"required_approving_review_count": 2, "dismiss_stale_reviews_on_push": false, "require_code_owner_review": true, "require_last_push_approval": true}},
+  {"type": "required_status_checks", "parameters": {"strict_required_status_checks_policy": true, "required_status_checks": [{"context": "gitleaks"}]}}]}
+JSON
+OUT=$(runtty 'n\n' protect allen/repo1 --vault agent-p1 --retire-main-gate); rc=$?
+check "odd, disabled protect-main, answered n: exits 0, nothing deleted" bash -c '[ "$1" -eq 0 ] && [ ! -f "$2" ]' _ "$rc" "$STATE/ruleset-deleted"
+check "  other rules listed, sorted"                  grep -qxF "agent-new:   other rules: required_signatures, update" <<<"$OUT"
+check "  2 approvals, code-owner review, latest push" grep -qF "a pull request with 2 approvals, a code-owner review, approval of the latest push; these checks: gitleaks (branch must be up to date)" <<<"$OUT"
+check "  does not claim it blocks nothing"            bash -c '! grep -qF "also blocks: nothing" <<<"$1"' _ "$OUT"
+check "  disabled: says it is not enforced"           grep -qxF "agent-new:   enforcement: disabled (this ruleset is not being enforced)" <<<"$OUT"
+check "  bypass actors: role 5, a typeless id, another role" grep -qxF "agent-new:   who may bypass it: repository admins, with no pull request needed; OrganizationAdmin, with no pull request needed; repository role 2, through a pull request only" <<<"$OUT"
+retstate; gate protect-main 7; cp "$STATE/ruleset-json-protect-main" "$STATE/ruleset-json-protect-main.later"
+sed -i 's/{"type": "non_fast_forward"}/{"type": "non_fast_forward"}, {"type": "required_signatures"}/' "$STATE/ruleset-json-protect-main.later"; echo 3 > "$STATE/ruleset-later-after-protect-main"
+OUT=$(runtty 'y\n' protect allen/repo1 --vault agent-p1 --retire-main-gate); rc=$?
+check "rules changed between the description and the DELETE: dies, nothing deleted" bash -c '[ "$1" -ne 0 ] && grep -q "changed while you answered: nothing was deleted" <<<"$2" && [ ! -f "$3" ] && ! grep -q "api -X DELETE" "$4"' _ "$rc" "$OUT" "$STATE/ruleset-deleted" "$GHLOG"
 for typed in 'n\n' '' 'yes please\n'; do
   retstate; gate protect-main 7
   OUT=$(runtty "$typed" protect allen/repo1 --vault agent-p1 --retire-main-gate); rc=$?

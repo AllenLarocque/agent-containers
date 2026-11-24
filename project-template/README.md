@@ -229,7 +229,7 @@ TAILSCALE_HOST=<machine>.<tailnet>.ts.net
 
 `agent-new` also reads `MACHINE_USER=<machine-user-login>` from this file (docs/runbooks/new-project.md).
 
-**GitHub wiring.** `agent-new protect <owner>/<repo>...` sets a repo up so that the machine user can write only to branches with an allowed prefix and to `allen-dev` (two rulesets, `agent-fence` and `agent-fence-tags`; it also creates `allen-dev` and turns on deletion of merged branches), and `agent-new verify <project>` proves it as the machine user (it should end with `FENCE VERIFIED`). The model, the rollout order and the main gate that `agent-containers` keeps (`--main-gate`) are in docs/runbooks/machine-user-and-rulesets.md; the daily routine is in docs/runbooks/branch-workflow.md.
+**GitHub wiring.** `agent-new protect <owner>/<repo>...` sets a repo up so that the machine user can write only to branches with an allowed prefix and to `allen-dev` (the rulesets `agent-fence` and `agent-fence-tags`; it also creates `allen-dev` with its ruleset `agent-working-branch`, and makes sure merged branches are not deleted automatically), and `agent-new verify <project>` proves it as the machine user (it should end with `FENCE VERIFIED`). The model, the rollout order and the main gate that `agent-containers` keeps (`--main-gate`) are in docs/runbooks/machine-user-and-rulesets.md; the daily routine is in docs/runbooks/branch-workflow.md.
 
 **Per project:**
 1. `agent-up up <project>` prints the command, e.g.

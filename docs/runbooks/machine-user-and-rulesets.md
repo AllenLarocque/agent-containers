@@ -24,14 +24,15 @@ Terms used below:
 - **Fast-forward:** updating a branch by adding the commits it lacks, without rewriting anything.
 - **Prefix:** the part of a branch name before the first slash. In `fix/typo`, the prefix is `fix`.
 
-## The two rulesets
+## The three rulesets
 
-`agent-new protect` gives every agent repo the same two rulesets, fork or not.
+`agent-new protect` gives every agent repo the same three rulesets, fork or not: `agent-fence` and `agent-fence-tags` (the fence), and `agent-working-branch`.
 
 | Ruleset | Applies to | What it forbids | Bypass |
 |---|---|---|---|
 | `agent-fence` | all branches except the allowed names | creating, updating or deleting a branch; force-pushing | Repository admin, always |
 | `agent-fence-tags` | all tags | creating, updating or deleting a tag | Repository admin, always |
+| `agent-working-branch` | `allen-dev` alone | deleting it; force-pushing | Repository admin, always |
 
 Merging a PR into a branch counts as updating that branch, so the machine user also cannot merge anything into the default branch or any mirror.
 
@@ -46,12 +47,12 @@ Merging a PR into a branch counts as updating that branch, so the machine user a
 
 The list limits the agent only. You may name your own branches anything.
 
-*Why two rulesets:* GitHub keeps branch rules and tag rules apart.
+*Why the fence is two rulesets:* GitHub keeps branch rules and tag rules apart, so branches and tags each need their own. `agent-working-branch` is a branch ruleset of its own because it covers `allen-dev` alone, which the fence leaves free.
 *Why the admin bypass is "always":* you are the only admin and must be able to move `allen-dev`, mirrors and tags yourself. The machine user holds Write access, never Admin, so the bypass never reaches it.
 
 ### The working branch's ruleset
 
-A third ruleset, `agent-working-branch`, applies to `allen-dev` alone. It stops the agent's account from deleting `allen-dev` or rewriting its history; you, as repository admin, can bypass it. It also keeps `allen-dev` in place when you merge a promotion PR from it, which "Automatically delete head branches" would otherwise delete.
+The ruleset `agent-working-branch` applies to `allen-dev` alone. It stops the agent's account from deleting `allen-dev` or rewriting its history; you, as repository admin, can bypass it.
 
 ## Resetting `allen-dev`
 
@@ -63,7 +64,7 @@ git push --force-with-lease origin <commit>:allen-dev
 
 ## Branch deletion
 
-`agent-new protect` turns on the repo setting **Automatically delete head branches**: when a PR is merged, GitHub deletes its source branch. A branch merged into `allen-dev` therefore disappears at merge time. An `upstream/` branch is kept until the original repo merges or closes the PR made from it. `allen-dev` cannot be deleted (its ruleset), and the mirrors are fenced.
+`agent-new protect` turns the repo setting **Automatically delete head branches** off, so that merging the promotion PR from `allen-dev` into the default branch does not delete `allen-dev`. The agent deletes its own branch when it merges a PR (`gh pr merge <number> --repo <owner>/<repo> --squash --delete-branch`). The branch of a `sync/` PR is deleted by whoever merges it. An `upstream/` branch is kept until the original repo merges or closes the PR made from it. `allen-dev` cannot be deleted by the agent (its ruleset), and the mirrors are fenced.
 
 ## Where the older main gate still applies
 
@@ -98,7 +99,7 @@ For each repo, `protect` does these in order, and prints `SKIP (done)` for anyth
 3. With `--migrate`: renames the older rulesets (below).
 4. Creates the ruleset `agent-fence`, then `agent-fence-tags`.
 5. Creates the branch `allen-dev` from the head of the default branch, unless it exists, and gives it the ruleset `agent-working-branch`. It stops with a message for a repo that has no commits yet. `--no-working-branch` skips both.
-6. Turns on "Automatically delete head branches".
+6. Makes sure "Automatically delete head branches" is off (it turns it off when it is on). This applies with `--no-working-branch` too.
 7. With `--main-gate`: creates `protect-main` and warns if the repo lacks `.github/CODEOWNERS` or a gitleaks workflow, or lets Actions approve PRs. With `--retire-main-gate`: offers to delete the main gate (below).
 8. Last: invites the machine user as a collaborator, and accepts the invitation for it when you give `--vault` (the project vault that holds its token). If the machine user is already a collaborator, it must hold Write (not Admin or Maintain), or the tool stops. The token is read once per run, for every repo in it, and must belong to the machine user.
 
@@ -126,7 +127,18 @@ Both are checked before either is changed: if either is not exactly the hand-mad
 
 Run it only after `verify` has printed `FENCE VERIFIED` on that repo. Per repo: `agent-new protect <owner>/<repo> --migrate`, then `agent-new verify <owner>/<repo> --vault agent-<project>`, then `agent-new protect <owner>/<repo> --retire-main-gate`.
 
-It first makes sure the fence is in place, in the same run. Then it looks up a ruleset named exactly `protect-main` and one named exactly `main`, separately. A ruleset qualifies only if it is a branch ruleset that applies to exactly the default branch; any other is left alone with a warning. For each one that qualifies, the tool prints its settings and asks `delete ruleset '<name>' on <repo>? [y/N]`. Only `y` typed at a terminal deletes it; where there is no terminal, nothing is deleted and the tool says so. It reads the ruleset again just before deleting it, and stops if it changed. `--retire-main-gate` together with `--main-gate` is refused.
+It first makes sure the fence is in place, in the same run. Then it looks up a ruleset named exactly `protect-main` and one named exactly `main`, separately. A ruleset qualifies only if it is a branch ruleset that applies to exactly the default branch; any other is left alone with a warning. For each one that qualifies, the tool describes it in plain words (what it applies to, what it requires, what else it blocks, any other rules, who may bypass it, whether it is enforced), for example:
+
+```
+agent-new: ruleset 'protect-main' on <owner>/<repo>:
+agent-new:   applies to: the default branch
+agent-new:   requires: a pull request with 1 approval, a code-owner review, stale approvals dismissed on new commits; these checks: build-test, gitleaks
+agent-new:   also blocks: deleting the branch, force pushes
+agent-new:   who may bypass it: repository admins, through a pull request only
+agent-new:   enforcement: active
+```
+
+and asks `delete ruleset '<name>' on <repo>? [y/N]`. Only `y` typed at a terminal deletes it; where there is no terminal, nothing is deleted and the tool says so. It reads the ruleset and its description again just before deleting it, and stops if either changed. `--retire-main-gate` together with `--main-gate` is refused.
 
 ### `agent-new verify`: proving the fence
 
@@ -159,7 +171,7 @@ Do this order the first time, on the repos you already have.
 1. **Start with a repo you own outright** (not a fork, not `agent-containers`). **Migrate first:** `verify` refuses to run while an older `protect-fork` or `protect-fork-tags` ruleset exists, so convert those first: `agent-new protect <owner>/<repo> --migrate --vault agent-<project>`, then `agent-new verify <owner>/<repo> --vault agent-<project>`.
 2. **Note GitHub's exact refusal text for each check on the first repo.** `verify` prints GitHub's message only when a check fails; on success it prints just `OK (refused as expected): <label>`. To record the exact texts on a clean first run, use the by-hand commands in section 6.1. If `verify` stops with "not for the expected reason", that is a finding to report, not something to work around.
 3. **Then take the other repos one at a time.** For each: `agent-new protect <owner>/<repo> --migrate --vault agent-<project>`, then `agent-new verify <owner>/<repo> --vault agent-<project>`; only when `FENCE VERIFIED` has printed, `agent-new protect <owner>/<repo> --retire-main-gate` and answer the delete question. Move to the next repo after that.
-4. **After the first promotion on the first repository** (merging the `allen-dev` pull request into the default branch), check that `allen-dev` still exists: `gh api repos/<owner>/<repo>/branches/allen-dev --jq .name`. If it is gone, re-run `agent-new protect <owner>/<repo>` to recreate it, and report it before promoting on any other repository.
+4. **After the first promotion on the first repository** (merging the `allen-dev` pull request into the default branch), check that `allen-dev` still exists: `gh api repos/<owner>/<repo>/branches/allen-dev --jq .name`; it should print `allen-dev`. If it is gone, re-run `agent-new protect <owner>/<repo>` to recreate it, and report it before promoting on any other repository.
 5. **`agent-containers` keeps its main gate:** `agent-new protect <owner>/agent-containers --main-gate --require build-test --require lint`, never `--retire-main-gate`.
 
 The numbered steps that follow are the by-hand procedure. Step 1 is done once, step 3 once per project, steps 2, 4 and 5 per repo (`agent-new protect` does 2.1, 4 and 5), step 6 per project after its container is up, and step 7 once, for `agent-containers`.
@@ -267,7 +279,7 @@ Editing rulesets needs Admin; the agent (Write) cannot.
 
 1. Create `allen-dev`: Repo → Code → the branch drop-down → type `allen-dev` → **Create branch: allen-dev from main** (use the default branch's name if it is not `main`). You should see `allen-dev` in the branch list.
 2. Create the ruleset `agent-working-branch` (step 4.4).
-3. Repo → Settings → General → Pull Requests → tick **Automatically delete head branches**.
+3. Repo → Settings → General → Pull Requests → make sure **Automatically delete head branches** is **unticked**.
 
 ## 6. Verify (required, after `agent-up up <project>`)
 
