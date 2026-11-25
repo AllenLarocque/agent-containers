@@ -69,6 +69,10 @@ WS3_LandR/inputs
   in the group, its entry says so and names that container, without that container's paths.
 - Host state (§3.4) is kept per section.
 - A project with `PROFILE=research`, or that is not a builder, is refused as a section.
+- A builder whose `project.conf` does not have exactly `SHARED_INPUTS=1` is refused as a section
+  (final review): only with it does the container's agent get the rules about read-only links
+  (§4.4), so linking files of a container whose agent was never told would leave it guessing at
+  "permission denied". The refusal names the `inputs.conf` line and says why.
 
 The script refuses to run when:
 
@@ -79,14 +83,22 @@ The script refuses to run when:
   directory under `~/.config/agent-containers`. Research downloads are kept out deliberately: a hard
   link would let a builder's in-place edit reach a file the research container reads, and the reverse.
 
-It walks each folder recursively without following symlinks, and skips `.git` directories. It never
-touches files outside the listed folders.
+It walks each folder recursively without following symlinks, and skips `.git` directories, its own
+`REPORT.md`, and `.tmp` at the root of the report folder (`reproducible`'s download scratch, §4.3). It
+never touches files outside the listed folders.
 
 **The folders are writable by the container's agent, and the job runs on the host with the owner's
 full access.** So the job must not be steerable by what the agent puts there: every operation works
 relative to an open directory handle (`openat`/`linkat`/`renameat` style, `O_NOFOLLOW`, `os.*` with
 `dir_fd` and `follow_symlinks=False`), re-checks that a file is still the same inode before replacing
 it, and never follows a symlink anywhere. A path swapped for a symlink mid-scan is skipped, not followed.
+
+Final review additions: the `st_ctime_ns` of both inodes is recorded while the byte comparison holds
+(user space cannot set it), and once both read leases are held, just before linking, both must still
+have the same device, inode, size, mtime and ctime (the kept inode's expected ctime follows the job's
+own chmod, links and renames). After the exchange both names are checked (the target name holds the
+kept inode, the temp name the scanned duplicate), and after a swap-back both again; any mismatch
+removes nothing, lists both paths under "Needs the owner's attention" and exits 1.
 
 ### 3.2 Linking duplicates
 
@@ -124,12 +136,18 @@ name and renamed into place through a directory handle, never following a symlin
 
 1. Run time, dry run or not, folders scanned, total size on disk (each inode counted once), space freed
    by this run and in total so far.
-2. **Not read in 180 days:** one entry per inode, largest first: size, last-read date, every path
-   (relative to its listed folder). The threshold is a command-line option, default 180 days.
+2. **Not read in 180 days:** one entry per inode, largest first: inode number, size (also in exact
+   bytes), last-read date, every path. The threshold is a command-line option, default 180 days. An
+   entry whose link count is greater than the paths found in the listed folders is marked "also
+   linked from outside the listed folders: deleting these paths frees nothing". The report says it is
+   information only and may be out of date, and to check inode and size with `stat` before deleting.
 3. **In the shared folder but linked from nowhere else:** files under `inputs-shared/` whose link
-   count is 1, i.e. no project folder links them any more. Deleting these frees space; deleting a file
-   that other paths still link frees nothing, and the report says so in one line.
+   count is 1, i.e. no project folder links them any more, with inode number and size. Deleting these
+   frees space; deleting a file that other paths still link frees nothing, and the report says so in
+   one line.
 4. Files skipped (`O_NOATIME` refused, unreadable, changed during the scan), with the reason.
+5. One line with the size of leftover scratch in `inputs-shared/.tmp`: safe to delete when no R
+   session in the container is running; an owner action, not the agent's.
 
 Paths in the report are container paths (`/workspace/...`), so the agent can act on them, and contain
 no host home path.
@@ -140,13 +158,18 @@ no host home path.
 `Persistent=true` so a run missed while the machine was off happens at next boot) and enables it;
 `agent-inputs remove-timer` disables and removes them. The service runs `agent-inputs scan`.
 systemd runs as PID 1 in this WSL installation (checked 2026-11-25). The README tells the owner how to
-see the last run (`systemctl --user status agent-inputs.timer`, the report file).
+see the last run (`systemctl --user status agent-inputs.timer`, `systemctl --user status
+agent-inputs.service` for the last scan's outcome, the report file), and that a user timer runs only
+while the user's systemd manager is up (`loginctl enable-linger` to run without a login).
 
 ### 3.6 `agent-up status`
 
 If `inputs.conf` exists, `status` prints one line from the host state file: last run date, total size,
 space freed so far, and the number and size of files not read in 180 days. Nothing if the file is
-missing.
+missing. The line marks a dry run, says "last run had problems: see REPORT.md" when that run had
+items for the owner's attention or could not publish the report (the state records the count), and
+warns when the last run is more than 8 days old (a renamed listed folder, which the agent can do,
+stops every run).
 
 ## 4. Part B: the shared download folder (container)
 
@@ -166,7 +189,8 @@ SHARED_INPUTS=0
   `RESEARCH` and `RSTUDIO`). The research profile refuses `SHARED_INPUTS=1`.
 - `SHARED_INPUTS` joins the reserved-key list and the `unset` list in `bin/agent-up`.
 - `agent-up up` with it on creates `<PROJECT_DIR>/inputs-shared/` and `<PROJECT_DIR>/inputs-shared/.tmp/`
-  on the host if missing (`mkdir -p`, with a message). Inside one mount, so links work.
+  on the host if missing (one plain `mkdir` per level, refusing a symlink or non-folder before and
+  after, with a message). Inside one mount, so links work. The seed `.gitignore` lists `inputs-shared/`.
 
 ### 4.2 Overlay
 
@@ -191,10 +215,18 @@ local({
 })
 ```
 
-- Both option names are set: the new name for `reproducible` 3.2.1+, the old one for older releases a
-  project may install. (The builder checks whether setting both triggers the deprecation message on
-  3.2.1 and, if it does, sets only what each release reads, e.g. by checking the installed version
-  without loading the package.)
+- **Plan ruling (supersedes the block above):** only the old name, `reproducible.inputPaths`, is set.
+  `reproducible` 3.2.1 reads the new name (`reproducible.destinationPathShared`) first, so setting it
+  from the site profile would override a script or `setupProject()` that later sets the old name, and
+  break "never overrides a value already set". The block is skipped when either name is already set.
+  The cost: `reproducible` prints a one-time deprecation note per session. **If a future
+  `reproducible` release drops the old name, Part B silently turns off** (downloads go back to each
+  project's own folder; nothing breaks, the saving stops); the smoke test checks only that the option
+  is set, so this needs a look at each `reproducible` upgrade.
+- `reproducible.tempPath` is a per-session subfolder, `file.path(SPADES_INPUTS_TMP,
+  basename(tempdir()))` (final review): a fixed shared temp path would be shared by concurrent R
+  sessions and keep their leftovers. It stays inside the same mount, so the final step is still a link.
+  Leftovers there are listed by size in the report (§3.4) for the owner to clear.
 - It does nothing without the variables, so other containers on the same image are unaffected.
 - Modules that read the shared-folder option to keep one copy of a large file they compute (seen in
   the SpaDES projects: a factorial-table module and an ecozone module) will write those files to the
@@ -222,12 +254,20 @@ the existing style:
   delete anything in it, never open a file there for in-place update; if a file looks wrong, tell the
   owner.
 - Files in project input folders may be hard links shared with other projects (the weekly job makes
-  them, and makes them read-only): never edit an input file in place; write a new file instead. If a
-  run fails with "permission denied" on an input file, delete that path and re-run (the file is
-  rebuilt or downloaded as a new file), and tell the owner which file and which code tried to rewrite
-  it. Never make such a file writable again.
-- `inputs-shared/REPORT.md` lists old files; when the owner asks about clean-up, read it. Delete only
-  what the owner names in chat, and delete every path the report lists for that file.
+  them, and makes them read-only): never edit an input file in place; write a new file instead.
+- If a run fails with "permission denied" on an input file: make a private writable copy of the
+  project's own path in place (`cp -p <path> <path>.new && chmod u+w <path>.new && mv <path>.new
+  <path>`), never the copy in `/workspace/inputs-shared`, and never `chmod` the linked file itself; if
+  the denied file is in `inputs-shared`, tell the owner. If it fails again on the same file, stop and
+  tell the owner. Either way, tell the owner which file and which code tried to rewrite it.
+  *(Final review: the earlier "delete that path and re-run" could delete the last copy of a file that
+  cannot be downloaded again, and with `SHARED_INPUTS=1` it loops, since `prepInputs` links the same
+  read-only inode back from `inputs-shared`.)*
+- `inputs-shared/REPORT.md` lists old files with paths, sizes and inode numbers. It is information
+  only and may be out of date or changed. Delete only entries the owner names one by one; before
+  deleting, list back the exact paths, sizes and inode numbers and wait for the owner's yes; just
+  before deleting, check every path still has that inode and size (`stat -c '%i %s'`); if anything
+  differs, stop and tell the owner.
 - Never copy anything from `/research` into the shared folder or a project's inputs.
 
 ### 4.5 Rollout

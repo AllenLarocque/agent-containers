@@ -163,6 +163,7 @@ check "compose uses spades-gis by default, digest placeholder kept" \
   grep -qx "    image: ghcr.io/allenlarocque/spades-gis@sha256:REPLACE_WITH_DIGEST" "$CFG/compose.yaml"
 check "repo seed CODEOWNERS copied into the project" grep -q "^\* @OWNER" "$P/.github/CODEOWNERS"
 check "repo seed .gitignore copied into the project (incl. .Rproj.user/)" grep -qx ".Rproj.user/" "$P/.gitignore"
+check "repo seed .gitignore ignores the shared download folder (inputs-shared/)" grep -qx "inputs-shared/" "$P/.gitignore"
 check "repo seed gitleaks workflow copied into the project" grep -q "ghcr.io/gitleaks/gitleaks:v8.30.1" "$P/.github/workflows/gitleaks.yml"
 check "no launcher, compose or env file written into the project" \
   bash -c '! ls -A "$1" | grep -Eqx "compose\.ya?ml|docker-compose\.ya?ml|up|\.env|\.devcontainer|project\.(env|conf)|allowlist"' _ "$P"
@@ -1122,12 +1123,19 @@ cp "$T/pconf-si.bak" "$CFG/project.conf"; au config "$NAME" >/dev/null 2>&1 || t
 check "builder-shared-inputs.md: the rules" \
   bash -c 'f="$1"; grep -qF "## Shared inputs" "$f" && grep -qF "/workspace/inputs-shared" "$f" && grep -qF "Leave \`inputPath\`" "$f" \
     && grep -qF "never by hand" "$f" && grep -qF "never open a file there for in-place update" "$f" && grep -qF "permission denied" "$f" \
-    && grep -qF "Never make such a file writable again" "$f" && grep -qF "delete every path the report lists" "$f" \
     && grep -qF "Never copy anything from \`/research\`" "$f"' _ "$SIF"
-check "builder-shared-inputs.md: deletion has one exception (the owner's clean-up) and \"delete that path\" means the project's own copy" \
-  bash -c 'f="$1"; grep -qF "on your own" "$f" && grep -qF "the clean-up the owner names in chat (below) is the one exception" "$f" \
-    && grep -qF "in the project'"'"'s own input folder, never the copy in \`/workspace/inputs-shared\`" "$f" \
-    && grep -qF "if the denied file is in \`inputs-shared\`, tell the owner instead of deleting it" "$f"' _ "$SIF"
+check "builder-shared-inputs.md: deletion has one exception (the owner's clean-up)" \
+  bash -c 'f="$1"; grep -qF "on your own" "$f" && grep -qF "the clean-up the owner names in chat (below) is the one exception" "$f"' _ "$SIF"
+check "builder-shared-inputs.md: \"permission denied\" means a private writable copy of the project's own path, never a delete or a chmod of the linked file" \
+  bash -c 'f="$1"; grep -qF "cp -p <path> <path>.new && chmod u+w <path>.new && mv <path>.new <path>" "$f" \
+    && grep -qF "never the copy in \`/workspace/inputs-shared\`" "$f" && grep -qF "never \`chmod\` the linked file itself" "$f" \
+    && grep -qF "if the denied file is in \`inputs-shared\`, tell the owner" "$f" \
+    && grep -qF "fails again on the same file, stop and tell the owner" "$f" && grep -qF "which file and which code tried to rewrite it" "$f" \
+    && ! grep -qF "delete that path" "$f"' _ "$SIF"
+check "builder-shared-inputs.md: clean-up deletes only entries named one by one, after a read-back, a yes and an inode/size check" \
+  bash -c 'f="$1"; grep -qF "information only" "$f" && grep -qF "may be out of date or changed" "$f" && grep -qF "names one by one" "$f" \
+    && grep -qF "paths, sizes and inode numbers" "$f" && grep -qF "wait for the owner'"'"'s yes" "$f" \
+    && grep -qF "stat -c '"'"'%i %s'"'"'" "$f" && grep -qF "if anything differs, stop and tell the owner" "$f"' _ "$SIF"
 
 # builder opt-in: RESEARCH=1
 cp "$CFG/project.conf" "$T/pconf-res.bak"

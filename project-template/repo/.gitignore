@@ -5,3 +5,5 @@
 .env.*
 # RStudio per-user project state (RStudio Server, RSTUDIO=1)
 .Rproj.user/
+# Shared download folder (SHARED_INPUTS=1): large input files, not for git
+inputs-shared/
