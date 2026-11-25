@@ -10,7 +10,9 @@ check(){ local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else bad "$
 check "R starts"                       Rscript -e 'invisible(1)'
 check "R is 4.5.3"                     Rscript -e 'stopifnot(getRversion() == "4.5.3")'
 check "Require loads"                  Rscript -e 'library(Require)'
-check "Rprofile.site: shared variables set reproducible.inputPaths and tempPath" bash -c 'SPADES_INPUTS_SHARED=/x SPADES_INPUTS_TMP=/y Rscript -e "stopifnot(identical(getOption(\"reproducible.inputPaths\"), \"/x\"), identical(getOption(\"reproducible.tempPath\"), \"/y\"), is.null(getOption(\"reproducible.destinationPathShared\")))"'
+check "Rprofile.site: shared variables set reproducible.inputPaths and a per-session tempPath under SPADES_INPUTS_TMP" bash -c 'SPADES_INPUTS_SHARED=/x SPADES_INPUTS_TMP=/y Rscript -e "stopifnot(identical(getOption(\"reproducible.inputPaths\"), \"/x\"), startsWith(getOption(\"reproducible.tempPath\"), \"/y/Rtmp\"), identical(getOption(\"reproducible.tempPath\"), file.path(\"/y\", basename(tempdir()))), is.null(getOption(\"reproducible.destinationPathShared\")))"'
+check "Rprofile.site: two R sessions get different tempPaths" bash -c 'a=$(SPADES_INPUTS_TMP=/y Rscript -e "cat(getOption(\"reproducible.tempPath\"))"); b=$(SPADES_INPUTS_TMP=/y Rscript -e "cat(getOption(\"reproducible.tempPath\"))"); [ -n "$a" ] && [ "$a" != "$b" ]'
+check "Rprofile.site: the appended block starts on its own line" bash -c 'grep -qx "local({" "$(R RHOME)/etc/Rprofile.site"'
 check "Rprofile.site: without the variables nothing is set" bash -c 'env -u SPADES_INPUTS_SHARED -u SPADES_INPUTS_TMP SPADES_INPUTS_SHARED= SPADES_INPUTS_TMP= Rscript -e "stopifnot(is.null(getOption(\"reproducible.inputPaths\")), is.null(getOption(\"reproducible.tempPath\")))"'
 check "Rprofile.site: a user profile's own value wins" bash -c 'd=$(mktemp -d); echo "options(reproducible.inputPaths = \"/mine\")" > "$d/p"; SPADES_INPUTS_SHARED=/x R_PROFILE_USER="$d/p" Rscript -e "stopifnot(identical(getOption(\"reproducible.inputPaths\"), \"/mine\"))"'
 check "Rprofile.site: keeps rocker's content" grep -q 'options(repos' "$(R RHOME)/etc/Rprofile.site"

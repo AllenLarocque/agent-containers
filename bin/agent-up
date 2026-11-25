@@ -798,15 +798,21 @@ check_shared_inputs(){ # only up and config: stop/down/status must work whatever
     *) die "SHARED_INPUTS='$v' in $1/project.conf: must be 0 (off) or 1 (on)" ;;
   esac
 }
+shared_dir_ok(){ # $1 path: absent or a real folder (not a symlink); dies otherwise
+  if [ -L "$1" ] || { [ -e "$1" ] && [ ! -d "$1" ]; }; then
+    die "$1 is a symlink or not a folder: remove it (SHARED_INPUTS=1 needs a real folder inside the project)"
+  fi
+}
 shared_inputs_dirs(){ # $1 config dir: create <PROJECT_DIR>/inputs-shared and its .tmp on the host (up only); refuse links and non-folders
   local base d
   base="$(conf_get "$1/project.conf" PROJECT_DIR)/inputs-shared"
+  # Plain mkdir, one level at a time: it fails on anything already there, a symlink swapped in after
+  # the check included. Both levels are checked before each step and again at the end.
   for d in "$base" "$base/.tmp"; do
-    if [ -L "$d" ] || { [ -e "$d" ] && [ ! -d "$d" ]; }; then
-      die "$d is a symlink or not a folder: remove it (SHARED_INPUTS=1 needs a real folder inside the project)"
-    fi
-    if [ ! -d "$d" ]; then mkdir -p "$d" || die "could not create $d"; echo "agent-up: created $d"; fi
+    shared_dir_ok "$base"; shared_dir_ok "$d"
+    if [ ! -e "$d" ]; then mkdir "$d" || die "could not create $d"; echo "agent-up: created $d"; fi
   done
+  for d in "$base" "$base/.tmp"; do shared_dir_ok "$d"; [ -d "$d" ] || die "could not create $d"; done
 }
 check_rstudio_port(){ # $1 config dir: a free port, used by no other T3_PORT/RSTUDIO_PORT/FETCH_VIEW_PORT (nor this T3_PORT)
   local port other k; port="$(conf_get "$1/project.conf" RSTUDIO_PORT)"

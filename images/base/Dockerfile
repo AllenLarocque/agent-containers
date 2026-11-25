@@ -91,10 +91,13 @@ RUN Rscript -e " \
 
 # Shared inputs (spec docs/superpowers/specs/2026-11-25-shared-inputs-design.md §4.3): when the launcher
 # sets SPADES_INPUTS_SHARED / SPADES_INPUTS_TMP, point `reproducible` at them. Appended to rocker's
-# Rprofile.site (kept), root-owned 0644. Does nothing without the variables, and never overrides a value
-# already set. Only the old option name is set: reproducible 3.2.1 reads the new name first, so setting it
-# would override a script that later sets the old one.
+# Rprofile.site (kept; a newline first, in case it does not end with one), root-owned 0644. Does nothing
+# without the variables, and never overrides a value already set. Only the old option name is set:
+# reproducible 3.2.1 reads the new name first, so setting it would override a script that later sets the
+# old one. The temp path is one subfolder per R session (named after its tempdir()), inside the shared
+# mount so the final step is still a link, and concurrent sessions never share scratch.
 RUN f="$(R RHOME)/etc/Rprofile.site" \
+    && printf '\n' >> "$f" \
     && printf '%s\n' \
       'local({' \
       '  shared <- Sys.getenv("SPADES_INPUTS_SHARED")' \
@@ -103,7 +106,7 @@ RUN f="$(R RHOME)/etc/Rprofile.site" \
       '    options(reproducible.inputPaths = shared)' \
       '  tmp <- Sys.getenv("SPADES_INPUTS_TMP")' \
       '  if (nzchar(tmp) && is.null(getOption("reproducible.tempPath")))' \
-      '    options(reproducible.tempPath = tmp)' \
+      '    options(reproducible.tempPath = file.path(tmp, basename(tempdir())))' \
       '})' >> "$f" \
     && chown root:root "$f" && chmod 0644 "$f" \
     && grep -q 'options(repos' "$f"
