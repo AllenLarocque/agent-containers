@@ -10,6 +10,11 @@ check(){ local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else bad "$
 check "R starts"                       Rscript -e 'invisible(1)'
 check "R is 4.5.3"                     Rscript -e 'stopifnot(getRversion() == "4.5.3")'
 check "Require loads"                  Rscript -e 'library(Require)'
+check "Rprofile.site: shared variables set reproducible.inputPaths and tempPath" bash -c 'SPADES_INPUTS_SHARED=/x SPADES_INPUTS_TMP=/y Rscript -e "stopifnot(identical(getOption(\"reproducible.inputPaths\"), \"/x\"), identical(getOption(\"reproducible.tempPath\"), \"/y\"), is.null(getOption(\"reproducible.destinationPathShared\")))"'
+check "Rprofile.site: without the variables nothing is set" bash -c 'env -u SPADES_INPUTS_SHARED -u SPADES_INPUTS_TMP SPADES_INPUTS_SHARED= SPADES_INPUTS_TMP= Rscript -e "stopifnot(is.null(getOption(\"reproducible.inputPaths\")), is.null(getOption(\"reproducible.tempPath\")))"'
+check "Rprofile.site: a user profile's own value wins" bash -c 'd=$(mktemp -d); echo "options(reproducible.inputPaths = \"/mine\")" > "$d/p"; SPADES_INPUTS_SHARED=/x R_PROFILE_USER="$d/p" Rscript -e "stopifnot(identical(getOption(\"reproducible.inputPaths\"), \"/mine\"))"'
+check "Rprofile.site: keeps rocker's content" grep -q 'options(repos' "$(R RHOME)/etc/Rprofile.site"
+check "Rprofile.site: root-owned, not writable by agent" bash -c 'f=$(R RHOME)/etc/Rprofile.site; [ "$(stat -c %U "$f")" = root ] && [ ! -w "$f" ]'
 check "SpaDES.project loads"           Rscript -e 'library(SpaDES.project)'
 check "SpaDES.core NOT preinstalled"   Rscript -e 'stopifnot(!requireNamespace("SpaDES.core", quietly = TRUE))'
 check "terra NOT preinstalled"         Rscript -e 'stopifnot(!requireNamespace("terra", quietly = TRUE))'

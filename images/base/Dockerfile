@@ -89,6 +89,25 @@ RUN Rscript -e " \
   install.packages(c('Require', 'SpaDES.project'), Ncpus = parallel::detectCores()); \
   stopifnot(all(c('Require', 'SpaDES.project') %in% rownames(installed.packages())))"
 
+# Shared inputs (spec docs/superpowers/specs/2026-11-25-shared-inputs-design.md §4.3): when the launcher
+# sets SPADES_INPUTS_SHARED / SPADES_INPUTS_TMP, point `reproducible` at them. Appended to rocker's
+# Rprofile.site (kept), root-owned 0644. Does nothing without the variables, and never overrides a value
+# already set. Only the old option name is set: reproducible 3.2.1 reads the new name first, so setting it
+# would override a script that later sets the old one.
+RUN f="$(R RHOME)/etc/Rprofile.site" \
+    && printf '%s\n' \
+      'local({' \
+      '  shared <- Sys.getenv("SPADES_INPUTS_SHARED")' \
+      '  if (nzchar(shared) && is.null(getOption("reproducible.inputPaths")) &&' \
+      '      is.null(getOption("reproducible.destinationPathShared")))' \
+      '    options(reproducible.inputPaths = shared)' \
+      '  tmp <- Sys.getenv("SPADES_INPUTS_TMP")' \
+      '  if (nzchar(tmp) && is.null(getOption("reproducible.tempPath")))' \
+      '    options(reproducible.tempPath = tmp)' \
+      '})' >> "$f" \
+    && chown root:root "$f" && chmod 0644 "$f" \
+    && grep -q 'options(repos' "$f"
+
 # uv, pinned (light Python tooling; reticulate::py_require()).
 RUN curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz" -o /tmp/uv.tgz \
     && echo "${UV_SHA256}  /tmp/uv.tgz" | sha256sum -c - \
