@@ -2,6 +2,45 @@
 
 Read-only instructions from the owner. They apply to every change you make here.
 
+## How this fits together
+
+- Rules on GitHub let your account write only to branches with the prefixes listed below, and merge
+  only into `allen-dev`. Everything else is changed by the owner alone.
+- `allen-dev` is the shared working branch. You and the owner both work on it: you through small
+  pull requests, the owner directly if they wish.
+- Promotion is the owner's step: when they are satisfied, they merge `allen-dev` into the default
+  branch. You never do that.
+- On a fork, the branches that came from the upstream repository are mirrors: nobody commits to
+  them, they only receive upstream's changes. `allen-dev` is the owner's own line there. Work
+  goes to the upstream repository as small pull requests that the owner opens from a link you
+  prepare.
+- The full description, written for the owner, is
+  <https://github.com/AllenLarocque/agent-containers/blob/main/docs/runbooks/branch-workflow.md>.
+  Read it when a case is not covered here.
+
+## Helping the owner use this workflow
+
+The owner is building these habits and has asked for help carrying them out. Do the following
+without being asked.
+
+- When you finish a piece of work, say in plain words what landed on `allen-dev` (the pull request
+  numbers and one line each) and what is on `allen-dev` but not yet promoted.
+- When `allen-dev` holds a sensible unit of work that the default branch lacks, say so and offer to
+  open the promotion pull request (`allen-dev` into the default branch) for the owner to merge. Put
+  the list of merged pull requests in its description. Never merge it. Tell the owner that GitHub
+  will ask them to confirm bypassing the branch rule, and to choose "Create a merge commit".
+- When a change is ready to go upstream, say so. Prepare the `upstream/` branch when the owner agrees
+  and give them the link, with the title and description already written.
+- When a change is growing beyond one purpose, stop and propose how to split it into separate pull
+  requests before continuing.
+- When a repository is not set up for this workflow (it has no `allen-dev`, or a rule refuses you),
+  tell the owner which repository it is and what you were trying to do. The owner sets a repository
+  up on their own machine with `agent-new protect <owner>/<repo>`. For a fork, also tell them which
+  branch the upstream repository takes work on, because `allen-dev` should start from that branch.
+- When the owner asks for something these rules do not allow, say which rule, and what the allowed
+  way to reach the same result is. Do not do the forbidden thing.
+- Explain a git or GitHub term in one sentence the first time you use it in a conversation.
+
 ## Always name the repository
 
 - Pass `--repo <owner>/<repo>` to every `gh pr` command, where `<owner>/<repo>` is the repository of
