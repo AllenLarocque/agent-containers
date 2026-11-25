@@ -589,6 +589,83 @@ helper and the set are gone.
   image published after this change, pinned by `agent-up update <project>` (an older image ignores the list and keeps
   port 21 closed).
 
+## Shared inputs
+
+Large input files (genomes, rasters, tables) often exist twice in a builder container's project
+folder. `bin/agent-inputs` runs on the host, links byte-identical copies so they take the disk space
+of one, and lists files nobody has read in 180 days. It is a host job: it is not in the container and
+the agent cannot run it.
+
+**What it does.** It walks the folders you list and, for files that are identical, keeps one and
+turns the other paths into hard links to it (several names, one file on disk). A file is linked only
+when all of these hold: it is at least 1 MiB; it has not been modified for 24 hours; you own it; the
+copies have the same permissions and group; it has no extended attributes; nothing has it open for
+writing; and it is not also linked from somewhere outside the listed folders. Anything else is
+skipped and listed in the report with the reason. A linked path takes the kept file's modification
+time. Linked files are made read-only.
+
+**What it never does.** It deletes no file, only replaces a duplicate by a link to an identical
+copy. It does not follow symlinks, skips `.git` folders, never touches anything outside the listed
+folders, and does not change when a file was last read (that is what the "not read in 180 days" list
+relies on). It refuses to run, and says why, if a listed folder is missing, is a symlink, is outside
+the project folder, is on a different filesystem from the rest of its group, or overlaps a research
+folder or a config folder.
+
+**Why research folders are excluded.** A hard link means an in-place edit through one name shows up
+under every name. A builder editing a linked file must never reach a file the research container
+reads, or the reverse, so those folders cannot be listed.
+
+### Set it up
+
+1. Write `~/.config/agent-containers/inputs.conf` (readable by you only, `chmod 600`), one section
+   per builder project, the section name being the project name. Folders are relative to that
+   project's folder:
+
+   ```
+   [my-builder]                # a builder project name
+   group = my-builder          # optional; default: the section name
+   report = shared-data        # optional; folder that gets REPORT.md; default: the first folder below
+   shared-data                 # folders to scan, one per line
+   analysis/data
+   analysis/rasters
+   ```
+
+2. Look before it acts: `agent-inputs scan --dry-run` changes nothing and reports what it would link.
+3. Run it for real: `agent-inputs scan`.
+4. Run it weekly: `agent-inputs install-timer`. This installs a systemd user timer (`weekly`, and a
+   run missed while the machine was off happens at the next start). `agent-inputs remove-timer`
+   stops and removes it.
+
+### Reading the result
+
+- `REPORT.md` appears in the `report` folder, so the agent can read it too. It lists what was linked,
+  what was skipped and why, anything that needs your attention, and the files not read in 180 days.
+  It shows only paths the container can see (`/workspace/...`).
+- If anything needs your attention (for example a process opened a file for writing at the instant it
+  was being linked), the run exits 1 and the item is listed under "Needs the owner's attention".
+- Last run: `systemctl --user status agent-inputs.timer`, the date in `REPORT.md`, or the
+  "Shared inputs:" line that `agent-up status <project>` prints (last run, size on disk, space freed
+  so far, old files).
+
+### Freeing space
+
+Space comes back only when **every path** of a file is deleted. Deleting one linked name frees
+nothing while another name remains, and the report lists all the paths of each file.
+
+### Read-only links, and "permission denied"
+
+Linked files are read-only so a stray command or program does not rewrite one file and change all of
+its names. If a program in the container says "permission denied" on a linked file, that is why.
+To change it, copy it (`cp file file.new`, then use the copy), or `chmod u+w` it knowingly. This
+protects against accidental in-place rewrites only: the agent runs as the files' owner and can make a
+file writable again.
+
+### Linking across containers
+
+Giving two sections the same `group` links identical files across those containers. It works, but
+the owner does not plan to use it: every container in the group gets write access to the other's
+linked files. Without a shared `group`, each section is its own group and nothing is shared.
+
 ## Lifecycle
 
 | Action | Steps |

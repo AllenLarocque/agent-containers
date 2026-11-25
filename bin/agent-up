@@ -1788,6 +1788,9 @@ cmd_status(){
   # T3's projects, and any outside the mounted project folders (images before `agent-t3 projects`: nothing).
   docker exec -u agent "$(basename "$(cfg_dir "$1")")-agent-1" agent-t3 projects 2>/dev/null </dev/null || true
   local cfg rd d; cfg="$(cfg_dir "$1")"
+  if [ "$(profile "$cfg")" = builder ] && [ -f "$HOME/.config/agent-containers/inputs.conf" ]; then
+    "$HERE/agent-inputs" status-line "$(basename "$cfg")" || true   # shared inputs: one line, never fails status
+  fi
   if [ "$(profile "$cfg")" = research ]; then
     echo "CORE_API_KEY: $(core_state "$cfg")"
     rd="$(research_dir "$cfg")"

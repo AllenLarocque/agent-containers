@@ -423,6 +423,13 @@ statusout2="$(au status "$NAME" 2>&1)" || true
 check "  ...lists T3's projects and flags one outside /workspace (from agent-t3 projects, as agent)" \
   bash -c 'grep -qxF "T3 project: /workspace (demo)" <<<"$1" && grep -qF "T3 project OUTSIDE /workspace: /home/agent/x" <<<"$1" && grep -qxF "ARGS: exec -u agent $3-agent-1 agent-t3 projects" "$2"' _ "$statusout2" "$DLOG" "$NAME"
 rm -f "$(dirname "$DLOG")/t3projects"
+check "status prints no shared-inputs line and exits 0 without inputs.conf" bash -c '! grep -q "^Shared inputs:" <<<"$1"' _ "$statusout"
+mkdir -p "$H/.config/agent-containers" "$H/.local/state/agent-containers"
+printf '[%s]\ndata\n' "$NAME" > "$H/.config/agent-containers/inputs.conf"
+printf '{"sections": {"%s": {"last_run": "2026-11-20T03:00:00+00:00", "dry_run": false, "total_bytes": 2147483648, "freed_bytes_run": 0, "freed_bytes_total": 1073741824, "old_count": 2, "old_bytes": 3145728}}}\n' "$NAME" > "$H/.local/state/agent-containers/inputs.json"
+statusout3="$(au status "$NAME" 2>&1)" && rc=0 || rc=$?
+check "status prints the shared-inputs line when inputs.conf and state exist" bash -c '[ "$2" -eq 0 ] && grep -qxF "Shared inputs: last run 2026-11-20, 2.0 GiB on disk, 1.0 GiB freed so far, 2 files (3.0 MiB) not read in 180 days" <<<"$1"' _ "$statusout3" "$rc"
+rm -f "$H/.config/agent-containers/inputs.conf" "$H/.local/state/agent-containers/inputs.json"
 check "  ...asked each CLI as agent in the project's container" \
   bash -c 'grep -qxF "ARGS: exec -u agent $2-agent-1 claude --version" "$1" && grep -qxF "ARGS: exec -u agent $2-agent-1 codex --version" "$1"' _ "$DLOG" "$NAME"
 check "stop" au stop "$NAME"

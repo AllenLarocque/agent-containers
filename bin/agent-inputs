@@ -1120,6 +1120,72 @@ def cmd_scan(args):
     return 0 if ok else 1
 
 
+UNIT_NAMES = ("agent-inputs.service", "agent-inputs.timer")
+
+
+def unit_dir():
+    return Path.home() / ".config" / "systemd" / "user"
+
+
+def systemctl(*args):
+    try:
+        return subprocess.run(["systemctl", "--user", *args]).returncode
+    except OSError as e:
+        print(f"agent-inputs: cannot run systemctl: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_install_timer(args):
+    script = os.path.abspath(__file__)
+    if any(c.isspace() or c in '"\\%$' for c in script):
+        print(f"agent-inputs: the script path {shown(script)} has characters a systemd unit cannot hold safely; "
+              "move the clone to a plain path", file=sys.stderr)
+        return 2
+    service = ("[Unit]\nDescription=Link identical input files read-only and report old ones\n\n"
+               "[Service]\nType=oneshot\n"
+               f"ExecStart=/usr/bin/python3 {script} scan\nNice=19\nIOSchedulingClass=idle\n")
+    timer = ("[Unit]\nDescription=Weekly agent-inputs scan\n\n"
+             "[Timer]\nOnCalendar=weekly\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n")
+    d = unit_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    (d / UNIT_NAMES[0]).write_text(service)
+    (d / UNIT_NAMES[1]).write_text(timer)
+    if systemctl("daemon-reload") or systemctl("enable", "--now", "agent-inputs.timer"):
+        print("agent-inputs: the units are written but systemctl could not enable the timer", file=sys.stderr)
+        return 1
+    print("agent-inputs: weekly timer enabled (systemctl --user status agent-inputs.timer)")
+    return 0
+
+
+def cmd_remove_timer(args):
+    rc = systemctl("disable", "--now", "agent-inputs.timer")
+    for n in UNIT_NAMES:
+        try:
+            (unit_dir() / n).unlink()
+        except FileNotFoundError:
+            pass
+    systemctl("daemon-reload")
+    return 1 if rc else 0
+
+
+def cmd_status_line(args):
+    """One line from the host state; nothing (exit 0) without inputs.conf or state for the section."""
+    if not (Path.home() / ".config" / "agent-containers" / "inputs.conf").is_file():
+        return 0
+    e = load_state()["sections"].get(args.section)
+    if not isinstance(e, dict):
+        return 0
+    try:
+        when = str(e["last_run"])[:10]
+        line = (f"Shared inputs: last run {when}, {human(int(e['total_bytes']))} on disk, "
+                f"{human(int(e['freed_bytes_total']))} freed so far, {int(e['old_count'])} files "
+                f"({human(int(e['old_bytes']))}) not read in 180 days")
+    except (KeyError, TypeError, ValueError):
+        return 0
+    print(line)
+    return 0
+
+
 def positive_int(text):
     n = int(text)
     if n < 1:
@@ -1135,6 +1201,11 @@ def main(argv=None):
     sp.add_argument("--dry-run", action="store_true", help="change nothing; print and report what would be linked")
     sp.add_argument("--days", type=positive_int, default=180, help="old-file threshold in days (default 180)")
     sp.set_defaults(func=cmd_scan)
+    sub.add_parser("install-timer", help="run scan weekly (systemd user timer)").set_defaults(func=cmd_install_timer)
+    sub.add_parser("remove-timer", help="stop and remove the weekly timer").set_defaults(func=cmd_remove_timer)
+    sp = sub.add_parser("status-line", help="print the one-line summary for a section (used by agent-up status)")
+    sp.add_argument("section")
+    sp.set_defaults(func=cmd_status_line)
     args = ap.parse_args(argv)
     for f in (sys.stdout, sys.stderr):
         f.reconfigure(errors="backslashreplace")

@@ -346,4 +346,35 @@ scan
 check "report published through a symlinked REPORT.md does not write outside" bash -c '
   [ "$(cat "$1")" = keep ] && [ "$(cat "$2")" = keep ] && [ ! -L "$3" ] && [ -f "$3" ] && grep -q "^# " "$3"' _ "$OUT/victim.txt" "$OUT/victim2.txt" "$P1/data/REPORT.md"
 
+# ---- timer and status line
+SB="$T/sysbin"; SYSLOG="$T/systemctl.log"; mkdir -p "$SB"; : > "$SYSLOG"
+printf '#!/bin/sh\necho "$*" >> "%s"\n' "$SYSLOG" > "$SB/systemctl"; chmod +x "$SB/systemctl"
+UD="$H/.config/systemd/user"
+aip(){ PATH="$SB:$PATH" ai "$@"; }
+fresh; conf "[p1]" data; mkdir -p "$P1/data"
+aip install-timer >/dev/null 2>&1 || true
+check "install-timer writes both units with Persistent=true and enables the timer" bash -c '
+  grep -qxF "ExecStart=/usr/bin/python3 $1 scan" "$2/agent-inputs.service" && grep -qx "Nice=19" "$2/agent-inputs.service" &&
+  grep -qx "IOSchedulingClass=idle" "$2/agent-inputs.service" && grep -qx "OnCalendar=weekly" "$2/agent-inputs.timer" &&
+  grep -qx "Persistent=true" "$2/agent-inputs.timer" && grep -qx -- "--user daemon-reload" "$3" &&
+  grep -qx -- "--user enable --now agent-inputs.timer" "$3"' _ "$AI_BIN" "$UD" "$SYSLOG"
+: > "$SYSLOG"
+aip remove-timer >/dev/null 2>&1 || true
+check "remove-timer disables and deletes them" bash -c '
+  [ ! -e "$1/agent-inputs.service" ] && [ ! -e "$1/agent-inputs.timer" ] && grep -qx -- "--user disable --now agent-inputs.timer" "$2"' _ "$UD" "$SYSLOG"
+
+fresh; mkf "$P1/data/a.bin"; dup "$P1/data/a.bin" "$P1/data2/a.bin"; mkf "$P1/data/old.bin" "$((3*MIB))"
+conf "[p1]" data data2
+scan
+today="$(date -u +%Y-%m-%d)"
+check "status-line prints the documented line after a scan" bash -c '
+  l="$(HOME="$1" "$2" status-line p1)"
+  [[ "$l" =~ ^Shared\ inputs:\ last\ run\ $3,\ [0-9.]+\ [A-Za-z]+\ on\ disk,\ [0-9.]+\ [A-Za-z]+\ freed\ so\ far,\ 2\ files\ \([0-9.]+\ [A-Za-z]+\)\ not\ read\ in\ 180\ days$ ]] || { echo "got: $l"; exit 1; }' _ "$H" "$AI_BIN" "$today"
+check "status-line prints nothing for a section without state" bash -c '[ -z "$(HOME="$1" "$2" status-line nosuch)" ]' _ "$H" "$AI_BIN"
+mv "$CFG/inputs.conf" "$CFG/inputs.conf.off"
+check "status-line prints nothing without inputs.conf (state present), exit 0" bash -c 'o="$(HOME="$1" "$2" status-line p1)" && [ -z "$o" ]' _ "$H" "$AI_BIN"
+mv "$CFG/inputs.conf.off" "$CFG/inputs.conf"
+rm -rf "$H/.local"
+check "status-line prints nothing without state, exit 0" bash -c 'o="$(HOME="$1" "$2" status-line p1)" && [ -z "$o" ]' _ "$H" "$AI_BIN"
+
 [ "$fail" -eq 0 ] && echo "AGENT-INPUTS: ALL PASSED" || { echo "AGENT-INPUTS: FAILURES"; exit 1; }
