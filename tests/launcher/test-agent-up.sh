@@ -1123,6 +1123,10 @@ check "builder-shared-inputs.md: the rules" \
     && grep -qF "never by hand" "$f" && grep -qF "never open a file there for in-place update" "$f" && grep -qF "permission denied" "$f" \
     && grep -qF "Never make such a file writable again" "$f" && grep -qF "delete every path the report lists" "$f" \
     && grep -qF "Never copy anything from \`/research\`" "$f"' _ "$SIF"
+check "builder-shared-inputs.md: deletion has one exception (the owner's clean-up) and \"delete that path\" means the project's own copy" \
+  bash -c 'f="$1"; grep -qF "on your own" "$f" && grep -qF "the clean-up the owner names in chat (below) is the one exception" "$f" \
+    && grep -qF "in the project'"'"'s own input folder, never the copy in \`/workspace/inputs-shared\`" "$f" \
+    && grep -qF "if the denied file is in \`inputs-shared\`, tell the owner instead of deleting it" "$f"' _ "$SIF"
 
 # builder opt-in: RESEARCH=1
 cp "$CFG/project.conf" "$T/pconf-res.bak"
