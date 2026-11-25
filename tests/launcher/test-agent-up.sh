@@ -157,6 +157,7 @@ check "project.conf: RESEARCH=0 (opt-in), RESEARCH_DIR=~/agent-research" \
 check "a builder init does not create the research exchange" test ! -e "$H/agent-research"
 check "project.conf: RSTUDIO=0 (RStudio Server is opt-in)" grep -qx "RSTUDIO=0" "$CFG/project.conf"
 check "project.conf: first project gets RSTUDIO_PORT=8787" grep -qx "RSTUDIO_PORT=8787" "$CFG/project.conf"
+check "project.conf: SHARED_INPUTS=0 (the shared download folder is opt-in)" grep -qx "SHARED_INPUTS=0" "$CFG/project.conf"
 check "project.env names this project's vault" grep -q "op://agent-$NAME/github-agent/token" "$CFG/project.env"
 check "compose uses spades-gis by default, digest placeholder kept" \
   grep -qx "    image: ghcr.io/allenlarocque/spades-gis@sha256:REPLACE_WITH_DIGEST" "$CFG/compose.yaml"
@@ -314,7 +315,7 @@ AMBIENT=(COMPOSE_FILE=evil.yaml COMPOSE_PROFILES=evil PROJECT_DIR=/evil SPADES_A
 rc=0; out=$(au up "$NAME" 2>&1) || rc=$?
 AMBIENT=()
 check "up succeeds (stub op + stub docker)" test "$rc" -eq 0
-C="compose --env-file $CFG/project.conf -f $CFG/compose.yaml -f $CFG/.generated/env-passthrough.yaml -f $CFG/.generated/t3-connect.yaml -f $CFG/.generated/research.yaml -f $CFG/.generated/rstudio.yaml -f $CFG/.generated/ftp.yaml -f $CFG/.generated/google-drive.yaml -f $CFG/.generated/hostname.yaml -f $CFG/.generated/restart.yaml --project-directory $CFG -p $NAME"
+C="compose --env-file $CFG/project.conf -f $CFG/compose.yaml -f $CFG/.generated/env-passthrough.yaml -f $CFG/.generated/t3-connect.yaml -f $CFG/.generated/research.yaml -f $CFG/.generated/rstudio.yaml -f $CFG/.generated/shared-inputs.yaml -f $CFG/.generated/ftp.yaml -f $CFG/.generated/google-drive.yaml -f $CFG/.generated/hostname.yaml -f $CFG/.generated/restart.yaml --project-directory $CFG -p $NAME"
 check "  ...op run resolves project.env, then runs docker compose" \
   grep -qxF "OP: run --env-file $CFG/project.env -- docker $C up -d --force-recreate" "$OPLOG"
 check "  ...docker compose gets ONLY the config dir's files" grep -qxF "ARGS: $C up -d --force-recreate" "$DLOG"
@@ -385,6 +386,8 @@ check "builder.md: origin/allen-dev after git fetch origin, sync/ from the branc
 RSO="$CFG/.generated/rstudio.yaml"
 check "RSTUDIO=0: the RStudio overlay adds nothing" bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent: {}")" ]' _ "$RSO"
 check "  ...no RStudio switch file and no password generated" bash -c '[ ! -e "$1/rstudio" ] && [ ! -e "$1/rstudio-password" ]' _ "$CFG/.generated"
+SIO="$CFG/.generated/shared-inputs.yaml"
+check "SHARED_INPUTS=0: the shared-inputs overlay adds nothing" bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent: {}")" ]' _ "$SIO"
 FO="$CFG/.generated/ftp.yaml"
 check "FTP_HOSTS unset: the FTP overlay adds nothing" bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent: {}")" ]' _ "$FO"
 check "  ...and no FTP host file exists" test ! -e "$CFG/.generated/ftp-hosts"
@@ -739,6 +742,45 @@ check "an ambient FTP_HOSTS in the owner's shell changes nothing (only project.c
 cp "$T/pconf-ftp.bak" "$CFG/project.conf"
 au config "$NAME" >/dev/null 2>&1 || true
 TOK=""
+# ---- SHARED_INPUTS (owner opt-in): validated by up/config only; a missing or empty key is 0
+cp "$CFG/project.conf" "$T/pconf-si.bak"
+for v in 2 yes on; do
+  sed -i "s/^SHARED_INPUTS=.*/SHARED_INPUTS=$v/" "$CFG/project.conf"
+  : > "$DLOG"
+  refuses "up refuses SHARED_INPUTS='$v'" "SHARED_INPUTS='$v'.*must be 0 \(off\) or 1 \(on\)" au up "$NAME"
+  check "  ...without reaching docker" test ! -s "$DLOG"
+  refuses "config refuses SHARED_INPUTS='$v'" "SHARED_INPUTS='$v'" au config "$NAME"
+  check "stop works with SHARED_INPUTS='$v'" au stop "$NAME"
+  check "down works with SHARED_INPUTS='$v'" au down "$NAME"
+  check "status works with SHARED_INPUTS='$v'" au status "$NAME"
+done
+sed -i "s/^SHARED_INPUTS=.*/SHARED_INPUTS=/" "$CFG/project.conf"
+check "SHARED_INPUTS= (empty) is off: config succeeds" au config "$NAME"
+check "  ...overlay adds nothing" bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent: {}")" ]' _ "$SIO"
+sed -i '/^SHARED_INPUTS=/d' "$CFG/project.conf"
+check "config without SHARED_INPUTS renders it off" au config "$NAME"
+check "  ...overlay adds nothing" bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent: {}")" ]' _ "$SIO"
+au up "$NAME" >/dev/null 2>&1 || true
+check "  ...and up creates no inputs-shared folder" test ! -e "$P/inputs-shared"
+echo "SHARED_INPUTS=1" >> "$CFG/project.conf"
+check "config with SHARED_INPUTS=1 succeeds" au config "$NAME"
+check "  ...and creates no folder" test ! -e "$P/inputs-shared"
+check "  ...overlay sets the two variables, no volumes" \
+  bash -c '[ "$(grep -v "^#" "$1")" = "$(printf "services:\n  agent:\n    environment:\n      SPADES_INPUTS_SHARED: /workspace/inputs-shared\n      SPADES_INPUTS_TMP: /workspace/inputs-shared/.tmp")" ]' _ "$SIO"
+upout="$(au up "$NAME" 2>&1)" && rc=0 || rc=$?
+check "up with SHARED_INPUTS=1 creates inputs-shared/.tmp under PROJECT_DIR" bash -c '[ "$1" -eq 0 ] && [ -d "$2/inputs-shared/.tmp" ] && [ ! -L "$2/inputs-shared" ]' _ "$rc" "$P"
+check "  ...and says so" bash -c 'grep -qF "created $1/inputs-shared" <<<"$2"' _ "$(cd "$P" && pwd -P)" "$upout"
+check "up again with the folder present succeeds" au up "$NAME"
+rm -rf "$P/inputs-shared"; mkdir -p "$T/elsewhere"; ln -s "$T/elsewhere" "$P/inputs-shared"
+refuses "up refuses when inputs-shared is a symlink" "inputs-shared.*symlink or not a folder" au up "$NAME"
+rm "$P/inputs-shared"; : > "$P/inputs-shared"
+refuses "up refuses when inputs-shared is a file" "inputs-shared.*symlink or not a folder" au up "$NAME"
+rm "$P/inputs-shared"; mkdir -p "$P/inputs-shared"; ln -s "$T/elsewhere" "$P/inputs-shared/.tmp"
+refuses "up refuses when inputs-shared/.tmp is a symlink" "\.tmp.*symlink or not a folder" au up "$NAME"
+rm -rf "$P/inputs-shared"
+cp "$T/pconf-si.bak" "$CFG/project.conf"
+au config "$NAME" >/dev/null 2>&1 || true
+
 # ---- research profile: the ONE shared research container (spec §2.1, Phase 1b)
 RCFG="$CFGROOT/research"; RD="$H/agent-research"
 refuses "init --profile research refuses another name" "always named 'research'" au init --profile research --name foo
@@ -759,7 +801,7 @@ check "  ...created the research exchange root" test -d "$RD"
 refuses "init --profile research never overwrites" 'already exists' au init --profile research
 refuses "up research refuses the placeholder digest" 'not pinned to a real digest' au up research
 sed -i "s/REPLACE_WITH_DIGEST/$H64/" "$RCFG/compose.yaml"
-RC="compose --env-file $RCFG/.generated/compose.env -f $RCFG/compose.yaml -f $RCFG/.generated/env-passthrough.yaml -f $RCFG/.generated/t3-connect.yaml -f $RCFG/.generated/research.yaml -f $RCFG/.generated/rstudio.yaml -f $RCFG/.generated/ftp.yaml -f $RCFG/.generated/google-drive.yaml -f $RCFG/.generated/hostname.yaml -f $RCFG/.generated/restart.yaml --project-directory $RCFG -p research"
+RC="compose --env-file $RCFG/.generated/compose.env -f $RCFG/compose.yaml -f $RCFG/.generated/env-passthrough.yaml -f $RCFG/.generated/t3-connect.yaml -f $RCFG/.generated/research.yaml -f $RCFG/.generated/rstudio.yaml -f $RCFG/.generated/shared-inputs.yaml -f $RCFG/.generated/ftp.yaml -f $RCFG/.generated/google-drive.yaml -f $RCFG/.generated/hostname.yaml -f $RCFG/.generated/restart.yaml --project-directory $RCFG -p research"
 : > "$DLOG"; rm -f "$OPLOG"; TOK=""
 AMBIENT=(OP_SERVICE_ACCOUNT_TOKEN=owner-op-token GH_TOKEN=owner-gh-token)
 rc=0; out=$(au up research 2>&1) || rc=$?
@@ -810,6 +852,13 @@ refuses "config research refuses RSTUDIO=1 (builders only)" "RStudio Server is f
 refuses "rstudio research refuses (builders only)" "RStudio Server is for builder projects only" au rstudio research
 check "  ...stop research still works with RSTUDIO=1 in its config (renders RStudio off)" au stop research
 check "  ...and its overlay stays empty" bash -c '[ ! -e "$1/rstudio" ] && [ ! -e "$1/rstudio-password" ]' _ "$RCFG/.generated"
+cp "$T/rconf-rs.bak" "$RCFG/project.conf"
+check "  ...init --profile research does not write SHARED_INPUTS, and its overlay adds nothing" \
+  bash -c '! grep -q "SHARED_INPUTS" "$1/project.conf" && [ "$(grep -v "^#" "$1/.generated/shared-inputs.yaml")" = "$(printf "services:\n  agent: {}")" ]' _ "$RCFG"
+printf 'SHARED_INPUTS=1\n' >> "$RCFG/project.conf"
+refuses "research with SHARED_INPUTS=1 is refused by up" "SHARED_INPUTS.*research" au up research
+refuses "research with SHARED_INPUTS=1 is refused by config" "SHARED_INPUTS.*research" au config research
+check "  ...stop research still works with SHARED_INPUTS=1 in its config" au stop research
 cp "$T/rconf-rs.bak" "$RCFG/project.conf"
 check "  ...no FTP for the research container (overlay adds nothing, no host file)" \
   bash -c '[ "$(grep -v "^#" "$1/ftp.yaml")" = "$(printf "services:\n  agent: {}")" ] && [ ! -e "$1/ftp-hosts" ]' _ "$RCFG/.generated"
@@ -1289,6 +1338,14 @@ PYEOF
     jq -e '.services.agent.environment.T3_CONNECT == "publish" and .services.agent.environment.TUNNEL_EDGE_IP_VERSION == null and ([.services.agent.volumes[] | select(.target=="/etc/firewall/t3-connect") | .read_only] == [true])' <<<"$JP"
   check "rendered (T3_CONNECT=publish): otherwise identical to T3_CONNECT=0" \
     bash -c 'diff <(jq -S "del(.services.agent.environment.T3_CONNECT) | .services.agent.volumes |= map(select(.target != \"/etc/firewall/t3-connect\"))" <<<"$1") <(jq -S . <<<"$2")' _ "$JP" "$J"
+  # Shared inputs, builder opt-in: two environment variables, no volume.
+  sed -i 's/^SHARED_INPUTS=.*/SHARED_INPUTS=1/' "$CFG/project.conf"
+  JSI="$(render "$T")"
+  sed -i 's/^SHARED_INPUTS=.*/SHARED_INPUTS=0/' "$CFG/project.conf"
+  check "rendered: SHARED_INPUTS=1 sets SPADES_INPUTS_SHARED and SPADES_INPUTS_TMP and adds no volume" \
+    bash -c 'jq -e ".services.agent.environment.SPADES_INPUTS_SHARED == \"/workspace/inputs-shared\" and .services.agent.environment.SPADES_INPUTS_TMP == \"/workspace/inputs-shared/.tmp\"" <<<"$1" >/dev/null && [ "$(jq -S "[.services.agent.volumes[]] , .volumes" <<<"$1")" = "$(jq -S "[.services.agent.volumes[]] , .volumes" <<<"$2")" ] && [ "$(jq -S "del(.services.agent.environment.SPADES_INPUTS_SHARED, .services.agent.environment.SPADES_INPUTS_TMP)" <<<"$1")" = "$(jq -S . <<<"$2")" ]' _ "$JSI" "$J"
+  check "rendered: SHARED_INPUTS=0 sets neither variable" \
+    jq -e '.services.agent.environment.SPADES_INPUTS_SHARED == null and .services.agent.environment.SPADES_INPUTS_TMP == null' <<<"$J"
   # Research exchange, builder opt-in: exactly three /research mounts + the two instruction files, nothing else changes.
   sed -i 's/^RESEARCH=.*/RESEARCH=1/' "$CFG/project.conf"
   JR="$(render "$T")"
