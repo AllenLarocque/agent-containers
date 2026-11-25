@@ -49,15 +49,32 @@ Two parts, both built now:
 ### 3.1 What it scans
 
 A config file, `~/.config/agent-containers/inputs.conf` (owner-maintained, `0600`, outside every
-mounted folder): first a line `project = <name>` naming the one builder project whose `PROJECT_DIR`
-holds the shared container's projects (today `spades_pe`; the other SpaDES containers are not part of
-this), then one folder per line, relative to that `PROJECT_DIR`, `#` comments. Example: `inputs-shared`
-and each project's own input folders. *(Builder's call, recorded: one container only, so every path
-in the report is one the agent there can reach; other containers can be added later with their own
-config.)* The script refuses to run when:
+mounted folder), with **one section per builder container**, so more containers can join later
+without a rebuild (owner decision, 2026-11-25):
 
-- a listed folder does not exist, is a symlink, is outside that `PROJECT_DIR`, or is not on the same
-  filesystem (`st_dev`) as the first one (hard links cannot cross filesystems);
+```
+[spades_pe]                 # a builder project name (its PROJECT_DIR comes from its project.conf)
+group = spades_pe           # optional; default: the section name
+report = inputs-shared      # optional; folder that gets REPORT.md; default: the first folder below
+inputs-shared               # folders to scan, one per line, relative to that PROJECT_DIR
+FIIS/data
+WS3_LandR/inputs
+```
+
+- Files are linked only **within a group**. Each section is its own group unless the owner gives two
+  sections the same `group`, which is how linking across containers is switched on later. The first
+  version ships with only `spades_pe` listed.
+- Each section gets its own report, published into that container's `report` folder, listing only
+  paths that container can see (`/workspace/...`). When a file is also linked from another container
+  in the group, its entry says so and names that container, without that container's paths.
+- Host state (§3.4) is kept per section.
+- A project with `PROFILE=research`, or that is not a builder, is refused as a section.
+
+The script refuses to run when:
+
+- a listed folder does not exist, is a symlink, is outside its section's `PROJECT_DIR`, or is not on
+  the same filesystem (`st_dev`) as the other folders of its group (hard links cannot cross
+  filesystems);
 - a listed folder overlaps the research folder (`RESEARCH_DIR` of any project config) or any config
   directory under `~/.config/agent-containers`. Research downloads are kept out deliberately: a hard
   link would let a builder's in-place edit reach a file the research container reads, and the reverse.
@@ -100,8 +117,8 @@ the file and says so in the report; it never falls back to a normal read.
 ### 3.4 The report
 
 The job's own state (running totals, last run) lives on the host only, in
-`~/.local/state/agent-containers/inputs.json`; `agent-up status` reads that, never a file the agent
-can write. *(Builder's call, recorded.)* Every `scan` run (dry or not) **publishes** a copy of the
+`~/.local/state/agent-containers/inputs.json` (keyed by section); `agent-up status` reads that, never a
+file the agent can write. *(Builder's call, recorded.)* Every `scan` run (dry or not) **publishes** a copy of the
 report to `<PROJECT_DIR>/inputs-shared/REPORT.md` so the agent can read it in chat, written to a temp
 name and renamed into place through a directory handle, never following a symlink. Contents:
 
@@ -245,7 +262,9 @@ the existing style:
 - after linking, the kept inode's `atime` is the group's latest and its `mtime` unchanged;
 - the old-files section lists an old-`atime` inode once with all its paths; the shared-folder section
   lists a link-count-1 file and not a linked one;
-- refusals: a missing folder, a folder on another filesystem (skipped in CI if no second filesystem
+- two sections in different groups never share an inode after a scan; the same files in two sections
+  with the same `group` do, and each section's report names the other container without its paths;
+- refusals: a research or unknown section, a missing folder, a folder on another filesystem (skipped in CI if no second filesystem
   is available), a folder overlapping a research folder;
 - an interrupted link (simulated failure before `rename`) leaves the original file intact.
 
@@ -277,3 +296,40 @@ inode.
 Part B on, writing `inputs.conf`, dry run, timer, reading the report, the rule that freeing space means
 deleting every path of a file, why research folders are excluded); a row for `SHARED_INPUTS` in the
 settings list. Known limits go in the private notes repository, not in this document.
+
+## 9. How we got here (decision record)
+
+Kept so the reasoning is not lost when this comes up again.
+
+- **2026-10-22 to 10-25: designed, then parked.** The first design gave every SpaDES container one
+  shared host folder mounted at `/inputs`. Hard links cannot cross bind mounts (a link between two
+  mounts silently becomes a full copy), so each project's inputs had to move inside that one mount
+  too. That meant a new mount, overlap checks against every other folder, per-project link handling,
+  and every container getting write access to every other container's inputs. The owner judged that
+  too much for the problem at the time and instead put the SpaDES projects that share data into **one
+  container** (`spades_pe`). Inside one container, sharing needs no mount at all.
+- **2026-11-25: picked up again.** Measured 115 GB of inputs, 65 GB of identical copies (37 GB across
+  projects, 28 GB inside single projects). Disk was not urgent (358 GB free), but the integration work
+  was about to multiply copies, and needs every project on the same data.
+- **Linking job versus shared folder.** A shared download folder alone recovers neither the copies
+  inside one project nor the files already duplicated; a linking job alone leaves repeat downloads and
+  lets projects drift onto different versions. Both were chosen. The shared folder was built now, not
+  later, because the image was being rebuilt anyway, restarting every project for an update later is
+  hard, and the integration step needs the same data.
+- **Version coupling** turned out milder than first described. `reproducible` checks each file's hash
+  against its own record, and against the source's hash when the server reports one, but after the
+  first successful check it trusts a `.hash` note and stops asking. With a shared folder a new project
+  inherits that check instead of downloading fresh; `reproducible.checkRemoteHash = TRUE` restores the
+  check per run. Not a reason against sharing.
+- **Our own script, not `hardlink`:** reading files to compare them would otherwise update their
+  last-read times, and the old-files list depends on those.
+- **Read-only links:** a program that rewrites a file in place would silently change every linked copy;
+  making linked files read-only turns that into a visible error. Chosen over linking only
+  `CHECKSUMS.txt`-listed files (which would have kept 64.5 of 65 GB but not prevented rewrites).
+- **Across containers.** The linking job extends cheaply: all project folders are on one disk, so the
+  host can link between containers; the config is per container with groups so this is a config
+  change later. A shared *download* folder across containers does not extend cheaply: it brings back
+  everything that parked the first design (one shared mount holding every project's inputs,
+  cross-container write access). The route for projects that should download once together stays:
+  put them in the same container. If that stops being enough, start from the parked design
+  (branch `docs/shared-inputs-design`), whose §9 already describes how it would carry over.
