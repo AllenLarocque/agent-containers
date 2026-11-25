@@ -260,6 +260,16 @@ check "cleanup removes a temp name only if it is the expected file, and credits 
   section "attention" "$2/data/REPORT.md" | grep -q "/workspace/data2/$(basename "$t")"' _ "$rc" "$P1" "$(state p1 freed_bytes_run)"
 
 fresh; mkf "$P1/data/a.bin" "" "5 days ago"; dup "$P1/data/a.bin" "$P1/data2/a.bin"; conf "[p1]" data data2
+# after the exchange, a writer opens the duplicate (now at the temp name) for append and blocks on the
+# job's read lease; the hook returns once the kernel shows that lease breaking
+AGENT_INPUTS_TEST_HOOK='after-exchange:( printf data >> "$AGENT_INPUTS_TEST_TMP" ) & for i in $(seq 200); do grep -q BREAKING /proc/locks && break; sleep 0.05; done' scan
+for i in $(seq 100); do [ "$(stat -c %s "$P1/data2/a.bin")" = 2097156 ] && break; sleep 0.05; done
+check "a duplicate opened for writing during the exchange is swapped back and keeps the writer's data" bash -c '
+  [ "$(stat -c %s "$1/data2/a.bin")" = 2097156 ] && [ "$(tail -c 4 "$1/data2/a.bin")" = data ] &&
+  [ "$(stat -c %i "$1/data/a.bin")" != "$(stat -c %i "$1/data2/a.bin")" ] && [ -z "$(find "$1" -name ".agent-inputs-tmp-*")" ] &&
+  section Skipped "$1/data/REPORT.md" | grep -q "/workspace/data2/a.bin.*opened for writing during the scan"' _ "$P1"
+
+fresh; mkf "$P1/data/a.bin" "" "5 days ago"; dup "$P1/data/a.bin" "$P1/data2/a.bin"; conf "[p1]" data data2
 AGENT_INPUTS_TEST_HOOK='before-replace:cat "$AGENT_INPUTS_TEST_TARGET" > /dev/null' scan
 check "a read during the scan is kept in the linked file's last-read time" bash -c '
   [ "$(stat -c %i "$1/data/a.bin")" = "$(stat -c %i "$1/data2/a.bin")" ] && [ "$(stat -c %X "$1/data/a.bin")" -gt "$(( $(date +%s) - 3600 ))" ]' _ "$P1"

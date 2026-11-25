@@ -545,6 +545,7 @@ def pick_kept(inodes):
 
 CHANGED = "changed during scan"
 NLINK_CHANGED = "link count changed during scan"
+OPENED_FOR_WRITING = "opened for writing during the scan"
 F_SETLEASE = getattr(fcntl, "F_SETLEASE", 1024)
 
 
@@ -577,6 +578,14 @@ def _lease(fd):
         if e.errno == errno.EINVAL:
             return "file leases are not supported here, so not linked"
         return f"could not take a read lease ({e.strerror})"
+
+
+def _lease_broken(fd):
+    """True once someone has started opening the file for writing (the lease is being broken)."""
+    try:
+        return fcntl.fcntl(fd, getattr(fcntl, "F_GETLEASE", 1025)) != fcntl.F_RDLCK
+    except OSError:
+        return True
 
 
 def _unlease(fd):
@@ -688,10 +697,15 @@ def _replace(r, kept, kfd, kdir, kname, kept_links, target_links) -> Outcome:
             o = os.stat(tmp, dir_fd=tdir, follow_symlinks=False)
         except OSError:
             o = None
+        back_reason = CHANGED
         if o is not None and stat.S_ISREG(o.st_mode) and ident(o) == r.ident:
-            out.linked = True
-            out.atime = max(r.atime, os.fstat(tfd).st_atime_ns)
-            return out
+            # A writer that opened either inode since the leases were taken is blocked until they
+            # are released: undo, so it writes to a file that keeps its name.
+            if not (_lease_broken(kfd) or _lease_broken(tfd)):
+                out.linked = True
+                out.atime = max(r.atime, os.fstat(tfd).st_atime_ns)
+                return out
+            back_reason = OPENED_FOR_WRITING
         try:
             exchange(tdir, tmp, tname)
         except (OSError, ExchangeUnavailable) as e:
@@ -701,15 +715,20 @@ def _replace(r, kept, kfd, kdir, kname, kept_links, target_links) -> Outcome:
                              f"it back failed ({detail}), so that path may now hold a linked copy. Move it back by hand.")
             tmp = None    # never remove what someone else put there
             return out
-        out.reason = CHANGED
+        out.reason = back_reason
         return out
     finally:
+        # Leases are released only after the temp name is dealt with, so no writer gets an fd
+        # to an inode whose last name this job is about to remove.
+        if tmp is not None:
+            _cleanup(r, kept, tdir, tmp, out)
+        if out.linked and out.cleaned and (_lease_broken(kfd) or _lease_broken(tfd)):
+            out.attention = (r.container_path, "a process opened this file for writing at the instant it was "
+                                               "linked; what it writes may go to a file with no name. Check it.")
         for fd in leased:
             _unlease(fd)
         if tfd is not None:
             os.close(tfd)
-        if tmp is not None:
-            _cleanup(r, kept, tdir, tmp, out)
         os.close(tdir)
 
 
