@@ -142,10 +142,11 @@ check "two sections in different groups never share an inode; same group do, and
 fresh; mkf "$P1/data/a.bin"; dup "$P1/data/a.bin" "$P1/data2/a.bin"; mkf "$P1/data/b.bin"; dup "$P1/data/b.bin" "$P1/data2/b.bin"
 conf "[p1]" data data2
 scan
-first="$(state p1 freed_bytes_total) $(state p1 total_bytes)"; inodes="$(stat -c %i "$P1"/data*/*.bin)"; rm -f "$P1/data/REPORT.md"
+first="$(state p1 freed_bytes_total) $(state p1 total_bytes)"; inodes="$(stat -c %i "$P1"/data*/*.bin)"
 scan
 check "second scan links nothing, totals stable" bash -c '
-  [ "$1" = "4194304 4194304" ] && [ "$(stat -c %i "$2"/data*/*.bin)" = "$3" ] && [ "$4" = "0 4194304 4194304" ] && [ -f "$2/data/REPORT.md" ]' \
+  [ "$1" = "4194304 4194304" ] && [ "$(stat -c %i "$2"/data*/*.bin)" = "$3" ] && [ "$4" = "0 4194304 4194304" ] && [ -f "$2/data/REPORT.md" ] &&
+  ! section "linked from nowhere else" "$2/data/REPORT.md" | grep -q REPORT' \
   _ "$first" "$P1" "$inodes" "$(state p1 freed_bytes_run) $(state p1 freed_bytes_total) $(state p1 total_bytes)"
 
 # ---- races (test hook: a command run just before each replace / rename; the target path is in AGENT_INPUTS_TEST_TARGET)
@@ -202,6 +203,92 @@ ai scan >/dev/null 2>&1 && rc=0 || rc=$?
 check "a 1500-deep folder tree is walked and still gets a report" bash -c '
   [ "$1" = 0 ] && section "Not read in" "$2/data/REPORT.md" | grep -q "/d/d/f.bin"' _ "$rc" "$P1"
 
+# ---- round 2: names, open writers, permissions, cleanup, times, sizes, link counts, short writes
+fresh; mkf "$P1/data/a.bin"; dup "$P1/data/a.bin" "$P1/data2/a.bin"
+bad="$P1/data/x"$'\xff'; evil="$P1/data/evil"$'\n''## Skipped'$'\n''- fake'
+: > "$bad"; settime "$bad"; : > "$evil"; settime "$evil"
+conf "[p1]" data data2
+ai scan >/dev/null 2>&1 && rc=0 || rc=$?
+check "names with undecodable bytes or newlines are escaped in the report" bash -c '
+  [ "$1" = 0 ] && [ "$(grep -c "^## Skipped" "$2/data/REPORT.md")" = 1 ] && ! grep -q "^- fake" "$2/data/REPORT.md" &&
+  grep -qF "x\\xff" "$2/data/REPORT.md" && grep -qF "evil\\x0a## Skipped\\x0a- fake" "$2/data/REPORT.md" &&
+  [ "$(stat -c %i "$2/data/a.bin")" = "$(stat -c %i "$2/data2/a.bin")" ]' _ "$rc" "$P1"
+
+writer_case(){ # $1 which path holds a writer (data = kept, data2 = duplicate)
+  fresh; mkf "$P1/data/a.bin" "" "5 days ago"; dup "$P1/data/a.bin" "$P1/data2/a.bin"
+  orig="$(ino "$P1/data2/a.bin")"; conf "[p1]" data data2
+  sleep 600 >> "$P1/$1/a.bin" & w=$!
+  scan
+  kill "$w"; wait "$w" 2>/dev/null || true
+}
+writer_case data2
+check "a duplicate open for writing is not linked" bash -c '
+  [ "$(stat -c %i "$1/data2/a.bin")" = "$2" ] && section Skipped "$1/data/REPORT.md" | grep -q "/workspace/data2/a.bin.*open for writing"' _ "$P1" "$orig"
+writer_case data
+check "a kept file open for writing gets no links and stays writable" bash -c '
+  [ "$(stat -c %i "$1/data2/a.bin")" = "$2" ] && stat -c %A "$1/data/a.bin" | grep -q w &&
+  section Skipped "$1/data/REPORT.md" | grep -q "/workspace/data2/a.bin.*open for writing"' _ "$P1" "$orig"
+
+fresh; mkf "$P1/data/a.bin" "" "5 days ago"; dup "$P1/data/a.bin" "$P1/data2/a.bin"; chmod 755 "$P1/data2/a.bin"
+orig="$(ino "$P1/data2/a.bin")"; conf "[p1]" data data2
+scan
+check "a duplicate with different permissions is not linked" bash -c '
+  [ "$(stat -c "%i %a" "$1/data2/a.bin")" = "$2 755" ] && section Skipped "$1/data/REPORT.md" | grep -q "/workspace/data2/a.bin.*different permissions or group"' _ "$P1" "$orig"
+
+fresh; mkf "$P1/data/a.bin" "" "5 days ago"; dup "$P1/data/a.bin" "$P1/data2/a.bin"
+if python3 -c 'import os,sys; os.setxattr(sys.argv[1], "user.t", b"1")' "$P1/data2/a.bin" 2>/dev/null; then
+  orig="$(ino "$P1/data2/a.bin")"; conf "[p1]" data data2
+  scan
+  check "a duplicate with extended attributes is not linked" bash -c '
+    [ "$(stat -c %i "$1/data2/a.bin")" = "$2" ] && section Skipped "$1/data/REPORT.md" | grep -q "/workspace/data2/a.bin.*extended attributes"' _ "$P1" "$orig"
+else
+  echo "SKIP: a duplicate with extended attributes is not linked (no user xattrs on this filesystem)"
+fi
+
+fresh; mkf "$P1/data/a.bin" "" "5 days ago"; dup "$P1/data/a.bin" "$P1/data2/a.bin"; conf "[p1]" data data2
+AGENT_INPUTS_TEST_HOOK='after-exchange:printf new > "$AGENT_INPUTS_TEST_TMP.w" && mv "$AGENT_INPUTS_TEST_TMP.w" "$AGENT_INPUTS_TEST_TMP" && rm "$AGENT_INPUTS_TEST_TARGET"' \
+  ai scan >/dev/null 2>&1 && rc=0 || rc=$?
+check "a failed swap-back keeps the other file, exits 1 and asks for the owner's attention" bash -c '
+  t="$(find "$2/data2" -name ".agent-inputs-tmp-*")"; [ "$1" = 1 ] && [ -n "$t" ] && [ "$(cat "$t")" = new ] &&
+  section "attention" "$2/data/REPORT.md" | grep -q "/workspace/data2/$(basename "$t")"' _ "$rc" "$P1"
+
+fresh; mkf "$P1/data/a.bin" "" "5 days ago"; dup "$P1/data/a.bin" "$P1/data2/a.bin"; conf "[p1]" data data2
+AGENT_INPUTS_TEST_HOOK='before-cleanup:printf new > "$AGENT_INPUTS_TEST_TMP.w" && mv "$AGENT_INPUTS_TEST_TMP.w" "$AGENT_INPUTS_TEST_TMP"' \
+  ai scan >/dev/null 2>&1 && rc=0 || rc=$?
+check "cleanup removes a temp name only if it is the expected file, and credits no space otherwise" bash -c '
+  t="$(find "$2/data2" -name ".agent-inputs-tmp-*")"; [ "$1" = 1 ] && [ -n "$t" ] && [ "$(cat "$t")" = new ] && [ "$3" = 0 ] &&
+  section "attention" "$2/data/REPORT.md" | grep -q "/workspace/data2/$(basename "$t")"' _ "$rc" "$P1" "$(state p1 freed_bytes_run)"
+
+fresh; mkf "$P1/data/a.bin" "" "5 days ago"; dup "$P1/data/a.bin" "$P1/data2/a.bin"; conf "[p1]" data data2
+AGENT_INPUTS_TEST_HOOK='before-replace:cat "$AGENT_INPUTS_TEST_TARGET" > /dev/null' scan
+check "a read during the scan is kept in the linked file's last-read time" bash -c '
+  [ "$(stat -c %i "$1/data/a.bin")" = "$(stat -c %i "$1/data2/a.bin")" ] && [ "$(stat -c %X "$1/data/a.bin")" -gt "$(( $(date +%s) - 3600 ))" ]' _ "$P1"
+
+fresh; mkdir -p "$P1/data" "$P1/data2"; truncate -s 2M "$P1/data/z.bin"; settime "$P1/data/z.bin" "" "5 days ago"
+cp --sparse=always "$P1/data/z.bin" "$P1/data2/z.bin"; settime "$P1/data2/z.bin"; conf "[p1]" data data2
+scan
+check "freed and total sizes count allocated blocks (sparse files)" bash -c '
+  [ "$(stat -c %i "$1/data/z.bin")" = "$(stat -c %i "$1/data2/z.bin")" ] && [ "$2" = "$(( $(stat -c %b "$1/data/z.bin") * 512 ))" ] &&
+  [ "$3" -lt 1048576 ]' _ "$P1" "$(state p1 freed_bytes_run)" "$(state p1 total_bytes)"
+
+fresh; mkf "$P1/data/a.bin" "" "5 days ago"; dup "$P1/data/a.bin" "$P1/data2/a.bin"; orig="$(ino "$P1/data2/a.bin")"; conf "[p1]" data data2
+AGENT_INPUTS_TEST_HOOK="before-replace:ln '$P1/data/a.bin' '$OUT/alias.bin'" scan
+check "a new outside link to the kept file during the scan stops linking" bash -c '
+  [ "$(stat -c %i "$1/data2/a.bin")" = "$2" ] && stat -c %A "$3" | grep -q w &&
+  section Skipped "$1/data/REPORT.md" | grep -q "/workspace/data2/a.bin.*link count changed"' _ "$P1" "$orig" "$OUT/alias.bin"
+
+fresh; mkf "$P1/data/a.bin" "" "5 days ago"; dup "$P1/data/a.bin" "$P1/data2/a.bin"; orig="$(ino "$P1/data2/a.bin")"; conf "[p1]" data data2
+AGENT_INPUTS_TEST_HOOK="before-replace:ln \"\$AGENT_INPUTS_TEST_TARGET\" '$OUT/talias.bin'" scan
+check "a new outside link to the duplicate during the scan stops linking" bash -c '
+  [ "$(stat -c %i "$1/data2/a.bin")" = "$2" ] && section Skipped "$1/data/REPORT.md" | grep -q "/workspace/data2/a.bin.*link count changed"' _ "$P1" "$orig"
+
+fresh; mkdir -p "$P1/data"
+for i in $(seq 40); do f="$P1/data/a-file-with-a-rather-long-name-to-make-the-report-big-$i.txt"; : > "$f"; settime "$f"; done
+conf "[p1]" data
+( ulimit -f 2; ai scan >/dev/null 2>&1 ) && rc=0 || rc=$?
+check "a report that cannot be written in full is not published" bash -c '
+  [ "$1" != 0 ] && [ ! -e "$2/data/REPORT.md" ] && [ ! -e "$2/data/REPORT.md.tmp" ]' _ "$rc" "$P1"
+
 # ---- config refusals (exit 2, the message names inputs.conf and the line)
 fresh; mkdir -p "$P1/data" "$P1/research-dl"
 conf "[research]" data; refuses "config refusals: research section" "inputs.conf line 1:.*research" scan2
@@ -210,6 +297,13 @@ conf "[p1]" data missing; refuses "config refusals: missing folder" "inputs.conf
 conf "[p1]" data "data/../data"; refuses "config refusals: folder with .." "inputs.conf line 3:.*\.\." scan2
 conf "[p1]" "$P1/data"; refuses "config refusals: absolute folder" "inputs.conf line 2:.*absolute" scan2
 conf "[p1]" data research-dl; refuses "config refusals: folder overlapping RESEARCH_DIR" "inputs.conf line 3:.*RESEARCH_DIR" scan2
+mkdir -p "$CFG/p4" "$P1/sub"; printf 'PROJECT=p4\nPROFILE=builder\nPROJECT_DIR=%s\n' "$P1/sub" > "$CFG/p4/project.conf"
+conf "[p1]" data; refuses "config refusals: PROJECT_DIR inside another builder's PROJECT_DIR" "inputs.conf line 1:.*p4" scan2
+rm -rf "$CFG/p4"
+mkdir -p "$CFG/p5" "$H/GitHub/real5/data"; ln -s "$H/GitHub/real5" "$H/GitHub/p5"
+printf 'PROJECT=p5\nPROFILE=builder\nPROJECT_DIR=%s\n' "$H/GitHub/p5" > "$CFG/p5/project.conf"
+conf "[p5]" data; refuses "config refusals: PROJECT_DIR that is a symlink" "inputs.conf line 1:.*symlink" scan2
+rm -rf "$CFG/p5"
 if [ -d /dev/shm ] && [ "$(stat -c %d /dev/shm)" != "$(stat -c %d "$T")" ]; then
   SHM="$(mktemp -d /dev/shm/agent-inputs-test.XXXXXX)"; mkdir -p "$SHM/p3/data" "$CFG/p3"
   printf 'PROJECT=p3\nPROFILE=builder\nPROJECT_DIR=%s\n' "$SHM/p3" > "$CFG/p3/project.conf"
