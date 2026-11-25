@@ -66,8 +66,8 @@ state(){ # $1 section, $2 key
 }
 
 mkdir -p "$CFG/p1" "$CFG/p2" "$CFG/research"
-printf 'PROJECT=p1\nPROFILE=builder\nPROJECT_DIR=%s\n' "$P1" > "$CFG/p1/project.conf"
-printf 'PROJECT=p2\nPROFILE=builder\nPROJECT_DIR=%s\n' "$P2" > "$CFG/p2/project.conf"
+printf 'PROJECT=p1\nPROFILE=builder\nSHARED_INPUTS=1\nPROJECT_DIR=%s\n' "$P1" > "$CFG/p1/project.conf"
+printf 'PROJECT=p2\nPROFILE=builder\nSHARED_INPUTS=1\nPROJECT_DIR=%s\n' "$P2" > "$CFG/p2/project.conf"
 printf 'PROJECT=research\nPROFILE=research\nRESEARCH_DIR=%s\n' "$P1/research-dl" > "$CFG/research/project.conf"
 
 check "bin/agent-inputs exists and is executable" test -x "$AI_BIN"
@@ -299,6 +299,60 @@ conf "[p1]" data
 check "a report that cannot be written in full is not published" bash -c '
   [ "$1" != 0 ] && [ ! -e "$2/data/REPORT.md" ] && [ ! -e "$2/data/REPORT.md.tmp" ]' _ "$rc" "$P1"
 
+# ---- round 3 (final review): ctime re-check under the leases, both names verified, report inodes, .tmp, PROJECT_DIR swap
+fresh; mkf "$P1/data/a.bin" "" "5 days ago"; dup "$P1/data/a.bin" "$P1/data2/a.bin"; orig="$(ino "$P1/data2/a.bin")"; conf "[p1]" data data2
+AGENT_INPUTS_TEST_HOOK='before-replace:t="$AGENT_INPUTS_TEST_TARGET"; m="$(stat -c %y "$t")"; printf Z | dd of="$t" bs=1 count=1 conv=notrunc 2>/dev/null; touch -m -d "$m" "$t"' scan
+check "a same-size in-place edit of the duplicate, mtime put back, after the comparison is not linked" bash -c '
+  [ "$(stat -c "%i %h" "$1/data2/a.bin")" = "$2 1" ] && [ "$(nsum "$1/data/a.bin")" != "$(nsum "$1/data2/a.bin")" ] &&
+  [ -z "$(find "$1" -name ".agent-inputs-tmp-*")" ] && section Skipped "$1/data/REPORT.md" | grep -q "/workspace/data2/a.bin.*changed during scan"' _ "$P1" "$orig"
+fresh; mkf "$P1/data/a.bin" "" "5 days ago"; dup "$P1/data/a.bin" "$P1/data2/a.bin"; orig="$(ino "$P1/data2/a.bin")"; sum="$(nsum "$P1/data2/a.bin")"
+conf "[p1]" data data2
+AGENT_INPUTS_TEST_HOOK="before-replace:k='$P1/data/a.bin'; m=\"\$(stat -c %y \"\$k\")\"; chmod u+w \"\$k\"; printf Z | dd of=\"\$k\" bs=1 count=1 conv=notrunc 2>/dev/null; chmod 444 \"\$k\"; touch -m -d \"\$m\" \"\$k\"" scan
+check "a same-size in-place edit of the kept file, mtime put back, after the comparison stops linking" bash -c '
+  [ "$(stat -c "%i %h" "$1/data2/a.bin")" = "$2 1" ] && [ "$(nsum "$1/data2/a.bin")" = "$3" ] &&
+  section Skipped "$1/data/REPORT.md" | grep -q "/workspace/data2/a.bin.*changed during scan"' _ "$P1" "$orig" "$sum"
+
+fresh; mkf "$P1/data/a.bin" "" "5 days ago"; dup "$P1/data/a.bin" "$P1/data2/a.bin"; sum="$(nsum "$P1/data2/a.bin")"; conf "[p1]" data data2
+AGENT_INPUTS_TEST_HOOK='after-exchange:printf new > "$AGENT_INPUTS_TEST_TARGET.w" && mv "$AGENT_INPUTS_TEST_TARGET.w" "$AGENT_INPUTS_TEST_TARGET"' \
+  ai scan >/dev/null 2>&1 && rc=0 || rc=$?
+check "after the exchange the target name must hold the kept file: otherwise nothing is removed, exit 1, both paths named" bash -c '
+  t="$(find "$2/data2" -name ".agent-inputs-tmp-*")"; [ "$1" = 1 ] && [ -n "$t" ] && [ "$(nsum "$t")" = "$3" ] && [ "$(cat "$2/data2/a.bin")" = new ] &&
+  a="$(section "attention" "$2/data/REPORT.md")" && grep -q "/workspace/data2/$(basename "$t")" <<<"$a" && grep -q "/workspace/data2/a.bin" <<<"$a" &&
+  ! section "Linked this run" "$2/data/REPORT.md" | grep -q data2/a.bin' _ "$rc" "$P1" "$sum"
+
+fresh; mkf "$P1/data/a.bin" "" "5 days ago"; dup "$P1/data/a.bin" "$P1/data2/a.bin"; conf "[p1]" data data2
+AGENT_INPUTS_TEST_HOOK='after-exchange:printf new > "$AGENT_INPUTS_TEST_TMP.w" && mv "$AGENT_INPUTS_TEST_TMP.w" "$AGENT_INPUTS_TEST_TMP"
+after-swap-back:printf other > "$AGENT_INPUTS_TEST_TARGET.w" && mv "$AGENT_INPUTS_TEST_TARGET.w" "$AGENT_INPUTS_TEST_TARGET"' \
+  ai scan >/dev/null 2>&1 && rc=0 || rc=$?
+check "after a swap-back both names are verified: otherwise nothing is removed, exit 1, both paths named" bash -c '
+  t="$(find "$2/data2" -name ".agent-inputs-tmp-*")"; [ "$1" = 1 ] && [ -n "$t" ] && [ "$(stat -c %i "$t")" = "$(stat -c %i "$2/data/a.bin")" ] &&
+  [ "$(cat "$2/data2/a.bin")" = other ] &&
+  a="$(section "attention" "$2/data/REPORT.md")" && grep -q "/workspace/data2/$(basename "$t")" <<<"$a" && grep -q "/workspace/data2/a.bin" <<<"$a"' _ "$rc" "$P1"
+check "status-line says the last run had problems" bash -c 'HOME="$1" "$2" status-line p1 | grep -qF "last run had problems: see REPORT.md"' _ "$H" "$AI_BIN"
+
+fresh; mkf "$P1/data/a.bin"; mkf "$P1/inputs-shared/u.bin"; mkf "$P1/data/out.bin"; ln "$P1/data/out.bin" "$OUT/out-link.bin"
+conf "[p1]" "report = inputs-shared" inputs-shared data
+scan
+check "report entries carry the inode and exact size; an entry also linked outside is marked as freeing nothing" bash -c '
+  o="$(section "Not read in" "$1/inputs-shared/REPORT.md")"; s="$(section "linked from nowhere else" "$1/inputs-shared/REPORT.md")"
+  grep "/workspace/data/a.bin" <<<"$o" | grep -q "inode $(stat -c %i "$1/data/a.bin"),.*2097152 bytes" &&
+  grep "/workspace/inputs-shared/u.bin" <<<"$s" | grep -q "inode $(stat -c %i "$1/inputs-shared/u.bin")" &&
+  grep "/workspace/data/out.bin" <<<"$o" | grep -qF "also linked from outside the listed folders: deleting these paths frees nothing" &&
+  ! grep "/workspace/data/a.bin" <<<"$o" | grep -q "outside"' _ "$P1"
+
+fresh; mkf "$P1/data/a.bin"; mkdir -p "$P1/inputs-shared/.tmp/Rtmp1"; dup "$P1/data/a.bin" "$P1/inputs-shared/.tmp/Rtmp1/a.bin"
+orig="$(ino "$P1/inputs-shared/.tmp/Rtmp1/a.bin")"; conf "[p1]" "report = inputs-shared" inputs-shared data
+scan
+check "inputs-shared/.tmp is not scanned or linked; the report gives its size as owner clean-up" bash -c '
+  [ "$(stat -c "%i %h" "$1/inputs-shared/.tmp/Rtmp1/a.bin")" = "$2 1" ] && ! grep -q "/workspace/inputs-shared/.tmp/" "$1/inputs-shared/REPORT.md" &&
+  grep -qE "^- Leftover download scratch in \`/workspace/inputs-shared/.tmp\`: 2.0 MiB .*safe to delete when no R session in the container is running" "$1/inputs-shared/REPORT.md"' _ "$P1" "$orig"
+
+fresh; mkf "$P1/data/a.bin" "" "5 days ago"; dup "$P1/data/a.bin" "$P1/data2/a.bin"; mkdir -p "$OUT/fake/data"; conf "[p1]" data data2
+AGENT_INPUTS_TEST_HOOK="before-replace:mv '$P1' '$P1.real' && ln -s '$OUT/fake' '$P1'" ai scan >/dev/null 2>&1 && rc=0 || rc=$?
+check "a PROJECT_DIR swapped for a symlink mid-run gets no report through it" bash -c '
+  [ "$1" != 0 ] && [ ! -e "$2/fake/data/REPORT.md" ] && [ ! -e "$2/fake/data/REPORT.md.tmp" ]' _ "$rc" "$OUT"
+rm -f "$P1"; mv "$P1.real" "$P1"
+
 # ---- config refusals (exit 2, the message names inputs.conf and the line)
 fresh; mkdir -p "$P1/data" "$P1/research-dl"
 conf "[research]" data; refuses "config refusals: research section" "inputs.conf line 1:.*research" scan2
@@ -311,12 +365,19 @@ mkdir -p "$CFG/p4" "$P1/sub"; printf 'PROJECT=p4\nPROFILE=builder\nPROJECT_DIR=%
 conf "[p1]" data; refuses "config refusals: PROJECT_DIR inside another builder's PROJECT_DIR" "inputs.conf line 1:.*p4" scan2
 rm -rf "$CFG/p4"
 mkdir -p "$CFG/p5" "$H/GitHub/real5/data"; ln -s "$H/GitHub/real5" "$H/GitHub/p5"
-printf 'PROJECT=p5\nPROFILE=builder\nPROJECT_DIR=%s\n' "$H/GitHub/p5" > "$CFG/p5/project.conf"
+printf 'PROJECT=p5\nPROFILE=builder\nSHARED_INPUTS=1\nPROJECT_DIR=%s\n' "$H/GitHub/p5" > "$CFG/p5/project.conf"
 conf "[p5]" data; refuses "config refusals: PROJECT_DIR that is a symlink" "inputs.conf line 1:.*symlink" scan2
 rm -rf "$CFG/p5"
+mkdir -p "$CFG/p6" "$H/GitHub/p6/data"
+for v in "" "SHARED_INPUTS=0" "SHARED_INPUTS= 1" "SHARED_INPUTS=1 "; do
+  printf 'PROJECT=p6\nPROFILE=builder\n%s\nPROJECT_DIR=%s\n' "$v" "$H/GitHub/p6" > "$CFG/p6/project.conf"
+  conf "[p1]" data "[p6]" data
+  refuses "config refusals: section without exactly SHARED_INPUTS=1 ('$v')" "inputs.conf line 3:.*p6.*SHARED_INPUTS=1.*would not be told about read-only links" scan2
+done
+rm -rf "$CFG/p6"
 if [ -d /dev/shm ] && [ "$(stat -c %d /dev/shm)" != "$(stat -c %d "$T")" ]; then
   SHM="$(mktemp -d /dev/shm/agent-inputs-test.XXXXXX)"; mkdir -p "$SHM/p3/data" "$CFG/p3"
-  printf 'PROJECT=p3\nPROFILE=builder\nPROJECT_DIR=%s\n' "$SHM/p3" > "$CFG/p3/project.conf"
+  printf 'PROJECT=p3\nPROFILE=builder\nSHARED_INPUTS=1\nPROJECT_DIR=%s\n' "$SHM/p3" > "$CFG/p3/project.conf"
   conf "[p1]" "group = g" data "[p3]" "group = g" data
   refuses "config refusals: folder on another filesystem" "inputs.conf line 6:.*filesystem" scan2
   rm -rf "$CFG/p3"
@@ -362,6 +423,14 @@ check "install-timer writes both units with Persistent=true and enables the time
 aip remove-timer >/dev/null 2>&1 || true
 check "remove-timer disables and deletes them" bash -c '
   [ ! -e "$1/agent-inputs.service" ] && [ ! -e "$1/agent-inputs.timer" ] && grep -qx -- "--user disable --now agent-inputs.timer" "$2"' _ "$UD" "$SYSLOG"
+# a systemctl that fails for one command: FAKE_FAIL=<first argument after --user>, FAKE_MSG on stderr
+printf '#!/bin/sh\necho "$*" >> "%s"\nif [ "$2" = "$FAKE_FAIL" ]; then echo "$FAKE_MSG" >&2; exit 1; fi\n' "$SYSLOG" > "$SB/systemctl"
+FAKE_FAIL=disable FAKE_MSG="Failed to disable unit: Unit file agent-inputs.timer does not exist." aip remove-timer >/dev/null 2>&1 && rc=0 || rc=$?
+check "remove-timer treats a timer that is not installed as removed (exit 0)" test "$rc" = 0
+FAKE_FAIL=disable FAKE_MSG="Failed to connect to bus" aip remove-timer >/dev/null 2>&1 && rc=0 || rc=$?
+check "remove-timer fails when disable fails for another reason" test "$rc" = 1
+FAKE_FAIL=daemon-reload FAKE_MSG="Failed to reload" aip remove-timer >/dev/null 2>&1 && rc=0 || rc=$?
+check "remove-timer fails when daemon-reload fails" test "$rc" = 1
 
 fresh; mkf "$P1/data/a.bin"; dup "$P1/data/a.bin" "$P1/data2/a.bin"; mkf "$P1/data/old.bin" "$((3*MIB))"
 conf "[p1]" data data2
@@ -370,6 +439,10 @@ today="$(date -u +%Y-%m-%d)"
 check "status-line prints the documented line after a scan" bash -c '
   l="$(HOME="$1" "$2" status-line p1)"
   [[ "$l" =~ ^Shared\ inputs:\ last\ run\ $3,\ [0-9.]+\ [A-Za-z]+\ on\ disk,\ [0-9.]+\ [A-Za-z]+\ freed\ so\ far,\ 2\ files\ \([0-9.]+\ [A-Za-z]+\)\ not\ read\ in\ 180\ days$ ]] || { echo "got: $l"; exit 1; }' _ "$H" "$AI_BIN" "$today"
+ai scan --dry-run >/dev/null 2>&1 || true
+check "status-line marks a dry run" bash -c 'HOME="$1" "$2" status-line p1 | grep -qE "^Shared inputs: last run [0-9-]+ \(dry run\), "' _ "$H" "$AI_BIN"
+python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); s["sections"]["p1"]["last_run"]="2026-01-01T03:00:00+00:00"; json.dump(s, open(sys.argv[1], "w"))' "$STATE"
+check "status-line warns when the last run is more than 8 days old" bash -c 'HOME="$1" "$2" status-line p1 | grep -qF "last run 2026-01-01 (dry run)" && HOME="$1" "$2" status-line p1 | grep -qF "more than 8 days ago"' _ "$H" "$AI_BIN"
 check "status-line prints nothing for a section without state" bash -c '[ -z "$(HOME="$1" "$2" status-line nosuch)" ]' _ "$H" "$AI_BIN"
 mv "$CFG/inputs.conf" "$CFG/inputs.conf.off"
 check "status-line prints nothing without inputs.conf (state present), exit 0" bash -c 'o="$(HOME="$1" "$2" status-line p1)" && [ -z "$o" ]' _ "$H" "$AI_BIN"
