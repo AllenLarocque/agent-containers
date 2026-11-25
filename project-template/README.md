@@ -663,7 +663,7 @@ NEW=spades_pe
 |---|---|---|
 | `/workspace` | the project folder (`PROJECT_DIR` in `project.conf`) | rw |
 | `/opt/reference/spades.ai` | `SPADES_AI_DIR` (default `~/GitHub/spades.ai`) | rw |
-| `/opt/memory` | `AGENT_MEMORY_DIR` (default `~/agent-memory`, a git repo) | rw |
+| `/opt/memory` | `AGENT_MEMORY_DIR` (default `~/agent-memory`, a git repo): the owner's shared memory across projects (`instructions/builder.md`, section Shared memory); stays on this machine | rw |
 | `/etc/firewall/allowlist.d/50-project.txt` | `~/.config/agent-containers/<project>/allowlist` | **ro** |
 | `/etc/firewall/t3-connect` (only with `T3_CONNECT=1` or `publish`) | `~/.config/agent-containers/<project>/.generated/t3-connect`, written by `agent-up` from `project.conf` | **ro** |
 | `/research/briefs` (only with `RESEARCH=1`) | `RESEARCH_DIR/<project>/briefs` | rw |
@@ -760,6 +760,8 @@ rocker), P3M binary R packages, or conda tools.
 
 The agent can write three folders: the project folder, spades.ai and `~/agent-memory` (plus, with
 the research container, `~/agent-research/`: its reports and downloads come from the open internet).
+`~/agent-memory` is a local git repo with no remote, by design: it holds private notes and must not
+be pushed to GitHub.
 
 **Recommended:** run git and R inside the container (attached VS Code or `agent-up shell`).
 
