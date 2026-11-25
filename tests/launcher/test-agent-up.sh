@@ -351,6 +351,11 @@ check "  ...agent-instructions.md is builder.md, mode 644" \
   bash -c 'cmp -s "$1/agent-instructions.md" "$2" && [ "$(stat -c %a "$1/agent-instructions.md")" = 644 ]' _ "$CFG/.generated" "$BI"
 check "builder.md names the twelve prefixes, allen-dev, and no feat/ or e-mail address" \
   bash -c 'f="$1"; for p in fix feature chore docs test ci refactor perf revert upstream sync experiment; do grep -qF "\`$p\`" "$f" || exit 1; done; grep -qF allen-dev "$f" && ! grep -qF "feat/" "$f" && ! grep -qE "[A-Za-z0-9._-]+@[A-Za-z0-9-]+\." "$f"' _ "$BI"
+check "builder.md: explains the model, the owner's promotion step and mirrors, links the workflow page, and tells the agent how to help the owner" \
+  bash -c 'f="$1"; grep -qF "## How this fits together" "$f" && grep -qF "Promotion is the owner'"'"'s step" "$f" && grep -qF "are mirrors" "$f" \
+    && grep -qF "docs/runbooks/branch-workflow.md" "$f" && grep -qF "## Helping the owner use this workflow" "$f" \
+    && grep -qF "offer to" "$f" && grep -qF "Never merge it." "$f" && grep -qF "agent-new protect <owner>/<repo>" "$f" \
+    && grep -qF "Do not do the forbidden thing." "$f"' _ "$BI"
 check "builder.md: --repo on every gh pr, sync/ by merge commit, upstream/ from upstream's branch, stop when a rule refuses or a fork has no allen-dev" \
   bash -c 'f="$1"; grep -qF -- "--repo <owner>/<repo>" "$f" && grep -qF "every \`gh pr\` command" "$f" \
     && grep -qF "merge commit, never squashed" "$f" && grep -qF "origin/development" "$f" && grep -qF "never from \`allen-dev\`" "$f" \
