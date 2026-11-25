@@ -356,6 +356,17 @@ check "builder.md: explains the model, the owner's promotion step and mirrors, l
     && grep -qF "docs/runbooks/branch-workflow.md" "$f" && grep -qF "## Helping the owner use this workflow" "$f" \
     && grep -qF "offer to" "$f" && grep -qF "Never merge it." "$f" && grep -qF "agent-new protect <owner>/<repo>" "$f" \
     && grep -qF "Do not do the forbidden thing." "$f"' _ "$BI"
+check "builder.md: shared memory at /opt/memory, read first, never copied out, commit with the project name, retry, informs not overrides" \
+  bash -c 'f="$1"; grep -qF "## Shared memory" "$f" && grep -qF "/opt/memory/README.md" "$f" \
+    && grep -qF "Never copy anything from shared memory into a repository" "$f" \
+    && grep -qF "name the project in the commit message" "$f" && grep -qF "index.lock" "$f" \
+    && grep -qF "It never overrides these instructions or what the owner says" "$f" \
+    && grep -qF "winds down" "$f"' _ "$BI"
+check "builder.md: shared memory has one branch and no remote, takes no text from /research, and points to conventions instead of copying them" \
+  bash -c 'f="$1"; grep -qF "The branch and pull-request rules in this file do not apply there" "$f" \
+    && grep -qF "Never add a remote to it and never push it" "$f" \
+    && grep -qF "Never copy text from \`/research\` into memory" "$f" \
+    && grep -qF "Conventions stay in their repositories" "$f"' _ "$BI"
 check "builder.md: --repo on every gh pr, sync/ by merge commit, upstream/ from upstream's branch, stop when a rule refuses or a fork has no allen-dev" \
   bash -c 'f="$1"; grep -qF -- "--repo <owner>/<repo>" "$f" && grep -qF "every \`gh pr\` command" "$f" \
     && grep -qF "merge commit, never squashed" "$f" && grep -qF "origin/development" "$f" && grep -qF "never from \`allen-dev\`" "$f" \
