@@ -1135,8 +1135,9 @@ write_research(){ # the research profile's switch + instructions + exchange; a b
   if [ "$(profile "$1")" = research ]; then echo "PROFILE=research" > "$g/profile"; else rm -f "$g/profile"; fi
   if [ "$(profile "$1")" = research ]; then
     cp "$SEEDS/instructions/research.md" "$g/agent-instructions.md"; chmod 644 "$g/agent-instructions.md"
-  else   # a builder: the branch workflow, then the research rules when research is on
+  else   # a builder: the branch workflow, then the shared-inputs rules and the research rules when on
     { cat "$SEEDS/instructions/builder.md"
+      if shared_inputs_on "$1"; then echo; cat "$SEEDS/instructions/builder-shared-inputs.md"; fi
       if research_on "$1"; then echo; cat "$SEEDS/instructions/builder-research.md"; fi
     } > "$g/agent-instructions.md"; chmod 644 "$g/agent-instructions.md"
   fi

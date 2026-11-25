@@ -1103,6 +1103,27 @@ cp "$T/penv-gd.bak" "$CFG/project.env"
 rm -f "$SHKEY"; TOK=""
 au config "$NAME" >/dev/null 2>&1 || true
 
+# instructions: the four combinations of SHARED_INPUTS and RESEARCH
+SIF="$ROOT/project-template/instructions/builder-shared-inputs.md"
+cp "$CFG/project.conf" "$T/pconf-si.bak"
+for combo in "0 0" "1 0" "0 1" "1 1"; do
+  set -- $combo
+  sed -i "s/^SHARED_INPUTS=.*/SHARED_INPUTS=$1/; s/^RESEARCH=.*/RESEARCH=$2/" "$CFG/project.conf"
+  au config "$NAME" >/dev/null 2>&1 || true
+  check "instructions: SHARED_INPUTS=$1 RESEARCH=$2 assemble in order builder, shared-inputs, research" \
+    bash -c 'f="$1/agent-instructions.md"; ln() { grep -nxF "$1" "$f" | head -n1 | cut -d: -f1; }
+      b="$(ln "## How this fits together")"; s="$(ln "## Shared inputs")"; r="$(ln "# Research exchange (managed by agent-containers; read-only, set by the owner)")"
+      [ -n "$b" ] || exit 1
+      if [ "$2" = 1 ]; then [ -n "$s" ] && [ "$s" -gt "$b" ] || exit 1; else [ -z "$s" ] || exit 1; fi
+      if [ "$3" = 1 ]; then [ -n "$r" ] && [ "$r" -gt "$b" ] || exit 1; [ "$2" = 0 ] || [ "$r" -gt "$s" ] || exit 1; else [ -z "$r" ] || exit 1; fi' _ "$CFG/.generated" "$1" "$2"
+done
+cp "$T/pconf-si.bak" "$CFG/project.conf"; au config "$NAME" >/dev/null 2>&1 || true
+check "builder-shared-inputs.md: the rules" \
+  bash -c 'f="$1"; grep -qF "## Shared inputs" "$f" && grep -qF "/workspace/inputs-shared" "$f" && grep -qF "Leave \`inputPath\`" "$f" \
+    && grep -qF "never by hand" "$f" && grep -qF "never open a file there for in-place update" "$f" && grep -qF "permission denied" "$f" \
+    && grep -qF "Never make such a file writable again" "$f" && grep -qF "delete every path the report lists" "$f" \
+    && grep -qF "Never copy anything from \`/research\`" "$f"' _ "$SIF"
+
 # builder opt-in: RESEARCH=1
 cp "$CFG/project.conf" "$T/pconf-res.bak"
 sed -i 's/^RESEARCH=.*/RESEARCH=1/' "$CFG/project.conf"

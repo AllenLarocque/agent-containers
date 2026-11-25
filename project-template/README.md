@@ -666,6 +666,39 @@ Giving two sections the same `group` links identical files across those containe
 the owner does not plan to use it: every container in the group gets write access to the other's
 linked files. Without a shared `group`, each section is its own group and nothing is shared.
 
+### Part B: the shared download folder
+
+Part A links copies that already exist. Part B stops the copies being made. With `SHARED_INPUTS=1`,
+every project in that one builder container downloads an input once, into `inputs-shared/` in the
+project folder (`/workspace/inputs-shared` in the container), and the other projects reuse it.
+
+**Turn it on for one container.** In `~/.config/agent-containers/<project>/project.conf` set
+`SHARED_INPUTS=1`, then run `agent-up up <project>`. It restarts the container once and creates
+`inputs-shared/` and `inputs-shared/.tmp` in the project folder. It is off by default and is for
+builder containers only (the research container refuses it).
+
+**What the container sets.** The container sets two environment variables, `SPADES_INPUTS_SHARED`
+and `SPADES_INPUTS_TMP`. The standard `global.R` stays as it is: when a script has not set them, the R
+startup file sets `reproducible.inputPaths` (the shared folder) and `reproducible.tempPath` (a folder
+inside it, so a half-finished download never appears under its final name). It applies to `Rscript`,
+the R console and RStudio. If a project's own `global.R` sets that option, its own setting wins and
+that project keeps its own folder. Nothing in `global.R` or a module needs to know the shared folder.
+
+The option is set under its old name, `reproducible.inputPaths`. `reproducible` prints a one-time
+deprecation note for it the first time it runs in a session. That is expected and harmless.
+
+**The agent's rules.** Agents in that container get a "Shared inputs" section in their instructions:
+leave the `reproducible` options at their defaults, never write into `inputs-shared/` by hand, never
+edit a linked input file in place, delete every path of a file before expecting space back, and never
+copy anything from `/research` into it.
+
+**Check it works** (the first time, in that container, using a small public file):
+
+1. In project A, run `prepInputs()` for the file. Check that `inputs-shared/` holds one copy and
+   project A's inputs folder has the file.
+2. In project B, run the same `prepInputs()` call. Check that nothing was downloaded and that
+   `ls -i` shows the same inode number for B's copy and the one in `inputs-shared/`.
+
 ## Lifecycle
 
 | Action | Steps |
@@ -743,6 +776,7 @@ NEW=spades_pe
 | `/opt/memory` | `AGENT_MEMORY_DIR` (default `~/agent-memory`, a git repo): the owner's shared memory across projects (`instructions/builder.md`, section Shared memory); stays on this machine | rw |
 | `/etc/firewall/allowlist.d/50-project.txt` | `~/.config/agent-containers/<project>/allowlist` | **ro** |
 | `/etc/firewall/t3-connect` (only with `T3_CONNECT=1` or `publish`) | `~/.config/agent-containers/<project>/.generated/t3-connect`, written by `agent-up` from `project.conf` | **ro** |
+| `/workspace/inputs-shared` (only with `SHARED_INPUTS=1`) | a folder inside the project folder, made by `agent-up up`; the env vars `SPADES_INPUTS_SHARED` and `SPADES_INPUTS_TMP` point at it. See [Shared inputs](#shared-inputs) | rw (inside `/workspace`) |
 | `/research/briefs` (only with `RESEARCH=1`) | `RESEARCH_DIR/<project>/briefs` | rw |
 | `/research/reports`, `/research/downloads` (only with `RESEARCH=1`) | `RESEARCH_DIR/<project>/reports`, `.../downloads`: written by the research container | **ro** (untrusted) |
 | `/etc/claude-code/CLAUDE.md`, `~/.codex/AGENTS.md` (only with `RESEARCH=1`) | `.generated/agent-instructions.md`, from `instructions/builder-research.md` | **ro** |
@@ -818,6 +852,9 @@ rocker), P3M binary R packages, or conda tools.
 
   Auto-updates stay off either way (`DISABLE_AUTOUPDATER=1` is set in the
   image; the version is pinned).
+- **`SHARED_INPUTS=1`** in `project.conf` (default `0`, builders only) gives the container one shared
+  download folder, `/workspace/inputs-shared`, for all its projects. Turn it on, then
+  `agent-up up <project>`. See [Shared inputs](#shared-inputs), Part B.
 - **Codex `~/.codex/config.toml`**: at every start `agent-init` enforces `approval_policy = "never"`,
   `sandbox_mode = "danger-full-access"` (the container is the sandbox, as for Claude's
   `bypassPermissions`), `check_for_update_on_startup = false` and `[analytics] enabled = false`.
