@@ -11,6 +11,7 @@ never deletes, moves or changes the content of a file. Standard library only.
   agent-inputs scan [--dry-run] [--days N]
 """
 import argparse
+import ctypes
 import dataclasses
 import datetime
 import errno
@@ -260,7 +261,7 @@ def load_config(home: Path) -> list:
 def walk(section, tmp_found=None) -> Iterator[FileRef]:
     """Every regular file under the section's folders, never through a symlink, skipping .git and
     other filesystems. Names starting with TMP_PREFIX are not yielded; with tmp_found (a list) they
-    are appended to it as (section, folder, rel)."""
+    are appended to it as (section, folder, rel, dev, ino)."""
     for folder in section.folders:
         try:
             fd = open_dir(section, folder)
@@ -269,45 +270,54 @@ def walk(section, tmp_found=None) -> Iterator[FileRef]:
                   file=sys.stderr)
             continue
         try:
-            yield from _walk_dir(section, folder, fd, "", os.fstat(fd).st_dev, tmp_found)
+            yield from _walk_folder(section, folder, fd, tmp_found)
         finally:
             os.close(fd)
 
 
-def _walk_dir(section, folder, fd, prefix, dev, tmp_found):
-    try:
-        with os.scandir(fd) as it:
-            names = sorted(e.name for e in it)
-    except OSError:
-        return
-    for name in names:
-        if name == ".git":
-            continue
-        rel = prefix + name
+def _walk_folder(section, folder, root_fd, tmp_found):
+    """Depth-first with an explicit stack (an agent can nest directories arbitrarily deep). Only
+    one directory below the folder is open at a time: each is reopened from the folder fd, one
+    O_NOFOLLOW step per component, and must still be the inode its parent listed."""
+    dev = os.fstat(root_fd).st_dev
+    stack = [((), None)]   # (path components below the folder, expected (dev, ino))
+    while stack:
+        parts, expect = stack.pop()
         try:
-            st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            fd = open_rel(root_fd, parts)
         except OSError:
             continue
-        if name.startswith(TMP_PREFIX):
-            if tmp_found is not None:
-                tmp_found.append((section, folder, rel))
-            continue
-        if stat.S_ISDIR(st.st_mode):
-            if st.st_dev != dev:
+        try:
+            st = os.fstat(fd)
+            if expect is not None and (st.st_dev, st.st_ino) != expect:
                 continue
             try:
-                sub = os.open(name, DIR_FLAGS, dir_fd=fd)
+                with os.scandir(fd) as it:
+                    names = sorted(e.name for e in it)
             except OSError:
                 continue
-            try:
-                sst = os.fstat(sub)
-                if (sst.st_dev, sst.st_ino) == (st.st_dev, st.st_ino):
-                    yield from _walk_dir(section, folder, sub, rel + "/", dev, tmp_found)
-            finally:
-                os.close(sub)
-        elif stat.S_ISREG(st.st_mode):
-            yield FileRef(section, folder, rel, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns,
-                          st.st_atime_ns, st.st_nlink, st.st_uid)
+            subdirs = []
+            for name in names:
+                if name == ".git":
+                    continue
+                rel = "/".join(parts + (name,))
+                try:
+                    st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                except OSError:
+                    continue
+                if name.startswith(TMP_PREFIX):
+                    if tmp_found is not None:
+                        tmp_found.append((section, folder, rel, st.st_dev, st.st_ino))
+                    continue
+                if stat.S_ISDIR(st.st_mode):
+                    if st.st_dev == dev:
+                        subdirs.append((parts + (name,), (st.st_dev, st.st_ino)))
+                elif stat.S_ISREG(st.st_mode):
+                    yield FileRef(section, folder, rel, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns,
+                                  st.st_atime_ns, st.st_nlink, st.st_uid)
+        finally:
+            os.close(fd)
+        stack.extend(reversed(subdirs))
 
 
 def read_error(e):
@@ -410,6 +420,43 @@ def hash_ref(ref, why):
 
 # ---------------------------------------------------------------- linking
 
+RENAME_EXCHANGE = 2
+EXCHANGE_UNAVAILABLE = "renameat2(RENAME_EXCHANGE) is not available here, so nothing was linked"
+
+
+class ExchangeUnavailable(Exception):
+    pass
+
+
+exchange_unavailable = False   # set for the rest of the run once an exchange is refused
+
+
+def _load_renameat2():
+    try:
+        f = ctypes.CDLL(None, use_errno=True).renameat2
+    except (OSError, AttributeError):
+        return None
+    f.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    f.restype = ctypes.c_int
+    return f
+
+
+_renameat2 = _load_renameat2()
+
+
+def exchange(dir_fd, a, b):
+    """Atomically swap the directory entries a and b in dir_fd (renameat2 RENAME_EXCHANGE): neither
+    entry is ever replaced, so whatever sits at b at that instant survives under the name a.
+    Raises ExchangeUnavailable when the kernel, filesystem or libc cannot do it."""
+    if _renameat2 is None:
+        raise ExchangeUnavailable()
+    if _renameat2(dir_fd, os.fsencode(a), dir_fd, os.fsencode(b), RENAME_EXCHANGE) != 0:
+        err = ctypes.get_errno()
+        if err in (errno.ENOSYS, errno.EINVAL):
+            raise ExchangeUnavailable()
+        raise OSError(err, os.strerror(err))
+
+
 def run_hook(point, ref):
     """Test hook: AGENT_INPUTS_TEST_HOOK=<point>:<cmd> runs <cmd> (shell) at that point, with the
     target's host path in AGENT_INPUTS_TEST_TARGET; <cmd> 'exit' ends the process there."""
@@ -435,7 +482,8 @@ def pick_kept(inodes):
 
 
 def _replace(r, kept, kfd, kdir, kname):
-    """Replace r's path by a hard link to the kept inode. None on success, else the reason."""
+    """Replace r's path by a hard link to the kept inode. None on success, else the reason.
+    Raises ExchangeUnavailable (nothing changed) when the atomic exchange cannot be done."""
     try:
         tdir, tname = open_parent(r)
     except OSError:
@@ -449,7 +497,6 @@ def _replace(r, kept, kfd, kdir, kname):
         except OSError as e:
             tmp = None
             return f"could not link ({e.strerror})"
-        run_hook("before-rename", r)
         try:
             tst = os.stat(tmp, dir_fd=tdir, follow_symlinks=False)
             cur = os.stat(tname, dir_fd=tdir, follow_symlinks=False)
@@ -460,9 +507,26 @@ def _replace(r, kept, kfd, kdir, kname):
                 or not stat.S_ISREG(cur.st_mode) or ident(cur) != r.ident
                 or ident(kst) != kept.ident):
             return "changed during scan"
-        os.rename(tmp, tname, src_dir_fd=tdir, dst_dir_fd=tdir)
-        tmp = None
-        return None
+        run_hook("before-rename", r)
+        # Swap, then look at what came out: only if it is the scanned duplicate is its old name
+        # dropped (its content lives on in the kept inode); anything else is swapped back.
+        try:
+            exchange(tdir, tmp, tname)
+        except OSError as e:
+            return f"could not replace ({e.strerror})"
+        try:
+            out = os.stat(tmp, dir_fd=tdir, follow_symlinks=False)
+        except OSError:
+            out = None
+        if out is not None and stat.S_ISREG(out.st_mode) and ident(out) == r.ident:
+            return None   # finally unlinks tmp: the duplicate's old path
+        try:
+            exchange(tdir, tmp, tname)
+        except OSError as e:
+            moved = container_path(r.folder, "/".join(r.rel.split("/")[:-1] + [tmp]))
+            tmp = None    # never remove what someone else put there
+            return f"changed during scan; swapping back failed ({e.strerror}), the other file is now at {moved}"
+        return "changed during scan"
     finally:
         if tmp is not None:
             try:
@@ -495,6 +559,10 @@ def link_group(refs, dry_run, linked=None, skipped=None) -> int:
         for r in targets:
             count(r)
         return freed
+    global exchange_unavailable
+    if exchange_unavailable:
+        skipped.extend((r, EXCHANGE_UNAVAILABLE) for r in targets)
+        return 0
     try:
         kdir, kname = open_parent(kept)
     except OSError:
@@ -516,7 +584,17 @@ def link_group(refs, dry_run, linked=None, skipped=None) -> int:
             latest = kept.atime
             done = 0
             for r in targets:
-                why = _replace(r, kept, kfd, kdir, kname)
+                if exchange_unavailable:
+                    skipped.append((r, EXCHANGE_UNAVAILABLE))
+                    continue
+                try:
+                    why = _replace(r, kept, kfd, kdir, kname)
+                except ExchangeUnavailable:
+                    exchange_unavailable = True
+                    skipped.append((r, EXCHANGE_UNAVAILABLE))
+                    continue
+                except OSError as e:
+                    why = f"could not replace ({e.strerror})"
                 if why:
                     skipped.append((r, why))
                     continue
@@ -538,7 +616,7 @@ def remove_leftovers(tmps, skipped):
     """Remove temp links an interrupted run left. Only a hard link (link count >= 2) is removed, so
     no data is lost; anything else with that name is left alone and listed."""
     removed = 0
-    for section, folder, rel in tmps:
+    for section, folder, rel, _, _ in tmps:
         parts = rel.split("/")
         try:
             dfd = open_dir(section, folder, parts[:-1])
@@ -598,6 +676,7 @@ def render_report(section, data):
            f"- Total size on disk: {human(data['total_bytes'])} (each file counted once)",
            f"- Space {'that would be freed' if dry else 'freed'} by this run: {human(data['freed_run'])}; "
            f"freed in total so far: {human(data['freed_total'])}",
+           *([f"- Linking: {EXCHANGE_UNAVAILABLE}"] if data.get("exchange_unavailable") else []),
            "", "## " + ("Would link (dry run)" if dry else "Linked this run"), ""]
     if data["linked"]:
         for r, kept, _ in data["linked"]:
@@ -696,7 +775,11 @@ def scan_group(sections, dry_run, days, state, run_time, now_ns):
             for _ in walk(s, tmps):
                 pass
         remove_leftovers(tmps, skipped)
-    refs = [r for s in sections for r in walk(s)]
+    tmps = []      # temp links still present (a dry run leaves an interrupted run's ones): inside paths
+    refs = [r for s in sections for r in walk(s, tmps)]
+    tmp_links = {}
+    for t in tmps:
+        tmp_links[t[3:]] = tmp_links.get(t[3:], 0) + 1
 
     cutoff = now_ns - DAY_NS
     uid = os.getuid()
@@ -709,6 +792,17 @@ def scan_group(sections, dry_run, days, state, run_time, now_ns):
     linked, link_skips = [], []
     for size in sorted(by_size):
         if len(by_size[size]) < 2:
+            continue
+        # An inode with more links than the paths found in this group also has a path outside the
+        # listed folders: it is never kept, linked, chmodded or retimed.
+        inside = []
+        for ps in by_size[size]:
+            if ps[0].nlink > len(ps) + tmp_links.get(ps[0].key, 0):
+                link_skips.extend((r, "also linked outside the listed folders; left alone") for r in ps)
+            else:
+                inside.append(ps)
+        by_size[size] = inside
+        if len(inside) < 2:
             continue
         by_hash = {}
         for ps in by_size[size]:
@@ -747,7 +841,7 @@ def scan_group(sections, dry_run, days, state, run_time, now_ns):
         freed_run = sum(f for r, _, f in linked if r.section is s)
         freed_total = prev if dry_run else prev + freed_run
         d = section_data(s, [r for r in after if r.section is s], group_inodes, days, now_ns)
-        d.update(run_time=run_time, dry_run=dry_run, days=days, freed_run=freed_run, freed_total=freed_total,
+        d.update(run_time=run_time, dry_run=dry_run, days=days, exchange_unavailable=exchange_unavailable and not dry_run, freed_run=freed_run, freed_total=freed_total,
                  linked=[e for e in linked if e[0].section is s],
                  skipped=sorted((p, why) for n, p, why in skipped if n == s.name))
         state["sections"][s.name] = {
@@ -780,7 +874,12 @@ def cmd_scan(args):
         groups.setdefault(s.group, []).append(s)
     ok = True
     for g in groups.values():
-        ok = scan_group(g, args.dry_run, args.days, state, run_time, now_ns) and ok
+        try:   # one group's failure must not stop the other groups' reports and state
+            ok = scan_group(g, args.dry_run, args.days, state, run_time, now_ns) and ok
+        except Exception as e:
+            names = ", ".join(s.name for s in g)
+            print(f"agent-inputs: group '{g[0].group}' ({names}) failed: {type(e).__name__}: {e}", file=sys.stderr)
+            ok = False
     save_state(state)
     return 0 if ok else 1
 

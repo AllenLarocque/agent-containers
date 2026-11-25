@@ -173,6 +173,35 @@ scan
 check "interrupted link leaves the original intact" bash -c '
   [ "$1" = "$2 1" ] && [ -z "$(find "$3" -name ".agent-inputs-tmp-*")" ]' _ "$mid" "$orig" "$P1"
 
+fresh; mkf "$P1/data/a.bin" "" "5 days ago"; dup "$P1/data/a.bin" "$P1/data2/a.bin"; mkf "$P2/dataB/x.bin"
+conf "[p1]" "group = g1" data data2 "[p2]" "group = g2" dataB
+AGENT_INPUTS_TEST_HOOK='before-rename:rm -f "$AGENT_INPUTS_TEST_TARGET" && mkdir "$AGENT_INPUTS_TEST_TARGET"' ai scan >/dev/null 2>&1 && rc=0 || rc=$?
+check "race: target swapped for a directory just before the replace is skipped and the run completes" bash -c '
+  [ "$1" = 0 ] && [ -d "$2/data2/a.bin" ] && [ -z "$(find "$2" -name ".agent-inputs-tmp-*")" ] &&
+  section Skipped "$2/data/REPORT.md" | grep -q "/workspace/data2/a.bin.*changed" && [ -f "$3/dataB/REPORT.md" ]' _ "$rc" "$P1" "$P2"
+
+fresh; mkf "$P1/data/a.bin" "" "5 days ago"; dup "$P1/data/a.bin" "$P1/data2/a.bin"
+conf "[p1]" data data2
+AGENT_INPUTS_TEST_HOOK='before-rename:printf new > "$AGENT_INPUTS_TEST_TARGET.w" && mv "$AGENT_INPUTS_TEST_TARGET.w" "$AGENT_INPUTS_TEST_TARGET"' scan
+check "race: a file written and renamed over the target just before the replace survives" bash -c '
+  [ "$(cat "$1/data2/a.bin")" = new ] && [ "$(stat -c %h "$1/data2/a.bin")" = 1 ] && [ -z "$(find "$1" -name ".agent-inputs-tmp-*")" ] &&
+  section Skipped "$1/data/REPORT.md" | grep -q "/workspace/data2/a.bin.*changed"' _ "$P1"
+
+fresh; mkf "$P1/data/a.bin" "" "5 days ago"; dup "$P1/data/a.bin" "$P1/data2/a.bin" "" "10 days ago"; ln "$P1/data/a.bin" "$OUT/a-outside.bin"
+before="$(stat -c '%i %h %a %X %Y' "$P1/data/a.bin" "$P1/data2/a.bin")"
+conf "[p1]" data data2
+scan
+check "a file also linked outside the listed folders is left alone and listed" bash -c '
+  [ "$(stat -c "%i %h %a %X %Y" "$1/data/a.bin" "$1/data2/a.bin")" = "$2" ] &&
+  section Skipped "$1/data/REPORT.md" | grep -q "/workspace/data/a.bin.*outside the listed folders"' _ "$P1" "$before"
+
+fresh; mkf "$P1/data/a.bin"
+deep="$P1/data$(printf '/d%.0s' $(seq 1500))"; mkdir -p "$deep"; mkf "$deep/f.bin"
+conf "[p1]" data
+ai scan >/dev/null 2>&1 && rc=0 || rc=$?
+check "a 1500-deep folder tree is walked and still gets a report" bash -c '
+  [ "$1" = 0 ] && section "Not read in" "$2/data/REPORT.md" | grep -q "/d/d/f.bin"' _ "$rc" "$P1"
+
 # ---- config refusals (exit 2, the message names inputs.conf and the line)
 fresh; mkdir -p "$P1/data" "$P1/research-dl"
 conf "[research]" data; refuses "config refusals: research section" "inputs.conf line 1:.*research" scan2
