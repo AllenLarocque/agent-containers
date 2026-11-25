@@ -312,6 +312,26 @@ check "a same-size in-place edit of the kept file, mtime put back, after the com
   [ "$(stat -c "%i %h" "$1/data2/a.bin")" = "$2 1" ] && [ "$(nsum "$1/data2/a.bin")" = "$3" ] &&
   section Skipped "$1/data/REPORT.md" | grep -q "/workspace/data2/a.bin.*changed during scan"' _ "$P1" "$orig" "$sum"
 
+fresh; mkf "$P1/data/a.bin" "" "5 days ago"; dup "$P1/data/a.bin" "$P1/data2/a.bin"; dup "$P1/data/a.bin" "$P1/data3/a.bin"
+sum="$(nsum "$P1/data2/a.bin")"; i2="$(ino "$P1/data2/a.bin")"; i3="$(ino "$P1/data3/a.bin")"; conf "[p1]" data data2 data3
+# one-shot: the kept file is edited (mtime put back) before the first replace only
+AGENT_INPUTS_TEST_HOOK="before-replace:[ -e '$T/once' ] || { touch '$T/once'; k='$P1/data/a.bin'; m=\"\$(stat -c %y \"\$k\")\"; chmod u+w \"\$k\"; printf Z | dd of=\"\$k\" bs=1 count=1 conv=notrunc 2>/dev/null; chmod 444 \"\$k\"; touch -m -d \"\$m\" \"\$k\"; }" scan
+rm -f "$T/once"
+check "once the kept file is seen changed mid-group, no later duplicate is linked and every original is intact" bash -c '
+  [ "$(stat -c "%i %h" "$1/data2/a.bin")" = "$2 1" ] && [ "$(stat -c "%i %h" "$1/data3/a.bin")" = "$3 1" ] &&
+  [ "$(nsum "$1/data2/a.bin")" = "$4" ] && [ "$(nsum "$1/data3/a.bin")" = "$4" ] && [ "$(nsum "$1/data/a.bin")" != "$4" ] &&
+  s="$(section Skipped "$1/data/REPORT.md")" && grep -q "/workspace/data2/a.bin.*changed during scan" <<<"$s" &&
+  grep -q "/workspace/data3/a.bin.*kept file changed during scan" <<<"$s"' _ "$P1" "$i2" "$i3" "$sum"
+
+fresh; mkf "$P1/data/a.bin" "" "5 days ago"; ln "$P1/data/a.bin" "$P1/data/k2.bin"; ln "$P1/data/a.bin" "$P1/data/k3.bin"
+dup "$P1/data/a.bin" "$P1/data2/a.bin"; ln "$P1/data2/a.bin" "$P1/data2/b.bin"; it="$(ino "$P1/data2/a.bin")"; conf "[p1]" data data2
+# one-shot: the duplicate (two paths, one inode) is edited (mtime put back) before its first path is replaced
+AGENT_INPUTS_TEST_HOOK="before-replace:[ -e '$T/once' ] || { touch '$T/once'; t=\"\$AGENT_INPUTS_TEST_TARGET\"; m=\"\$(stat -c %y \"\$t\")\"; printf Z | dd of=\"\$t\" bs=1 count=1 conv=notrunc 2>/dev/null; touch -m -d \"\$m\" \"\$t\"; }" scan
+rm -f "$T/once"
+check "once a duplicate is seen changed, its other paths are not replaced either" bash -c '
+  [ "$(stat -c "%i %h" "$1/data2/a.bin")" = "$2 2" ] && [ "$(stat -c %i "$1/data2/b.bin")" = "$2" ] &&
+  [ "$(nsum "$1/data2/b.bin")" != "$(nsum "$1/data/a.bin")" ]' _ "$P1" "$it"
+
 fresh; mkf "$P1/data/a.bin" "" "5 days ago"; dup "$P1/data/a.bin" "$P1/data2/a.bin"; sum="$(nsum "$P1/data2/a.bin")"; conf "[p1]" data data2
 AGENT_INPUTS_TEST_HOOK='after-exchange:printf new > "$AGENT_INPUTS_TEST_TARGET.w" && mv "$AGENT_INPUTS_TEST_TARGET.w" "$AGENT_INPUTS_TEST_TARGET"' \
   ai scan >/dev/null 2>&1 && rc=0 || rc=$?

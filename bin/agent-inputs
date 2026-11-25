@@ -582,6 +582,7 @@ class Outcome:
     reason: Optional[str] = None    # why not linked
     attention: Optional[tuple] = None   # (container path, message) the owner must look at
     cleaned: bool = False           # the duplicate's old name (the temp link) was removed
+    kept_changed: bool = False      # the kept inode changed since its comparison: link nothing more to it
     atime: int = 0                  # the duplicate's latest last-read time (ns)
 
 
@@ -680,6 +681,7 @@ def _replace(r, kept, kfd, kdir, kname, kept_links, target_links, ctimes, kctime
         return out
     tmp = tfd = None
     leased = []
+    checked = False   # the under-lease identity check passed: only then are ctimes refreshed
     try:
         run_hook("before-replace", r)
         why = []
@@ -708,10 +710,19 @@ def _replace(r, kept, kfd, kdir, kname, kept_links, target_links, ctimes, kctime
         # With both leases held no write can start unseen. A write that completed between the
         # comparison and the leases, even one that put the mtime back, shows in the ctime.
         kst, tst = os.fstat(kfd), os.fstat(tfd)
-        if (ident(tst) != r.ident or tst.st_ctime_ns != ctimes.get(r.key)
-                or ident(kst) != kept.ident or kst.st_ctime_ns != kctime[0]):
+        kept_ok = ident(kst) == kept.ident and kst.st_ctime_ns == kctime[0]
+        target_ok = ident(tst) == r.ident and tst.st_ctime_ns == ctimes.get(r.key)
+        if not (kept_ok and target_ok):
+            # Never adopt a changed ctime: forget the expected value, so no later path of the
+            # same inode passes, and stop linking to a changed kept inode.
+            if not target_ok:
+                ctimes.pop(r.key, None)
+            if not kept_ok:
+                kctime[0] = None
+                out.kept_changed = True
             out.reason = CHANGED
             return out
+        checked = True
         tmp = TMP_PREFIX + secrets.token_hex(8)
         try:
             os.link(kname, tmp, src_dir_fd=kdir, dst_dir_fd=tdir, follow_symlinks=False)
@@ -793,11 +804,30 @@ def _replace(r, kept, kfd, kdir, kname, kept_links, target_links, ctimes, kctime
         if out.linked and out.cleaned and (_lease_broken(kfd) or _lease_broken(tfd)):
             out.attention = (r.container_path, "a process opened this file for writing at the instant it was "
                                                "linked; what it writes may go to a file with no name. Check it.")
-        # This job's own link, renames and unlink changed both ctimes. While both leases are still
-        # held and unbroken nobody else can have written, so the new values become the expected ones.
-        if len(leased) == 2 and not (_lease_broken(kfd) or _lease_broken(tfd)):
-            kctime[0] = os.fstat(kfd).st_ctime_ns
-            ctimes[r.key] = os.fstat(tfd).st_ctime_ns
+        # This job's own link, renames and unlink changed both ctimes. Only after the under-lease check
+        # passed, with both leases still held and unbroken (so nobody else can have written) and the
+        # identities unchanged, do the new values become the expected ones. Anything else forgets
+        # them, so no later path of either inode is linked. An error here never skips the release.
+        if checked:
+            try:
+                k2 = os.fstat(kfd)
+                kept_fresh = not _lease_broken(kfd) and ident(k2) == kept.ident
+            except OSError:
+                kept_fresh = False
+            try:
+                t2 = os.fstat(tfd)
+                target_fresh = not _lease_broken(tfd) and ident(t2) == r.ident
+            except OSError:
+                target_fresh = False
+            if kept_fresh:
+                kctime[0] = k2.st_ctime_ns
+            else:
+                kctime[0] = None
+                out.kept_changed = True
+            if target_fresh:
+                ctimes[r.key] = t2.st_ctime_ns
+            else:
+                ctimes.pop(r.key, None)
         for fd in leased:
             _unlease(fd)
         if tfd is not None:
@@ -866,7 +896,11 @@ def link_group(refs, dry_run, linked=None, skipped=None, attention=None, ctimes=
             kctime = [kst.st_ctime_ns]      # the chmod changed it: the new value is the expected one
             latest = max(kept.atime, kst.st_atime_ns)
             done = 0
+            kept_changed = False
             for r in targets:
+                if kept_changed:
+                    skipped.append((r, "kept file changed during scan"))
+                    continue
                 if exchange_unavailable:
                     skipped.append((r, EXCHANGE_UNAVAILABLE))
                     continue
@@ -881,6 +915,8 @@ def link_group(refs, dry_run, linked=None, skipped=None, attention=None, ctimes=
                     continue
                 if o.attention:
                     attention.append((r.section.name,) + o.attention)
+                if o.kept_changed:
+                    kept_changed = True
                 if not o.linked:
                     if o.reason:
                         skipped.append((r, o.reason))
@@ -888,13 +924,13 @@ def link_group(refs, dry_run, linked=None, skipped=None, attention=None, ctimes=
                 done += 1
                 latest = max(latest, o.atime)
                 linked.append((r, kept, credit(r) if o.cleaned else 0))
-            if done:
+            if done and not kept_changed:
                 kst = os.fstat(kfd)
                 if kst.st_nlink == kept.nlink + done:
                     os.utime(kfd, ns=(max(latest, kst.st_atime_ns), kept.mtime))
                 else:
                     skipped.append((kept, NLINK_CHANGED + "; its last-read time was not updated"))
-            else:
+            elif not done:
                 os.fchmod(kfd, mode)
         finally:
             os.close(kfd)
