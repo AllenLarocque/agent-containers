@@ -1,0 +1,808 @@
+#!/usr/bin/python3
+"""agent-inputs: host-side job that hard-links byte-identical large input files inside builder
+project folders, makes linked files read-only, and publishes a report of files not read for a long
+time (spec docs/superpowers/specs/2026-11-25-shared-inputs-design.md, section 3).
+
+It runs as the owner, but the folders it scans are writable by the container's agent. So it never
+follows a symlink, works only relative to directory file descriptors opened with O_NOFOLLOW, reads
+files only with O_NOATIME, re-checks a path is still the scanned inode just before replacing it, and
+never deletes, moves or changes the content of a file. Standard library only.
+
+  agent-inputs scan [--dry-run] [--days N]
+"""
+import argparse
+import dataclasses
+import datetime
+import errno
+import hashlib
+import json
+import os
+import re
+import secrets
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Iterator, Optional
+
+MIB = 1048576
+DAY_NS = 86400 * 10**9
+TMP_PREFIX = ".agent-inputs-tmp-"
+REPORT = "REPORT.md"
+REPORT_TMP = "REPORT.md.tmp"
+CHUNK = 1 << 20
+# O_NONBLOCK: a FIFO planted in a folder must not hang the job on open.
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NOATIME | os.O_CLOEXEC | os.O_NONBLOCK
+NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
+
+
+class ConfigError(Exception):
+    pass
+
+
+@dataclasses.dataclass(eq=False)
+class Section:
+    name: str
+    group: str
+    project_dir: Path
+    folders: list
+    report: Optional[str]
+    lines: dict = dataclasses.field(default_factory=dict)  # folder or "report" -> inputs.conf line
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
+class FileRef:
+    section: Section
+    folder: str
+    rel: str            # path below the folder, "/"-separated
+    dev: int
+    ino: int
+    size: int
+    mtime: int          # ns
+    atime: int          # ns
+    nlink: int
+    uid: int
+
+    @property
+    def key(self):
+        return (self.dev, self.ino)
+
+    @property
+    def ident(self):
+        return (self.dev, self.ino, self.size, self.mtime)
+
+    @property
+    def container_path(self):
+        return container_path(self.folder, self.rel)
+
+    @property
+    def host_path(self):
+        return str(self.section.project_dir / self.folder / self.rel)
+
+
+def container_path(folder, rel=""):
+    return "/workspace/" + folder + ("/" + rel if rel else "")
+
+
+def ident(st):
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+# ---------------------------------------------------------------- directory handles
+
+def open_rel(base_fd, parts):
+    """Open the directory base_fd/parts[0]/parts[1]/..., each step O_NOFOLLOW. Caller closes."""
+    fd = os.dup(base_fd)
+    try:
+        for p in parts:
+            nfd = os.open(p, DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def open_project(section):
+    # PROJECT_DIR itself comes from the owner's config (outside every mounted folder), so it may
+    # be reached through the owner's own symlinks; everything below it is opened O_NOFOLLOW.
+    return os.open(str(section.project_dir), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+
+
+def open_dir(section, folder, rel_parts=()):
+    pfd = open_project(section)
+    try:
+        return open_rel(pfd, folder.split("/") + list(rel_parts))
+    finally:
+        os.close(pfd)
+
+
+def open_parent(ref):
+    """(dir fd, basename) for a FileRef, every directory opened O_NOFOLLOW. Caller closes the fd."""
+    parts = ref.rel.split("/")
+    return open_dir(ref.section, ref.folder, parts[:-1]), parts[-1]
+
+
+# ---------------------------------------------------------------- config
+
+def read_kv(path):
+    vals = {}
+    for line in path.read_text().splitlines():
+        if line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        vals[k.strip()] = v.strip()   # last one wins, like agent-up's conf_get
+    return vals
+
+
+def check_rel(text, where):
+    if text.startswith("/"):
+        raise ConfigError(f"{where}: '{text}' is an absolute path; folders are relative to PROJECT_DIR")
+    raw = text.split("/")
+    if ".." in raw:
+        raise ConfigError(f"{where}: '{text}' has a '..' component")
+    parts = [p for p in raw if p not in ("", ".")]
+    if not parts:
+        raise ConfigError(f"{where}: '{text}' names PROJECT_DIR itself; list folders inside it")
+    return "/".join(parts)
+
+
+def overlaps(a, b):
+    return a == b or a.startswith(b + "/") or b.startswith(a + "/")
+
+
+def load_config(home: Path) -> list:
+    cfg_root = home / ".config" / "agent-containers"
+    path = cfg_root / "inputs.conf"
+    try:
+        text = path.read_text()
+    except OSError as e:
+        raise ConfigError(f"{path}: cannot read ({e.strerror})")
+    sections, cur = [], None
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        where = f"{path} line {n}"
+        m = re.fullmatch(r"\[(.*)\]", line)
+        if m:
+            name = m.group(1).strip()
+            if not NAME_RE.fullmatch(name):
+                raise ConfigError(f"{where}: '{name}' is not a project name")
+            if any(s.name == name for s in sections):
+                raise ConfigError(f"{where}: section [{name}] is listed twice")
+            pconf = cfg_root / name / "project.conf"
+            if not pconf.is_file():
+                raise ConfigError(f"{where}: [{name}] is not a known project (no {pconf})")
+            vals = read_kv(pconf)
+            prof = vals.get("PROFILE", "")
+            if prof != "builder":
+                raise ConfigError(f"{where}: [{name}] has PROFILE={prof or '(unset)'} in {pconf}; "
+                                  "only builder projects can be listed (research and others are refused)")
+            pdir = vals.get("PROJECT_DIR", "")
+            if not pdir.startswith("/"):
+                raise ConfigError(f"{where}: [{name}]: PROJECT_DIR in {pconf} is not an absolute path")
+            cur = Section(name, name, Path(pdir), [], None, {"section": n})
+            sections.append(cur)
+            continue
+        if cur is None:
+            raise ConfigError(f"{where}: '{line}' comes before any [section]")
+        m = re.fullmatch(r"(group|report)\s*=\s*(.*)", line)
+        if m:
+            key, val = m.group(1), m.group(2).strip()
+            if not val:
+                raise ConfigError(f"{where}: {key} has no value")
+            if key == "group":
+                cur.group = val
+            else:
+                cur.report = check_rel(val, where)
+                cur.lines["report"] = n
+            continue
+        folder = check_rel(line, where)
+        if folder in cur.folders:
+            raise ConfigError(f"{where}: '{folder}' is listed twice")
+        cur.folders.append(folder)
+        cur.lines[folder] = n
+    if not sections:
+        raise ConfigError(f"{path}: no [section] listed")
+
+    research = []   # (realpath, label)
+    for pc in sorted(cfg_root.glob("*/project.conf")):
+        rd = read_kv(pc).get("RESEARCH_DIR", "") or str(home / "agent-research")
+        research.append((os.path.realpath(rd), f"RESEARCH_DIR of {pc.parent.name}"))
+    research.append((os.path.realpath(cfg_root), str(cfg_root)))
+
+    group_dev = {}   # group -> (dev, where)
+    for s in sections:
+        swhere = f"{path} line {s.lines['section']}"
+        if not s.folders:
+            raise ConfigError(f"{swhere}: [{s.name}] lists no folders")
+        if s.report is None:
+            s.report = s.folders[0]
+        elif s.report not in s.folders:
+            raise ConfigError(f"{path} line {s.lines['report']}: report = {s.report} is not one of the "
+                              f"folders listed for [{s.name}]")
+        for i, f in enumerate(s.folders):
+            where = f"{path} line {s.lines[f]}"
+            for g in s.folders[:i]:
+                if overlaps(f, g):
+                    raise ConfigError(f"{where}: '{f}' overlaps '{g}', listed above")
+            try:
+                fd = open_dir(s, f)
+            except FileNotFoundError:
+                raise ConfigError(f"{where}: '{f}' does not exist in PROJECT_DIR of [{s.name}]")
+            except OSError as e:
+                if e.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise ConfigError(f"{where}: '{f}' is a symlink or not a directory (or is reached through one)")
+                raise ConfigError(f"{where}: '{f}' cannot be opened ({e.strerror})")
+            try:
+                dev = os.fstat(fd).st_dev
+            finally:
+                os.close(fd)
+            real = os.path.realpath(str(s.project_dir)) + "/" + f
+            for rp, label in research:
+                if overlaps(real, rp):
+                    raise ConfigError(f"{where}: '{f}' overlaps {label}; research folders are never linked")
+            if s.group not in group_dev:
+                group_dev[s.group] = (dev, where)
+            elif group_dev[s.group][0] != dev:
+                raise ConfigError(f"{where}: '{f}' is not on the same filesystem as the other folders of group "
+                                  f"'{s.group}' (first at {group_dev[s.group][1]}); hard links cannot cross filesystems")
+    return sections
+
+
+# ---------------------------------------------------------------- walking and reading
+
+def walk(section, tmp_found=None) -> Iterator[FileRef]:
+    """Every regular file under the section's folders, never through a symlink, skipping .git and
+    other filesystems. Names starting with TMP_PREFIX are not yielded; with tmp_found (a list) they
+    are appended to it as (section, folder, rel)."""
+    for folder in section.folders:
+        try:
+            fd = open_dir(section, folder)
+        except OSError as e:
+            print(f"agent-inputs: [{section.name}] {container_path(folder)}: cannot open ({e.strerror}); skipped",
+                  file=sys.stderr)
+            continue
+        try:
+            yield from _walk_dir(section, folder, fd, "", os.fstat(fd).st_dev, tmp_found)
+        finally:
+            os.close(fd)
+
+
+def _walk_dir(section, folder, fd, prefix, dev, tmp_found):
+    try:
+        with os.scandir(fd) as it:
+            names = sorted(e.name for e in it)
+    except OSError:
+        return
+    for name in names:
+        if name == ".git":
+            continue
+        rel = prefix + name
+        try:
+            st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        except OSError:
+            continue
+        if name.startswith(TMP_PREFIX):
+            if tmp_found is not None:
+                tmp_found.append((section, folder, rel))
+            continue
+        if stat.S_ISDIR(st.st_mode):
+            if st.st_dev != dev:
+                continue
+            try:
+                sub = os.open(name, DIR_FLAGS, dir_fd=fd)
+            except OSError:
+                continue
+            try:
+                sst = os.fstat(sub)
+                if (sst.st_dev, sst.st_ino) == (st.st_dev, st.st_ino):
+                    yield from _walk_dir(section, folder, sub, rel + "/", dev, tmp_found)
+            finally:
+                os.close(sub)
+        elif stat.S_ISREG(st.st_mode):
+            yield FileRef(section, folder, rel, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns,
+                          st.st_atime_ns, st.st_nlink, st.st_uid)
+
+
+def read_error(e):
+    if e.errno == errno.EPERM:
+        return "O_NOATIME refused, so not read"
+    if e.errno == errno.EACCES:
+        return "unreadable (permission denied)"
+    if e.errno in (errno.ENOENT, errno.ELOOP, errno.ENOTDIR):
+        return "changed during scan"
+    return f"unreadable ({e.strerror})"
+
+
+def _note(why, reason):
+    if why is not None:
+        why.append(reason)
+
+
+def _open_read(dir_fd, name, expect, why):
+    """fd of a regular file opened O_NOATIME|O_NOFOLLOW, or None (reason appended to why)."""
+    try:
+        fd = os.open(name, READ_FLAGS, dir_fd=dir_fd)
+    except OSError as e:
+        _note(why, read_error(e))
+        return None
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or (expect is not None and ident(st) != expect):
+        os.close(fd)
+        _note(why, "changed during scan")
+        return None
+    return fd
+
+
+def hash_file(dir_fd, name, expect=None, why=None) -> Optional[str]:
+    """SHA-256 of a file, read only with O_NOATIME; None on any failure (reason appended to why).
+    With expect=(dev, ino, size, mtime_ns), a file that is no longer that scan result is refused."""
+    fd = _open_read(dir_fd, name, expect, why)
+    if fd is None:
+        return None
+    try:
+        before = ident(os.fstat(fd))
+        h = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, CHUNK)
+            if not chunk:
+                break
+            h.update(chunk)
+        if ident(os.fstat(fd)) != before:
+            _note(why, "changed during scan")
+            return None
+        return h.hexdigest()
+    except OSError as e:
+        _note(why, read_error(e))
+        return None
+    finally:
+        os.close(fd)
+
+
+def same_bytes(a, b, why=None) -> bool:
+    """Byte-for-byte comparison of two scanned files (FileRefs), same open flags as hash_file."""
+    fds = []
+    try:
+        for r in (a, b):
+            try:
+                dfd, name = open_parent(r)
+            except OSError as e:
+                _note(why, read_error(e))
+                return False
+            try:
+                fd = _open_read(dfd, name, r.ident, why)
+            finally:
+                os.close(dfd)
+            if fd is None:
+                return False
+            fds.append(fd)
+        while True:
+            x, y = os.read(fds[0], CHUNK), os.read(fds[1], CHUNK)
+            if x != y:
+                return False
+            if not x:
+                return True
+    except OSError as e:
+        _note(why, read_error(e))
+        return False
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+
+def hash_ref(ref, why):
+    try:
+        dfd, name = open_parent(ref)
+    except OSError as e:
+        why.append(read_error(e))
+        return None
+    try:
+        return hash_file(dfd, name, ref.ident, why)
+    finally:
+        os.close(dfd)
+
+
+# ---------------------------------------------------------------- linking
+
+def run_hook(point, ref):
+    """Test hook: AGENT_INPUTS_TEST_HOOK=<point>:<cmd> runs <cmd> (shell) at that point, with the
+    target's host path in AGENT_INPUTS_TEST_TARGET; <cmd> 'exit' ends the process there."""
+    hook = os.environ.get("AGENT_INPUTS_TEST_HOOK", "")
+    if not hook.startswith(point + ":"):
+        return
+    cmd = hook[len(point) + 1:]
+    if cmd == "exit":
+        os._exit(3)
+    subprocess.run(cmd, shell=True, check=False, env=dict(os.environ, AGENT_INPUTS_TEST_TARGET=ref.host_path))
+
+
+def by_inode(refs):
+    out = {}
+    for r in refs:
+        out.setdefault(r.key, []).append(r)
+    return out
+
+
+def pick_kept(inodes):
+    """The inode (list of its refs) to keep: most links, then oldest mtime."""
+    return min(inodes, key=lambda ps: (-ps[0].nlink, ps[0].mtime, ps[0].dev, ps[0].ino))
+
+
+def _replace(r, kept, kfd, kdir, kname):
+    """Replace r's path by a hard link to the kept inode. None on success, else the reason."""
+    try:
+        tdir, tname = open_parent(r)
+    except OSError:
+        return "changed during scan"
+    tmp = None
+    try:
+        run_hook("before-replace", r)
+        tmp = TMP_PREFIX + secrets.token_hex(8)
+        try:
+            os.link(kname, tmp, src_dir_fd=kdir, dst_dir_fd=tdir, follow_symlinks=False)
+        except OSError as e:
+            tmp = None
+            return f"could not link ({e.strerror})"
+        run_hook("before-rename", r)
+        try:
+            tst = os.stat(tmp, dir_fd=tdir, follow_symlinks=False)
+            cur = os.stat(tname, dir_fd=tdir, follow_symlinks=False)
+        except OSError:
+            return "changed during scan"
+        kst = os.fstat(kfd)
+        if (not stat.S_ISREG(tst.st_mode) or (tst.st_dev, tst.st_ino) != kept.key
+                or not stat.S_ISREG(cur.st_mode) or ident(cur) != r.ident
+                or ident(kst) != kept.ident):
+            return "changed during scan"
+        os.rename(tmp, tname, src_dir_fd=tdir, dst_dir_fd=tdir)
+        tmp = None
+        return None
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp, dir_fd=tdir)
+            except OSError:
+                pass
+        os.close(tdir)
+
+
+def link_group(refs, dry_run, linked=None, skipped=None) -> int:
+    """Link every path in refs (all byte-identical, confirmed) to one kept inode. Returns bytes
+    freed (would be freed, on a dry run). linked gets (ref, kept_ref, freed_bytes) per replaced
+    path; skipped gets (ref, reason)."""
+    linked = [] if linked is None else linked
+    skipped = [] if skipped is None else skipped
+    inodes = by_inode(refs)
+    kept = pick_kept(list(inodes.values()))[0]
+    targets = [r for r in refs if r.key != kept.key]
+    links_left = {k: ps[0].nlink for k, ps in inodes.items()}
+    freed = 0
+
+    def count(r):
+        nonlocal freed
+        links_left[r.key] -= 1
+        f = r.size if links_left[r.key] == 0 else 0
+        freed += f
+        linked.append((r, kept, f))
+
+    if dry_run:
+        for r in targets:
+            count(r)
+        return freed
+    try:
+        kdir, kname = open_parent(kept)
+    except OSError:
+        skipped.extend((r, "changed during scan") for r in targets)
+        return 0
+    try:
+        try:
+            kfd = os.open(kname, READ_FLAGS, dir_fd=kdir)
+        except OSError as e:
+            skipped.extend((r, read_error(e)) for r in targets)
+            return 0
+        try:
+            kst = os.fstat(kfd)
+            if not stat.S_ISREG(kst.st_mode) or ident(kst) != kept.ident:
+                skipped.extend((r, "changed during scan") for r in targets)
+                return 0
+            mode = stat.S_IMODE(kst.st_mode)
+            os.fchmod(kfd, mode & ~0o222)   # read-only before any path depends on it
+            latest = kept.atime
+            done = 0
+            for r in targets:
+                why = _replace(r, kept, kfd, kdir, kname)
+                if why:
+                    skipped.append((r, why))
+                    continue
+                done += 1
+                latest = max(latest, r.atime)
+                count(r)
+            if done:
+                os.utime(kfd, ns=(latest, kept.mtime))
+            else:
+                os.fchmod(kfd, mode)
+        finally:
+            os.close(kfd)
+    finally:
+        os.close(kdir)
+    return freed
+
+
+def remove_leftovers(tmps, skipped):
+    """Remove temp links an interrupted run left. Only a hard link (link count >= 2) is removed, so
+    no data is lost; anything else with that name is left alone and listed."""
+    removed = 0
+    for section, folder, rel in tmps:
+        parts = rel.split("/")
+        try:
+            dfd = open_dir(section, folder, parts[:-1])
+        except OSError:
+            continue
+        try:
+            st = os.stat(parts[-1], dir_fd=dfd, follow_symlinks=False)
+            if stat.S_ISREG(st.st_mode) and st.st_nlink >= 2:
+                os.unlink(parts[-1], dir_fd=dfd)
+                removed += 1
+            else:
+                skipped.append((section.name, container_path(folder, rel),
+                                "temporary name but not a leftover link; left alone"))
+        except OSError:
+            pass
+        finally:
+            os.close(dfd)
+    return removed
+
+
+# ---------------------------------------------------------------- report and state
+
+def human(n):
+    for unit in ("bytes", "KiB", "MiB", "GiB", "TiB"):
+        if n < 1024 or unit == "TiB":
+            return f"{n} {unit}" if unit == "bytes" else f"{n:.1f} {unit}"
+        n /= 1024
+
+
+def iso_date(ns):
+    return datetime.datetime.fromtimestamp(ns / 1e9, datetime.timezone.utc).strftime("%Y-%m-%d")
+
+
+def section_data(section, refs, group_inodes, days, now_ns):
+    """Report numbers for one section from a walk of its group (refs: this section's FileRefs)."""
+    mine = by_inode(refs)
+    old = []
+    for key, ps in mine.items():
+        if ps[0].atime < now_ns - days * DAY_NS:
+            others = sorted({r.section.name for r in group_inodes[key]} - {section.name})
+            old.append((ps[0].size, ps[0].atime, [r.container_path for r in ps], others))
+    old.sort(key=lambda e: (-e[0], e[2]))
+    shared = sorted((r.container_path, r.size) for r in refs if r.folder == section.report and r.nlink == 1)
+    return {
+        "total_bytes": sum(ps[0].size for ps in mine.values()),
+        "old": old,
+        "old_bytes": sum(e[0] for e in old),
+        "shared": shared,
+    }
+
+
+def render_report(section, data):
+    dry = data["dry_run"]
+    out = [f"# Shared inputs report: {section.name}", "",
+           f"- Run: {data['run_time']} ({'dry run: nothing was changed' if dry else 'linking run'})",
+           "- Folders scanned: " + ", ".join(container_path(f) for f in section.folders),
+           f"- Total size on disk: {human(data['total_bytes'])} (each file counted once)",
+           f"- Space {'that would be freed' if dry else 'freed'} by this run: {human(data['freed_run'])}; "
+           f"freed in total so far: {human(data['freed_total'])}",
+           "", "## " + ("Would link (dry run)" if dry else "Linked this run"), ""]
+    if data["linked"]:
+        for r, kept, _ in data["linked"]:
+            if kept.section is section:
+                to = kept.container_path
+            else:
+                to = f"a file in container {kept.section.name}"
+            out.append(f"- {r.container_path}: same content as {to}")
+    else:
+        out.append("Nothing.")
+    days = data["days"]
+    out += ["", f"## Not read in {days} days", "",
+            "One entry per file, largest first. Deleting one path of a file that other paths still link "
+            "frees nothing; delete every path of an entry to free its space.", ""]
+    for size, atime, paths, others in data["old"]:
+        also = f" (also linked from container {', '.join(others)})" if others else ""
+        out.append(f"- {human(size)}, last read {iso_date(atime)}: {', '.join(paths)}{also}")
+    if not data["old"]:
+        out.append("Nothing.")
+    out += ["", "## In the shared folder but linked from nowhere else", "",
+            f"Files under {container_path(section.report)} with no other link: deleting one frees its space.", ""]
+    out += [f"- {p} ({human(s)})" for p, s in data["shared"]] or ["Nothing."]
+    out += ["", "## Skipped", ""]
+    out += [f"- {p}: {why}" for p, why in data["skipped"]] or ["Nothing."]
+    return "\n".join(out) + "\n"
+
+
+def write_report(section, data, project_dir) -> None:
+    """Publish REPORT.md in the section's report folder: write a temp file O_EXCL|O_NOFOLLOW in the
+    folder's fd, then rename it over REPORT.md (a symlink there is replaced, never followed)."""
+    text = render_report(section, data).encode()
+    pfd = os.open(str(project_dir), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        rfd = open_rel(pfd, section.report.split("/"))
+    finally:
+        os.close(pfd)
+    try:
+        try:
+            os.unlink(REPORT_TMP, dir_fd=rfd)
+        except FileNotFoundError:
+            pass
+        fd = os.open(REPORT_TMP, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o644, dir_fd=rfd)
+        try:
+            os.write(fd, text)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.rename(REPORT_TMP, REPORT, src_dir_fd=rfd, dst_dir_fd=rfd)
+    finally:
+        os.close(rfd)
+
+
+def state_path():
+    return Path.home() / ".local" / "state" / "agent-containers" / "inputs.json"
+
+
+def load_state():
+    try:
+        state = json.loads(state_path().read_text())
+        if isinstance(state, dict) and isinstance(state.get("sections"), dict):
+            return state
+    except (OSError, ValueError):
+        pass
+    return {"sections": {}}
+
+
+def save_state(state) -> None:
+    d = state_path().parent
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(d, 0o700)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".inputs.json.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(state, f, indent=2, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, state_path())
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+# ---------------------------------------------------------------- scan
+
+def scan_group(sections, dry_run, days, state, run_time, now_ns):
+    """Scan, link and report one group. Returns False if a report could not be published."""
+    skipped = []   # (section name, container path, reason)
+    if not dry_run:
+        tmps = []
+        for s in sections:
+            for _ in walk(s, tmps):
+                pass
+        remove_leftovers(tmps, skipped)
+    refs = [r for s in sections for r in walk(s)]
+
+    cutoff = now_ns - DAY_NS
+    uid = os.getuid()
+    by_size = {}
+    for ps in by_inode(refs).values():
+        r = ps[0]
+        if r.size >= MIB and r.mtime < cutoff and r.uid == uid:
+            by_size.setdefault(r.size, []).append(ps)
+
+    linked, link_skips = [], []
+    for size in sorted(by_size):
+        if len(by_size[size]) < 2:
+            continue
+        by_hash = {}
+        for ps in by_size[size]:
+            why = []
+            h = hash_ref(ps[0], why)
+            if h is None:
+                link_skips.extend((r, why[0] if why else "unreadable") for r in ps)
+            else:
+                by_hash.setdefault(h, []).append(ps)
+        for group in by_hash.values():
+            if len(group) < 2:
+                continue
+            kept = pick_kept(group)
+            confirmed = [kept]
+            for ps in group:
+                if ps is kept:
+                    continue
+                why = []
+                if same_bytes(kept[0], ps[0], why):
+                    confirmed.append(ps)
+                elif why:
+                    link_skips.extend((r, why[0]) for r in ps)
+            if len(confirmed) >= 2:
+                link_group([r for ps in confirmed for r in ps], dry_run, linked, link_skips)
+    skipped += [(r.section.name, r.container_path, why) for r, why in link_skips]
+
+    for r, kept, _ in linked:
+        verb = "would link" if dry_run else "linked"
+        print(f"{verb} [{r.section.name}] {r.container_path} -> [{kept.section.name}] {kept.container_path}")
+
+    after = refs if dry_run else [r for s in sections for r in walk(s)]
+    group_inodes = by_inode(after)
+    ok = True
+    for s in sections:
+        prev = state["sections"].get(s.name, {}).get("freed_bytes_total", 0)
+        freed_run = sum(f for r, _, f in linked if r.section is s)
+        freed_total = prev if dry_run else prev + freed_run
+        d = section_data(s, [r for r in after if r.section is s], group_inodes, days, now_ns)
+        d.update(run_time=run_time, dry_run=dry_run, days=days, freed_run=freed_run, freed_total=freed_total,
+                 linked=[e for e in linked if e[0].section is s],
+                 skipped=sorted((p, why) for n, p, why in skipped if n == s.name))
+        state["sections"][s.name] = {
+            "last_run": run_time, "dry_run": dry_run, "total_bytes": d["total_bytes"],
+            "freed_bytes_run": freed_run, "freed_bytes_total": freed_total,
+            "old_count": len(d["old"]), "old_bytes": d["old_bytes"],
+        }
+        print(f"[{s.name}] {'would free' if dry_run else 'freed'} {human(freed_run)}; total on disk "
+              f"{human(d['total_bytes'])}; {len(d['old'])} files not read in {days} days ({human(d['old_bytes'])})")
+        try:
+            write_report(s, d, s.project_dir)
+        except OSError as e:
+            print(f"agent-inputs: [{s.name}] could not publish {container_path(s.report, REPORT)} ({e.strerror})",
+                  file=sys.stderr)
+            ok = False
+    return ok
+
+
+def cmd_scan(args):
+    try:
+        sections = load_config(Path.home())
+    except ConfigError as e:
+        print(f"agent-inputs: {e}", file=sys.stderr)
+        return 2
+    now_ns = time.time_ns()
+    run_time = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    state = load_state()
+    groups = {}
+    for s in sections:
+        groups.setdefault(s.group, []).append(s)
+    ok = True
+    for g in groups.values():
+        ok = scan_group(g, args.dry_run, args.days, state, run_time, now_ns) and ok
+    save_state(state)
+    return 0 if ok else 1
+
+
+def positive_int(text):
+    n = int(text)
+    if n < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return n
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="agent-inputs", description="Link identical input files read-only "
+                                 "and report files not read for a long time (host side).")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sp = sub.add_parser("scan", help="scan the folders in ~/.config/agent-containers/inputs.conf")
+    sp.add_argument("--dry-run", action="store_true", help="change nothing; print and report what would be linked")
+    sp.add_argument("--days", type=positive_int, default=180, help="old-file threshold in days (default 180)")
+    sp.set_defaults(func=cmd_scan)
+    args = ap.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
