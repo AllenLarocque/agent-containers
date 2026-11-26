@@ -29,8 +29,8 @@ MIB=1048576
 
 ai(){ HOME="$H" "$AI_BIN" "$@"; }
 scan(){ # a run that must succeed; a failure is reported and the suite carries on
-  local rc=0; ai scan "$@" >/dev/null || rc=$?
-  [ "$rc" -eq 0 ] || { echo "FAIL: scan $* exited $rc"; annotate "scan exited $rc"; fail=1; }
+  local rc=0; ai scan >/dev/null || rc=$?
+  [ "$rc" -eq 0 ] || { echo "FAIL: scan exited $rc"; annotate "scan exited $rc"; fail=1; }
 }
 scan2(){ # config refusal: passes (returns non-zero) only with exit code 2
   local rc=0; ai scan || rc=$?
