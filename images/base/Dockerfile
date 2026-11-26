@@ -83,11 +83,16 @@ RUN deb="rstudio-server-$(echo "$RSTUDIO_VERSION" | tr + -)-amd64.deb" \
 
 # R bootstrap ONLY: enough to run setupProject(). Everything else is provisioned per project
 # by setupProject(standAlone = TRUE), which hides the site library anyway.
+# Version floors: Require 2.1.1.9024 / SpaDES.project 1.2.0.9045 broke setupProject() installs
+# ("Subprocess is busy or cannot start"); fixed upstream in 2.1.1.9026 / 1.2.0.9046 (2026-11-26).
+# The floors also change this layer's text, so a cached layer holding the broken versions is rebuilt.
 RUN Rscript -e " \
   options(repos = c(PredictiveEcology = 'https://predictiveecology.r-universe.dev', \
                     CRAN = 'https://packagemanager.posit.co/cran/__linux__/noble/latest')); \
   install.packages(c('Require', 'SpaDES.project'), Ncpus = parallel::detectCores()); \
-  stopifnot(all(c('Require', 'SpaDES.project') %in% rownames(installed.packages())))"
+  stopifnot(all(c('Require', 'SpaDES.project') %in% rownames(installed.packages())), \
+            packageVersion('Require') >= '2.1.1.9026', \
+            packageVersion('SpaDES.project') >= '1.2.0.9046')"
 
 # Shared inputs (spec docs/superpowers/specs/2026-11-25-shared-inputs-design.md §4.3): when the launcher
 # sets SPADES_INPUTS_SHARED / SPADES_INPUTS_TMP, point `reproducible` at them. Appended to rocker's
