@@ -61,6 +61,9 @@ jobs:
       - name: draft — agent-new tests (stubs only)
         if: steps.mode.outputs.mode == 'draft'
         run: bash tests/launcher/test-agent-new.sh
+      - name: draft — agent-inputs tests (host scan job, temp dirs only)
+        if: steps.mode.outputs.mode == 'draft'
+        run: bash tests/inputs/test-agent-inputs.sh
       - name: Free runner disk (preinstalled SDKs we never use, ~30 GB)
         if: steps.mode.outputs.mode == 'full'
         run: |
@@ -526,6 +529,9 @@ jobs:
       - name: agent-new tests (stubs only)
         if: steps.mode.outputs.mode == 'full'
         run: bash tests/launcher/test-agent-new.sh
+      - name: agent-inputs tests (host scan job, temp dirs only)
+        if: steps.mode.outputs.mode == 'full'
+        run: bash tests/inputs/test-agent-inputs.sh
       - name: Acceptance (setupProject behind firewall, plain Rscript)
         if: steps.mode.outputs.mode == 'full'
         run: |
