@@ -126,6 +126,9 @@ RESEARCH_DIR=$HOME/agent-research
 # Its host port (127.0.0.1 only), unique across all projects' T3_PORT and RSTUDIO_PORT.
 RSTUDIO=0
 RSTUDIO_PORT=$(next_rstudio_port)
+# Shared download folder for SpaDES inputs: 0 = off, 1 = on. On, every R session's reproducible
+# downloads go through /workspace/inputs-shared (project-template/README.md "Shared inputs").
+SHARED_INPUTS=0
 # Google Drive: a service-account key (project dir google-drive-sa.json, else .shared/google-drive-sa.json) is mounted read-only; set GOOGLE_DRIVE=0 to opt out.
 CONFEOF
   ftp_seed "$image" >> "$tmp/project.conf"
@@ -781,6 +784,36 @@ rstudio_on(){ # RSTUDIO=1 with a well-formed RSTUDIO_PORT. stop/down render with
   local port; port="$(conf_get "$1/project.conf" RSTUDIO_PORT)"
   [ "$(profile "$1")" = builder ] && [ "$(rstudio "$1")" = 1 ] && [[ $port =~ ^[0-9]+$ ]] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ]
 }
+shared_inputs_on(){ # $1 config dir: a builder with exactly SHARED_INPUTS=1 (stop/down never validate: anything else is off)
+  [ "$(profile "$1")" = builder ] && [ "$(conf_get "$1/project.conf" SHARED_INPUTS)" = 1 ]
+}
+check_shared_inputs(){ # only up and config: stop/down/status must work whatever the values
+  local v; v="$(conf_get "$1/project.conf" SHARED_INPUTS)"
+  if [ "$(profile "$1")" = research ]; then
+    [ -z "$v" ] || [ "$v" = 0 ] || die "SHARED_INPUTS='$v' in $1/project.conf: the shared download folder is for builder projects only, not the research container"
+    return 0
+  fi
+  case "${v:-0}" in
+    0|1) ;;
+    *) die "SHARED_INPUTS='$v' in $1/project.conf: must be 0 (off) or 1 (on)" ;;
+  esac
+}
+shared_dir_ok(){ # $1 path: absent or a real folder (not a symlink); dies otherwise
+  if [ -L "$1" ] || { [ -e "$1" ] && [ ! -d "$1" ]; }; then
+    die "$1 is a symlink or not a folder: remove it (SHARED_INPUTS=1 needs a real folder inside the project)"
+  fi
+}
+shared_inputs_dirs(){ # $1 config dir: create <PROJECT_DIR>/inputs-shared and its .tmp on the host (up only); refuse links and non-folders
+  local base d
+  base="$(conf_get "$1/project.conf" PROJECT_DIR)/inputs-shared"
+  # Plain mkdir, one level at a time: it fails on anything already there, a symlink swapped in after
+  # the check included. Both levels are checked before each step and again at the end.
+  for d in "$base" "$base/.tmp"; do
+    shared_dir_ok "$base"; shared_dir_ok "$d"
+    if [ ! -e "$d" ]; then mkdir "$d" || die "could not create $d"; echo "agent-up: created $d"; fi
+  done
+  for d in "$base" "$base/.tmp"; do shared_dir_ok "$d"; [ -d "$d" ] || die "could not create $d"; done
+}
 check_rstudio_port(){ # $1 config dir: a free port, used by no other T3_PORT/RSTUDIO_PORT/FETCH_VIEW_PORT (nor this T3_PORT)
   local port other k; port="$(conf_get "$1/project.conf" RSTUDIO_PORT)"
   [[ $port =~ ^[0-9]+$ ]] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] \
@@ -890,7 +923,7 @@ check_digest(){ # $1 compose.yaml, $2 project
 }
 check_project_env(){ # op:// references only; never echo a line (it could hold a pasted secret)
   local bad reserved
-  reserved="$(grep -nE '^[[:space:]]*(PROJECT|PROJECT_DIR|PROFILE|IMAGE|SPADES_AI_DIR|AGENT_MEMORY_DIR|T3_PORT|T3_CONNECT|TAILSCALE_HTTPS_PORT|TAILSCALE_HOST|RESEARCH|RSTUDIO|FTP_HOSTS|GOOGLE_DRIVE|GOOGLEDRIVE_AUTH|GARGLE_SERVICE_ACCOUNT|PATH|HOME|COMPOSE|(COMPOSE|DOCKER|OP|TUNNEL|RESEARCH|RS|RSTUDIO)_[A-Za-z0-9_]*)=' "$1" | sed 's/^\([0-9]*\):[[:space:]]*\([A-Za-z0-9_]*\)=.*/line \1: \2/' | paste -sd, - || true)"
+  reserved="$(grep -nE '^[[:space:]]*(PROJECT|PROJECT_DIR|PROFILE|IMAGE|SPADES_AI_DIR|AGENT_MEMORY_DIR|T3_PORT|T3_CONNECT|TAILSCALE_HTTPS_PORT|TAILSCALE_HOST|RESEARCH|RSTUDIO|SHARED_INPUTS|FTP_HOSTS|GOOGLE_DRIVE|GOOGLEDRIVE_AUTH|GARGLE_SERVICE_ACCOUNT|PATH|HOME|COMPOSE|(COMPOSE|DOCKER|OP|TUNNEL|RESEARCH|RS|RSTUDIO)_[A-Za-z0-9_]*)=' "$1" | sed 's/^\([0-9]*\):[[:space:]]*\([A-Za-z0-9_]*\)=.*/line \1: \2/' | paste -sd, - || true)"
   [ -z "$reserved" ] || die "$1 uses reserved key name(s) that would override compose or the launcher ($reserved); rename them"
   bad="$(grep -nEv '^[[:space:]]*(#|$)' "$1" | grep -Ev '^[0-9]+:[A-Za-z_][A-Za-z0-9_]*=op://[^[:space:]]+$' | cut -d: -f1 | paste -sd, - || true)"
   [ -z "$bad" ] || die "$1 may hold only KEY=op://... references; offending line number(s): $bad (values not shown)"
@@ -1108,8 +1141,9 @@ write_research(){ # the research profile's switch + instructions + exchange; a b
   if [ "$(profile "$1")" = research ]; then echo "PROFILE=research" > "$g/profile"; else rm -f "$g/profile"; fi
   if [ "$(profile "$1")" = research ]; then
     cp "$SEEDS/instructions/research.md" "$g/agent-instructions.md"; chmod 644 "$g/agent-instructions.md"
-  else   # a builder: the branch workflow, then the research rules when research is on
+  else   # a builder: the branch workflow, then the shared-inputs rules and the research rules when on
     { cat "$SEEDS/instructions/builder.md"
+      if shared_inputs_on "$1"; then echo; cat "$SEEDS/instructions/builder-shared-inputs.md"; fi
       if research_on "$1"; then echo; cat "$SEEDS/instructions/builder-research.md"; fi
     } > "$g/agent-instructions.md"; chmod 644 "$g/agent-instructions.md"
   fi
@@ -1154,6 +1188,22 @@ write_rstudio(){ # RSTUDIO=1 (rstudio_on): port, volume, read-only switch + pass
   } > "$out"
   # Only an exact, validated 1 opens anything; any other value (stop/down do not validate) is off.
   if rstudio_on "$1"; then echo "RSTUDIO=1" > "$flag"; else rm -f "$flag"; fi
+}
+write_shared_inputs(){ # SHARED_INPUTS=1 (shared_inputs_on): the two R-session variables, no mount. Otherwise: nothing.
+  local out="$1/.generated/shared-inputs.yaml"
+  mkdir -p "$1/.generated"; chmod 700 "$1/.generated"
+  {
+    echo "# GENERATED by agent-up from SHARED_INPUTS in project.conf. Do not edit."
+    echo "services:"
+    if shared_inputs_on "$1"; then
+      echo "  agent:"
+      echo "    environment:"
+      echo "      SPADES_INPUTS_SHARED: /workspace/inputs-shared"
+      echo "      SPADES_INPUTS_TMP: /workspace/inputs-shared/.tmp"
+    else
+      echo "  agent: {}"
+    fi
+  } > "$out"
 }
 write_ftp(){ # FTP_HOSTS set (ftp_on): the host list, mounted read-only for the firewall. Otherwise: nothing.
   # A file, never an environment variable: sudo resets the environment, and the agent controls its own.
@@ -1254,10 +1304,10 @@ compose_cmd(){ # sets COMPOSE for config dir $1
   fi
   local envf="$1/project.conf"; [ "$(profile "$1")" != research ] || envf="$1/.generated/compose.env"   # write_compose_env
   COMPOSE=(docker compose --env-file "$envf" -f "$1/compose.yaml" -f "$1/.generated/env-passthrough.yaml"
-           -f "$1/.generated/t3-connect.yaml" -f "$1/.generated/research.yaml" -f "$1/.generated/rstudio.yaml" -f "$1/.generated/ftp.yaml" -f "$1/.generated/google-drive.yaml" -f "$1/.generated/hostname.yaml" -f "$1/.generated/restart.yaml"
+           -f "$1/.generated/t3-connect.yaml" -f "$1/.generated/research.yaml" -f "$1/.generated/rstudio.yaml" -f "$1/.generated/shared-inputs.yaml" -f "$1/.generated/ftp.yaml" -f "$1/.generated/google-drive.yaml" -f "$1/.generated/hostname.yaml" -f "$1/.generated/restart.yaml"
            --project-directory "$1" -p "$(basename "$1")")
 }
-prepare(){ check_files "$1"; if [ "$(profile "$1")" = fetcher ]; then write_fetcher "$1"; write_hostname "$1"; write_restart "$1"; compose_cmd "$1"; return 0; fi; write_passthrough "$1"; write_t3_connect "$1"; write_research "$1"; write_rstudio "$1"; write_ftp "$1"; write_google_drive "$1"; write_hostname "$1"; write_restart "$1"; write_compose_env "$1"; compose_cmd "$1"; }
+prepare(){ check_files "$1"; if [ "$(profile "$1")" = fetcher ]; then write_fetcher "$1"; write_hostname "$1"; write_restart "$1"; compose_cmd "$1"; return 0; fi; write_passthrough "$1"; write_t3_connect "$1"; write_research "$1"; write_rstudio "$1"; write_shared_inputs "$1"; write_ftp "$1"; write_google_drive "$1"; write_hostname "$1"; write_restart "$1"; write_compose_env "$1"; compose_cmd "$1"; }
 
 up_fetcher(){ # $1 config dir: no secrets, no 1Password, no T3
   local name rd; name="$(basename "$1")"
@@ -1299,6 +1349,7 @@ cmd_up(){
   check_ts_port "$cfg"
   check_research "$cfg"
   check_rstudio "$cfg"
+  check_shared_inputs "$cfg"
   check_ftp "$cfg"
   check_google_drive "$cfg"
   check_claude_docs "$cfg"
@@ -1307,6 +1358,7 @@ cmd_up(){
   check_mounts "$cfg"
   if [ "$(profile "$cfg")" = research ] || research_on "$cfg"; then mkdir -p "$(research_dir "$cfg")"; fi
   check_research_overlaps "$cfg"   # BEFORE any project subfolder is created
+  if shared_inputs_on "$cfg"; then shared_inputs_dirs "$cfg"; fi
   if [ "$(profile "$cfg")" = research ]; then
     stop_research_first "$cfg"   # BEFORE its papers folders are checked, created and rendered
     make_exchange "$cfg"
@@ -1385,6 +1437,7 @@ cmd_config(){
   check_t3_connect "$cfg"
   check_research "$cfg"
   check_rstudio "$cfg"
+  check_shared_inputs "$cfg"
   check_ftp "$cfg"
   check_google_drive "$cfg"
   check_claude_docs "$cfg"
@@ -1788,6 +1841,9 @@ cmd_status(){
   # T3's projects, and any outside the mounted project folders (images before `agent-t3 projects`: nothing).
   docker exec -u agent "$(basename "$(cfg_dir "$1")")-agent-1" agent-t3 projects 2>/dev/null </dev/null || true
   local cfg rd d; cfg="$(cfg_dir "$1")"
+  if [ "$(profile "$cfg")" = builder ] && [ -f "$HOME/.config/agent-containers/inputs.conf" ]; then
+    "$HERE/agent-inputs" status-line "$(basename "$cfg")" || true   # shared inputs: one line, never fails status
+  fi
   if [ "$(profile "$cfg")" = research ]; then
     echo "CORE_API_KEY: $(core_state "$cfg")"
     rd="$(research_dir "$cfg")"
@@ -1803,7 +1859,7 @@ cmd_status(){
 # must not override it (a shell variable beats --env-file in compose).
 unset COMPOSE_FILE COMPOSE_PROFILES COMPOSE_PATH_SEPARATOR COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES \
       PROJECT PROJECT_DIR PROFILE IMAGE SPADES_AI_DIR AGENT_MEMORY_DIR T3_PORT T3_CONNECT RESEARCH RESEARCH_DIR \
-      RSTUDIO RSTUDIO_PORT TAILSCALE_HTTPS_PORT TAILSCALE_HOST FTP_HOSTS GOOGLE_DRIVE RESEARCH_CONTACT_EMAIL CORE_API_KEY \
+      RSTUDIO RSTUDIO_PORT SHARED_INPUTS TAILSCALE_HTTPS_PORT TAILSCALE_HOST FTP_HOSTS GOOGLE_DRIVE RESEARCH_CONTACT_EMAIL CORE_API_KEY \
       FETCH_VIEW_PORT LIBRARY_LINK_PREFIX FETCH_PER_HOST FETCH_PER_DAY FETCH_LIBRARY_PER_DAY
 
 [ $# -ge 1 ] || usage

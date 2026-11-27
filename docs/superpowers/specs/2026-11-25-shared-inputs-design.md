@@ -1,0 +1,375 @@
+# Shared inputs: one download folder per container, and a weekly host job that links duplicates and lists old files (design)
+
+**Status:** draft for owner approval · **Date:** 2026-11-25 · **Supersedes:** the parked
+`docs/specs/2026-10-22-shared-inputs-design.md` (branch `docs/shared-inputs-design`, never merged).
+Its §3 (what `reproducible` does) is still the reference for the package's behaviour; this
+document only re-states what it relies on.
+
+## 1. Intent and why
+
+SpaDES input files (rasters, shapefiles, archives) are large and the same files turn up in several
+projects, and in several folders of one project. On 2026-11-25 the input folders of the SpaDES
+projects held 115 GB, of which 65 GB were byte-identical extra copies (about 37 GB the same file in
+different projects, 28 GB copies inside one project). The owner wants that disk back, and wants it to
+stay back: the integration work about to start pulls the same data into more places. It also needs
+every project to use **the same downloaded file**, so results are comparable.
+
+All SpaDES projects now live in one builder container (`PROJECT_DIR` holds several project folders,
+mounted at `/workspace`), on one filesystem. That removes most of what made the parked design heavy
+(a separate mount, overlap checks between projects' folders).
+
+Two parts, both built now:
+
+- **Part A, the host job** (`bin/agent-inputs`): weekly, it replaces byte-identical files in the
+  configured input folders with hard links to one copy, and writes a report that lists files nobody
+  has read in a long time. It never deletes anything.
+- **Part B, the shared download folder:** in a container with the setting on, every R session's
+  `reproducible` downloads go through one folder, `/workspace/inputs-shared`, so a file is downloaded
+  once and every project links to the same copy. `global.R` stays standard.
+
+## 2. Decisions the owner made (2026-11-25)
+
+1. **Disk space is the main goal; it is an ongoing problem**, so a one-off pass is not enough.
+2. **Both parts now.** The image is being rebuilt anyway, stopping all projects together later is hard,
+   and the integration step needs the same data in every project.
+3. **Part A is a small Python script of our own** (engine "A"), not util-linux `hardlink` plus a
+   wrapper, so that scanning never updates files' last-read times (§3.3).
+4. **Old files are only listed.** Deletions are discussed with the owner in chat once they accumulate.
+   The job never deletes, moves or edits file contents.
+5. **`global.R` stays standard** (carried over from the parked design): the container supplies the
+   setting. Projects whose `global.R` sets the shared-folder option themselves keep their own copies
+   until they are brought into the common project structure; that edit is done in those repositories,
+   not in this work.
+6. **Replicate-run scripts** that set their own input folder per run are left alone; how replicate runs
+   should work (likely SpaDES.experiment) is a separate discussion. Part A still links their duplicates.
+7. **The research container never takes part**, in either part (carried over).
+
+## 3. Part A: `bin/agent-inputs` (host)
+
+### 3.1 What it scans
+
+A config file, `~/.config/agent-containers/inputs.conf` (owner-maintained, `0600`, outside every
+mounted folder), with **one section per builder container**, so more containers can join later
+without a rebuild (owner decision, 2026-11-25):
+
+```
+[spades_pe]                 # a builder project name (its PROJECT_DIR comes from its project.conf)
+group = spades_pe           # optional; default: the section name
+report = inputs-shared      # optional; folder that gets REPORT.md; default: the first folder below
+inputs-shared               # folders to scan, one per line, relative to that PROJECT_DIR
+FIIS/data
+WS3_LandR/inputs
+```
+
+- Files are linked only **within a group**. Each section is its own group unless the owner gives two
+  sections the same `group`, which is how linking across containers is switched on later. The first
+  version ships with only `spades_pe` listed.
+- Each section gets its own report, published into that container's `report` folder, listing only
+  paths that container can see (`/workspace/...`). When a file is also linked from another container
+  in the group, its entry says so and names that container, without that container's paths.
+- Host state (§3.4) is kept per section.
+- A project with `PROFILE=research`, or that is not a builder, is refused as a section.
+- A builder whose `project.conf` does not have exactly `SHARED_INPUTS=1` is refused as a section
+  (final review): only with it does the container's agent get the rules about read-only links
+  (§4.4), so linking files of a container whose agent was never told would leave it guessing at
+  "permission denied". The refusal names the `inputs.conf` line and says why.
+
+The script refuses to run when:
+
+- a listed folder does not exist, is a symlink, is outside its section's `PROJECT_DIR`, or is not on
+  the same filesystem (`st_dev`) as the other folders of its group (hard links cannot cross
+  filesystems);
+- a listed folder overlaps the research folder (`RESEARCH_DIR` of any project config) or any config
+  directory under `~/.config/agent-containers`. Research downloads are kept out deliberately: a hard
+  link would let a builder's in-place edit reach a file the research container reads, and the reverse.
+
+It walks each folder recursively without following symlinks, and skips `.git` directories, its own
+`REPORT.md`, and `.tmp` at the root of the report folder (`reproducible`'s download scratch, §4.3). It
+never touches files outside the listed folders.
+
+**The folders are writable by the container's agent, and the job runs on the host with the owner's
+full access.** So the job must not be steerable by what the agent puts there: every operation works
+relative to an open directory handle (`openat`/`linkat`/`renameat` style, `O_NOFOLLOW`, `os.*` with
+`dir_fd` and `follow_symlinks=False`), re-checks that a file is still the same inode before replacing
+it, and never follows a symlink anywhere. A path swapped for a symlink mid-scan is skipped, not followed.
+
+Final review additions: the `st_ctime_ns` of both inodes is recorded while the byte comparison holds
+(user space cannot set it), and once both read leases are held, just before linking, both must still
+have the same device, inode, size, mtime and ctime (the kept inode's expected ctime follows the job's
+own chmod, links and renames). After the exchange both names are checked (the target name holds the
+kept inode, the temp name the scanned duplicate), and after a swap-back both again; any mismatch
+removes nothing, lists both paths under "Needs the owner's attention" and exits 1.
+
+### 3.2 Linking duplicates
+
+- **Candidates:** regular files of at least 1 MiB, not modified in the last 24 hours (a download or a
+  run may still be writing them), owned by the user running the script.
+- **Same content:** group by size, then by SHA-256 of the full content, then confirm with a byte-for-byte
+  comparison before linking. Files that are already the same inode count once.
+- **Linking:** for each group, keep the inode with the most links (ties: oldest `mtime`), and replace
+  each other path atomically: create a hard link to the kept inode under a temporary name in the
+  same directory, then `rename()` it over the path. A failure leaves the original file in place.
+- **Read-only** (owner decision, 2026-11-25): every inode the job links has its write permission
+  bits removed (`chmod a-w`). A program that tries to rewrite a linked file in place (as GDAL may do
+  for an existing GeoTIFF) then fails with "permission denied" instead of silently changing every
+  project's copy. Replacing the file with a new one (write elsewhere, rename over) and deleting it
+  still work, because the folder stays writable. If this breaks runs, the owner revisits it.
+- **Times:** after linking, the kept inode's last-read time (`atime`) is set to the latest `atime` of
+  the group, with its `mtime` unchanged, so "last read" means "last read through any of its paths".
+- **Dry run:** `agent-inputs scan --dry-run` prints what it would link and how much it would free,
+  and changes nothing (not even times). `scan` without it does the linking.
+
+### 3.3 Never touching last-read times
+
+The old-files list (§3.4) depends on `atime`. This disk is mounted `relatime`, so a read updates
+`atime` at most once a day, which is fine for months-scale reporting. The script opens every file it
+reads with `O_NOATIME` (allowed because the user owns the files). If that fails for a file, it skips
+the file and says so in the report; it never falls back to a normal read.
+
+### 3.4 The report
+
+The job's own state (running totals, last run) lives on the host only, in
+`~/.local/state/agent-containers/inputs.json` (keyed by section); `agent-up status` reads that, never a
+file the agent can write. *(Builder's call, recorded.)* Every `scan` run (dry or not) **publishes** a copy of the
+report to `<PROJECT_DIR>/inputs-shared/REPORT.md` so the agent can read it in chat, written to a temp
+name and renamed into place through a directory handle, never following a symlink. Contents:
+
+1. Run time, dry run or not, folders scanned, total size on disk (each inode counted once), space freed
+   by this run and in total so far.
+2. **Not read in 180 days:** one entry per inode, largest first: inode number, size (also in exact
+   bytes), last-read date, every path. The threshold is a command-line option, default 180 days. An
+   entry whose link count is greater than the paths found in the listed folders is marked "also
+   linked from outside the listed folders: deleting these paths frees nothing". The report says it is
+   information only and may be out of date, and to check inode and size with `stat` before deleting.
+3. **In the shared folder but linked from nowhere else:** files under `inputs-shared/` whose link
+   count is 1, i.e. no project folder links them any more, with inode number and size. Deleting these
+   frees space; deleting a file that other paths still link frees nothing, and the report says so in
+   one line.
+4. Files skipped (`O_NOATIME` refused, unreadable, changed during the scan), with the reason.
+5. One line with the size of leftover scratch in `inputs-shared/.tmp`: safe to delete when no R
+   session in the container is running; an owner action, not the agent's.
+
+Paths in the report are container paths (`/workspace/...`), so the agent can act on them, and contain
+no host home path.
+
+### 3.5 Schedule
+
+`agent-inputs install-timer` writes a systemd **user** service and timer (`OnCalendar=weekly`,
+`Persistent=true` so a run missed while the machine was off happens at next boot) and enables it;
+`agent-inputs remove-timer` disables and removes them. The service runs `agent-inputs scan`.
+systemd runs as PID 1 in this WSL installation (checked 2026-11-25). The README tells the owner how to
+see the last run (`systemctl --user status agent-inputs.timer`, `systemctl --user status
+agent-inputs.service` for the last scan's outcome, the report file), and that a user timer runs only
+while the user's systemd manager is up (`loginctl enable-linger` to run without a login).
+
+### 3.6 `agent-up status`
+
+If `inputs.conf` exists, `status` prints one line from the host state file: last run date, total size,
+space freed so far, and the number and size of files not read in 180 days. Nothing if the file is
+missing. The line marks a dry run, says "last run had problems: see REPORT.md" when that run had
+items for the owner's attention or could not publish the report (the state records the count), and
+warns when the last run is more than 8 days old (a renamed listed folder, which the agent can do,
+stops every run).
+
+## 4. Part B: the shared download folder (container)
+
+### 4.1 Setting
+
+`project.conf` gets:
+
+```
+# Shared download folder for SpaDES inputs: 0 = off, 1 = on. On, every R session's reproducible
+# downloads go through /workspace/inputs-shared (project-template/README.md "Shared inputs").
+SHARED_INPUTS=0
+```
+
+- `agent-up init` writes it as `0` for builders; the owner turns it on where several projects share a
+  container. **Missing counts as off**, so no existing project changes until the owner sets `1`.
+- Values other than `0`/`1` are refused by `up`/`config`; `stop`/`down` never refuse (same pattern as
+  `RESEARCH` and `RSTUDIO`). The research profile refuses `SHARED_INPUTS=1`.
+- `SHARED_INPUTS` joins the reserved-key list and the `unset` list in `bin/agent-up`.
+- `agent-up up` with it on creates `<PROJECT_DIR>/inputs-shared/` and `<PROJECT_DIR>/inputs-shared/.tmp/`
+  on the host if missing (one plain `mkdir` per level, refusing a symlink or non-folder before and
+  after, with a message). Inside one mount, so links work. The seed `.gitignore` lists `inputs-shared/`.
+
+### 4.2 Overlay
+
+A generated `.generated/shared-inputs.yaml` in the builder `COMPOSE=(...)` list. On: `environment:`
+`SPADES_INPUTS_SHARED: /workspace/inputs-shared` and `SPADES_INPUTS_TMP: /workspace/inputs-shared/.tmp`.
+Off, or research: `agent: {}`. No new mount.
+
+### 4.3 Image: the R site profile
+
+The base image appends a guarded block to R's site profile (`$(R RHOME)/etc/Rprofile.site`, keeping
+the rocker content), root-owned:
+
+```r
+local({
+  shared <- Sys.getenv("SPADES_INPUTS_SHARED")
+  if (nzchar(shared) && is.null(getOption("reproducible.destinationPathShared")) &&
+      is.null(getOption("reproducible.inputPaths")))
+    options(reproducible.destinationPathShared = shared, reproducible.inputPaths = shared)
+  tmp <- Sys.getenv("SPADES_INPUTS_TMP")
+  if (nzchar(tmp) && is.null(getOption("reproducible.tempPath")))
+    options(reproducible.tempPath = tmp)
+})
+```
+
+- **Plan ruling (supersedes the block above):** only the old name, `reproducible.inputPaths`, is set.
+  `reproducible` 3.2.1 reads the new name (`reproducible.destinationPathShared`) first, so setting it
+  from the site profile would override a script or `setupProject()` that later sets the old name, and
+  break "never overrides a value already set". The block is skipped when either name is already set.
+  The cost: `reproducible` prints a one-time deprecation note per session. **If a future
+  `reproducible` release drops the old name, Part B silently turns off** (downloads go back to each
+  project's own folder; nothing breaks, the saving stops); the smoke test checks only that the option
+  is set, so this needs a look at each `reproducible` upgrade.
+- `reproducible.tempPath` is a per-session subfolder, `file.path(SPADES_INPUTS_TMP,
+  basename(tempdir()))` (final review): a fixed shared temp path would be shared by concurrent R
+  sessions and keep their leftovers. It stays inside the same mount, so the final step is still a link.
+  Leftovers there are listed by size in the report (§3.4) for the owner to clear.
+- It does nothing without the variables, so other containers on the same image are unaffected.
+- Modules that read the shared-folder option to keep one copy of a large file they compute (seen in
+  the SpaDES projects: a factorial-table module and an ecozone module) will write those files to the
+  shared folder once the option is on. That is intended: it is the same saving. *(Builder's call,
+  recorded.)* The report's "linked from nowhere else" section covers them like downloads.
+- It never overrides a value already set. A script or `setupProject(options = ...)` that sets the
+  option later wins; that is how the projects in decision 5 keep their own folder for now.
+- Applies to `Rscript`, interactive R and RStudio sessions (`rsession-agent` passes the container
+  environment on). `R --vanilla` skips it; acceptable.
+- `reproducible.tempPath` inside the same mount turns the final "put the download in place" step into
+  a link, so a half-downloaded file never appears under its final name (parked spec §3.5).
+
+### 4.4 Agent instructions
+
+When `SHARED_INPUTS=1`, `agent-instructions.md` is assembled from `builder.md`, then a new
+`instructions/builder-shared-inputs.md`, then `builder-research.md` when research is on. It says, in
+the existing style:
+
+- `/workspace/inputs-shared` holds one copy of every downloaded input for all projects in this
+  container; the container points `reproducible` at it.
+- Leave `inputPath` and the `reproducible` shared-folder and temp-path options at their defaults in
+  `global.R`; setting them brings back duplicate copies.
+- Files get there only through `reproducible` and module code that uses the shared-folder option (some
+  modules deliberately keep one copy of a large computed table there), never by hand. Never edit, overwrite, rename or
+  delete anything in it, never open a file there for in-place update; if a file looks wrong, tell the
+  owner.
+- Files in project input folders may be hard links shared with other projects (the weekly job makes
+  them, and makes them read-only): never edit an input file in place; write a new file instead.
+- If a run fails with "permission denied" on an input file: make a private writable copy of the
+  project's own path in place (`cp -p <path> <path>.new && chmod u+w <path>.new && mv <path>.new
+  <path>`), never the copy in `/workspace/inputs-shared`, and never `chmod` the linked file itself; if
+  the denied file is in `inputs-shared`, tell the owner. If it fails again on the same file, stop and
+  tell the owner. Either way, tell the owner which file and which code tried to rewrite it.
+  *(Final review: the earlier "delete that path and re-run" could delete the last copy of a file that
+  cannot be downloaded again, and with `SHARED_INPUTS=1` it loops, since `prepInputs` links the same
+  read-only inode back from `inputs-shared`.)*
+- `inputs-shared/REPORT.md` lists old files with paths, sizes and inode numbers. It is information
+  only and may be out of date or changed. Delete only entries the owner names one by one; before
+  deleting, list back the exact paths, sizes and inode numbers and wait for the owner's yes; just
+  before deleting, check every path still has that inode and size (`stat -c '%i %s'`); if anything
+  differs, stop and tell the owner.
+- Never copy anything from `/research` into the shared folder or a project's inputs.
+
+### 4.5 Rollout
+
+1. Merge; image published through the normal release flow; `agent-up update` picks up the new digests.
+2. Owner sets `SHARED_INPUTS=1` for `spades_pe` only and runs `agent-up up` (one restart). The other
+   SpaDES containers keep it off.
+3. Owner writes `inputs.conf`, runs `agent-inputs scan --dry-run`, reads the report, then `scan`, then
+   `install-timer`.
+4. Projects that set the shared-folder option in `global.R` are switched over when they move into the
+   common project structure (separate work, decision 5).
+
+## 5. Non-goals and anti-goals
+
+- **Non-goals:** deleting anything automatically; quotas; locking around concurrent downloads;
+  patching `reproducible`; sharing the `Cache`; removing extracted copies of archives (zip + its
+  extracted files); per-project shared folders across *different* containers; migrating existing
+  project input folders into the shared folder (the job's linking already recovers their duplicate
+  space).
+- **Anti-goals:** anything that makes `global.R` or a module depend on `/workspace/inputs-shared`;
+  the research container or research downloads taking part in either part; the job deleting, moving or
+  changing the content of any file; a scan that updates last-read times.
+
+## 6. Tests
+
+**Part A** (`tests/inputs/test-agent-inputs.sh`, in CI, on a temporary fixture tree):
+
+- identical files in two folders end up one inode, with no write permission bits; different content, files under 1 MiB, files modified
+  in the last 24 hours and symlinks are left alone;
+- `--dry-run` changes no inode, `mtime` or `atime`, and writes the report;
+- a scan does not change the `atime` of files it read (fixture files given an old `atime` first);
+- after linking, the kept inode's `atime` is the group's latest and its `mtime` unchanged;
+- the old-files section lists an old-`atime` inode once with all its paths; the shared-folder section
+  lists a link-count-1 file and not a linked one;
+- two sections in different groups never share an inode after a scan; the same files in two sections
+  with the same `group` do, and each section's report names the other container without its paths;
+- refusals: a research or unknown section, a missing folder, a folder on another filesystem (skipped in CI if no second filesystem
+  is available), a folder overlapping a research folder;
+- an interrupted link (simulated failure before `rename`) leaves the original file intact.
+
+**Part B, launcher** (`tests/launcher/test-agent-up.sh`): `init` writes `SHARED_INPUTS=0` for builders
+and not for research; rendered compose with `1` has both variables and no new mount, with `0` or
+missing none; invalid value refused by `up`/`config`, accepted by `stop`/`down`; research with `1`
+refused; `up` creates the two folders; instructions assembled correctly for the four on/off
+combinations of shared inputs and research.
+
+**Part B, image** (`tests/smoke/base.sh`): with both variables set, a fresh `Rscript` has the
+options; a user profile (fixture via `R_PROFILE_USER`) that sets a different value ends with its own
+value (a project's own setting wins); without the variables, none is set.
+
+**Manual, by the owner after rollout** (written into the README section, results noted in the PR):
+in the SpaDES container, `prepInputs()` of a small public file from project A creates one inode in
+`inputs-shared/` and A's inputs; the same call from project B downloads nothing and links the same
+inode.
+
+## 7. Left to the builder
+
+- Exact wording of instructions, README, messages and report layout.
+- Python structure (one file in `bin/`, standard library only; host Python 3).
+- Systemd unit details (names, `Nice=`/`IOSchedulingClass=idle` for a gentle weekly run).
+- How `agent-up status` reads `REPORT.json`.
+
+## 8. Docs
+
+`project-template/README.md`: new section "Shared inputs" covering both parts (what each does, turning
+Part B on, writing `inputs.conf`, dry run, timer, reading the report, the rule that freeing space means
+deleting every path of a file, why research folders are excluded); a row for `SHARED_INPUTS` in the
+settings list. Known limits go in the private notes repository, not in this document.
+
+## 9. How we got here (decision record)
+
+Kept so the reasoning is not lost when this comes up again.
+
+- **2026-10-22 to 10-25: designed, then parked.** The first design gave every SpaDES container one
+  shared host folder mounted at `/inputs`. Hard links cannot cross bind mounts (a link between two
+  mounts silently becomes a full copy), so each project's inputs had to move inside that one mount
+  too. That meant a new mount, overlap checks against every other folder, per-project link handling,
+  and every container getting write access to every other container's inputs. The owner judged that
+  too much for the problem at the time and instead put the SpaDES projects that share data into **one
+  container** (`spades_pe`). Inside one container, sharing needs no mount at all.
+- **2026-11-25: picked up again.** Measured 115 GB of inputs, 65 GB of identical copies (37 GB across
+  projects, 28 GB inside single projects). Disk was not urgent (358 GB free), but the integration work
+  was about to multiply copies, and needs every project on the same data.
+- **Linking job versus shared folder.** A shared download folder alone recovers neither the copies
+  inside one project nor the files already duplicated; a linking job alone leaves repeat downloads and
+  lets projects drift onto different versions. Both were chosen. The shared folder was built now, not
+  later, because the image was being rebuilt anyway, restarting every project for an update later is
+  hard, and the integration step needs the same data.
+- **Version coupling** turned out milder than first described. `reproducible` checks each file's hash
+  against its own record, and against the source's hash when the server reports one, but after the
+  first successful check it trusts a `.hash` note and stops asking. With a shared folder a new project
+  inherits that check instead of downloading fresh; `reproducible.checkRemoteHash = TRUE` restores the
+  check per run. Not a reason against sharing.
+- **Our own script, not `hardlink`:** reading files to compare them would otherwise update their
+  last-read times, and the old-files list depends on those.
+- **Read-only links:** a program that rewrites a file in place would silently change every linked copy;
+  making linked files read-only turns that into a visible error. Chosen over linking only
+  `CHECKSUMS.txt`-listed files (which would have kept 64.5 of 65 GB but not prevented rewrites).
+- **Across containers.** The linking job extends cheaply: all project folders are on one disk, so the
+  host can link between containers; the config is per container with groups so this is a config
+  change later. A shared *download* folder across containers does not extend cheaply: it brings back
+  everything that parked the first design (one shared mount holding every project's inputs,
+  cross-container write access). The route for projects that should download once together stays:
+  put them in the same container. If that stops being enough, start from the parked design
+  (branch `docs/shared-inputs-design`), whose §9 already describes how it would carry over.

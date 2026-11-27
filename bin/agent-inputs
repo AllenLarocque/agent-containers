@@ -1,0 +1,1389 @@
+#!/usr/bin/python3
+"""agent-inputs: host-side job that hard-links byte-identical large input files inside builder
+project folders, makes linked files read-only, and publishes a report of files not read for a long
+time (spec docs/superpowers/specs/2026-11-25-shared-inputs-design.md, section 3).
+
+It runs as the owner, but the folders it scans are writable by the container's agent. So it never
+follows a symlink, works only relative to directory file descriptors opened with O_NOFOLLOW, reads
+files only with O_NOATIME, re-checks a path is still the scanned inode just before replacing it, and
+never deletes, moves or changes the content of a file. Standard library only.
+
+  agent-inputs scan [--dry-run] [--days N]
+"""
+import argparse
+import ctypes
+import dataclasses
+import datetime
+import errno
+import fcntl
+import hashlib
+import json
+import os
+import re
+import secrets
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Iterator, Optional
+
+MIB = 1048576
+DAY_NS = 86400 * 10**9
+TMP_PREFIX = ".agent-inputs-tmp-"
+REPORT = "REPORT.md"
+REPORT_TMP = "REPORT.md.tmp"
+SCRATCH = ".tmp"     # reproducible's download scratch at the root of the report folder (inputs-shared/.tmp)
+CHUNK = 1 << 20
+# O_NONBLOCK: a FIFO planted in a folder must not hang the job on open.
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NOATIME | os.O_CLOEXEC | os.O_NONBLOCK
+NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
+
+
+class ConfigError(Exception):
+    pass
+
+
+@dataclasses.dataclass(eq=False)
+class Section:
+    name: str
+    group: str
+    project_dir: Path
+    folders: list
+    report: Optional[str]
+    lines: dict = dataclasses.field(default_factory=dict)  # folder or "report" -> inputs.conf line
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
+class FileRef:
+    section: Section
+    folder: str
+    rel: str            # path below the folder, "/"-separated
+    dev: int
+    ino: int
+    size: int
+    mtime: int          # ns
+    atime: int          # ns
+    nlink: int
+    uid: int
+    mode: int
+    gid: int
+    alloc: int          # allocated bytes (st_blocks * 512): what linking frees, sparse files included
+
+    @property
+    def key(self):
+        return (self.dev, self.ino)
+
+    @property
+    def ident(self):
+        return (self.dev, self.ino, self.size, self.mtime)
+
+    @property
+    def container_path(self):
+        return container_path(self.folder, self.rel)
+
+    @property
+    def host_path(self):
+        return str(self.section.project_dir / self.folder / self.rel)
+
+
+def container_path(folder, rel=""):
+    return "/workspace/" + folder + ("/" + rel if rel else "")
+
+
+def shown(path):
+    """A path for the report or the terminal, in a Markdown code span. Reversible: bytes that are
+    not UTF-8, control and other unprintable characters become \\xNN / \\uNNNN, a backslash becomes
+    two and a backtick \\x60, so a name cannot break the span, start a line or add a heading."""
+    out = []
+    for ch in path:
+        o = ord(ch)
+        if 0xDC80 <= o <= 0xDCFF:          # an undecodable byte (surrogateescape)
+            out.append(f"\\x{o - 0xDC00:02x}")
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ch == "`":
+            out.append("\\x60")
+        elif ch.isprintable():
+            out.append(ch)
+        elif o < 0x100:
+            out.append(f"\\x{o:02x}")
+        elif o < 0x10000:
+            out.append(f"\\u{o:04x}")
+        else:
+            out.append(f"\\U{o:08x}")
+    return "`" + "".join(out) + "`"
+
+
+def ident(st):
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+# ---------------------------------------------------------------- directory handles
+
+def open_rel(base_fd, parts):
+    """Open the directory base_fd/parts[0]/parts[1]/..., each step O_NOFOLLOW. Caller closes."""
+    fd = os.dup(base_fd)
+    try:
+        for p in parts:
+            nfd = os.open(p, DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def open_project(section):
+    # PROJECT_DIR comes from the owner's config: its parent may be reached through the owner's own
+    # symlinks, but PROJECT_DIR itself and everything below it is opened O_NOFOLLOW.
+    parent, last = os.path.split(str(section.project_dir).rstrip("/"))
+    if not last:
+        return os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    pfd = os.open(parent or "/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        return os.open(last, DIR_FLAGS, dir_fd=pfd)
+    finally:
+        os.close(pfd)
+
+
+def open_dir(section, folder, rel_parts=()):
+    pfd = open_project(section)
+    try:
+        return open_rel(pfd, folder.split("/") + list(rel_parts))
+    finally:
+        os.close(pfd)
+
+
+def open_parent(ref):
+    """(dir fd, basename) for a FileRef, every directory opened O_NOFOLLOW. Caller closes the fd."""
+    parts = ref.rel.split("/")
+    return open_dir(ref.section, ref.folder, parts[:-1]), parts[-1]
+
+
+# ---------------------------------------------------------------- config
+
+def read_kv(path):
+    vals = {}
+    for line in path.read_text().splitlines():
+        if line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        vals[k.strip()] = v.strip()   # last one wins, like agent-up's conf_get
+    return vals
+
+
+def conf_get(path, key):
+    """The value of the last line starting with KEY= exactly as written (agent-up's conf_get)."""
+    val = None
+    for line in path.read_text().splitlines():
+        if line.startswith(key + "="):
+            val = line[len(key) + 1:]
+    return val
+
+
+def check_rel(text, where):
+    if text.startswith("/"):
+        raise ConfigError(f"{where}: '{text}' is an absolute path; folders are relative to PROJECT_DIR")
+    raw = text.split("/")
+    if ".." in raw:
+        raise ConfigError(f"{where}: '{text}' has a '..' component")
+    parts = [p for p in raw if p not in ("", ".")]
+    if not parts:
+        raise ConfigError(f"{where}: '{text}' names PROJECT_DIR itself; list folders inside it")
+    return "/".join(parts)
+
+
+def overlaps(a, b):
+    return a == b or a.startswith(b + "/") or b.startswith(a + "/")
+
+
+def load_config(home: Path) -> list:
+    cfg_root = home / ".config" / "agent-containers"
+    path = cfg_root / "inputs.conf"
+    try:
+        text = path.read_text()
+    except OSError as e:
+        raise ConfigError(f"{path}: cannot read ({e.strerror})")
+    sections, cur = [], None
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        where = f"{path} line {n}"
+        m = re.fullmatch(r"\[(.*)\]", line)
+        if m:
+            name = m.group(1).strip()
+            if not NAME_RE.fullmatch(name):
+                raise ConfigError(f"{where}: '{name}' is not a project name")
+            if any(s.name == name for s in sections):
+                raise ConfigError(f"{where}: section [{name}] is listed twice")
+            pconf = cfg_root / name / "project.conf"
+            if not pconf.is_file():
+                raise ConfigError(f"{where}: [{name}] is not a known project (no {pconf})")
+            vals = read_kv(pconf)
+            prof = vals.get("PROFILE", "")
+            if prof != "builder":
+                raise ConfigError(f"{where}: [{name}] has PROFILE={prof or '(unset)'} in {pconf}; "
+                                  "only builder projects can be listed (research and others are refused)")
+            if conf_get(pconf, "SHARED_INPUTS") != "1":
+                raise ConfigError(f"{where}: [{name}] does not have exactly SHARED_INPUTS=1 in {pconf}; without it the "
+                                  "container's agent would not be told about read-only links, so it cannot be listed")
+            pdir = vals.get("PROJECT_DIR", "")
+            if not pdir.startswith("/"):
+                raise ConfigError(f"{where}: [{name}]: PROJECT_DIR in {pconf} is not an absolute path")
+            cur = Section(name, name, Path(pdir), [], None, {"section": n})
+            sections.append(cur)
+            continue
+        if cur is None:
+            raise ConfigError(f"{where}: '{line}' comes before any [section]")
+        m = re.fullmatch(r"(group|report)\s*=\s*(.*)", line)
+        if m:
+            key, val = m.group(1), m.group(2).strip()
+            if not val:
+                raise ConfigError(f"{where}: {key} has no value")
+            if key == "group":
+                cur.group = val
+            else:
+                cur.report = check_rel(val, where)
+                cur.lines["report"] = n
+            continue
+        folder = check_rel(line, where)
+        if folder in cur.folders:
+            raise ConfigError(f"{where}: '{folder}' is listed twice")
+        cur.folders.append(folder)
+        cur.lines[folder] = n
+    if not sections:
+        raise ConfigError(f"{path}: no [section] listed")
+
+    research = []   # (realpath, label)
+    for pc in sorted(cfg_root.glob("*/project.conf")):
+        rd = read_kv(pc).get("RESEARCH_DIR", "") or str(home / "agent-research")
+        research.append((os.path.realpath(rd), f"RESEARCH_DIR of {pc.parent.name}"))
+    research.append((os.path.realpath(cfg_root), str(cfg_root)))
+    builders = []   # (config name, realpath of PROJECT_DIR) of every builder config
+    for pc in sorted(cfg_root.glob("*/project.conf")):
+        vals = read_kv(pc)
+        if vals.get("PROFILE") == "builder" and vals.get("PROJECT_DIR", "").startswith("/"):
+            builders.append((pc.parent.name, os.path.realpath(vals["PROJECT_DIR"])))
+
+    group_dev = {}   # group -> (dev, where)
+    for s in sections:
+        swhere = f"{path} line {s.lines['section']}"
+        if not s.folders:
+            raise ConfigError(f"{swhere}: [{s.name}] lists no folders")
+        try:
+            os.close(open_project(s))
+        except FileNotFoundError:
+            raise ConfigError(f"{swhere}: PROJECT_DIR of [{s.name}] does not exist")
+        except OSError as e:
+            if e.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise ConfigError(f"{swhere}: PROJECT_DIR of [{s.name}] is a symlink or not a directory")
+            raise ConfigError(f"{swhere}: PROJECT_DIR of [{s.name}] cannot be opened ({e.strerror})")
+        mine = os.path.realpath(str(s.project_dir))
+        for other, rp in builders:
+            if other != s.name and overlaps(mine, rp):
+                raise ConfigError(f"{swhere}: PROJECT_DIR of [{s.name}] overlaps PROJECT_DIR of builder project "
+                                  f"{other}; one container could reach the other's files")
+        if s.report is None:
+            s.report = s.folders[0]
+        elif s.report not in s.folders:
+            raise ConfigError(f"{path} line {s.lines['report']}: report = {s.report} is not one of the "
+                              f"folders listed for [{s.name}]")
+        for i, f in enumerate(s.folders):
+            where = f"{path} line {s.lines[f]}"
+            for g in s.folders[:i]:
+                if overlaps(f, g):
+                    raise ConfigError(f"{where}: '{f}' overlaps '{g}', listed above")
+            try:
+                fd = open_dir(s, f)
+            except FileNotFoundError:
+                raise ConfigError(f"{where}: '{f}' does not exist in PROJECT_DIR of [{s.name}]")
+            except OSError as e:
+                if e.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise ConfigError(f"{where}: '{f}' is a symlink or not a directory (or is reached through one)")
+                raise ConfigError(f"{where}: '{f}' cannot be opened ({e.strerror})")
+            try:
+                dev = os.fstat(fd).st_dev
+            finally:
+                os.close(fd)
+            real = os.path.realpath(str(s.project_dir)) + "/" + f
+            for rp, label in research:
+                if overlaps(real, rp):
+                    raise ConfigError(f"{where}: '{f}' overlaps {label}; research folders are never linked")
+            if s.group not in group_dev:
+                group_dev[s.group] = (dev, where)
+            elif group_dev[s.group][0] != dev:
+                raise ConfigError(f"{where}: '{f}' is not on the same filesystem as the other folders of group "
+                                  f"'{s.group}' (first at {group_dev[s.group][1]}); hard links cannot cross filesystems")
+    return sections
+
+
+# ---------------------------------------------------------------- walking and reading
+
+def walk(section, tmp_found=None) -> Iterator[FileRef]:
+    """Every regular file under the section's folders, never through a symlink, skipping .git and
+    other filesystems. Names starting with TMP_PREFIX are not yielded; with tmp_found (a list) they
+    are appended to it as (section, folder, rel, dev, ino)."""
+    for folder in section.folders:
+        try:
+            fd = open_dir(section, folder)
+        except OSError as e:
+            print(f"agent-inputs: [{section.name}] {shown(container_path(folder))}: cannot open ({e.strerror}); skipped",
+                  file=sys.stderr)
+            continue
+        try:
+            yield from _walk_folder(section, folder, fd, tmp_found)
+        finally:
+            os.close(fd)
+
+
+def _walk_folder(section, folder, root_fd, tmp_found):
+    """Depth-first with an explicit stack (an agent can nest directories arbitrarily deep). Only
+    one directory below the folder is open at a time: each is reopened from the folder fd, one
+    O_NOFOLLOW step per component, and must still be the inode its parent listed."""
+    dev = os.fstat(root_fd).st_dev
+    stack = [((), None)]   # (path components below the folder, expected (dev, ino))
+    while stack:
+        parts, expect = stack.pop()
+        try:
+            fd = open_rel(root_fd, parts)
+        except OSError:
+            continue
+        try:
+            st = os.fstat(fd)
+            if expect is not None and (st.st_dev, st.st_ino) != expect:
+                continue
+            try:
+                with os.scandir(fd) as it:
+                    names = sorted(e.name for e in it)
+            except OSError:
+                continue
+            subdirs = []
+            for name in names:
+                if name == ".git":
+                    continue
+                if not parts and folder == section.report and name in (REPORT, REPORT_TMP, SCRATCH):
+                    continue   # this job's own report, or reproducible's download scratch: not inputs
+                rel = "/".join(parts + (name,))
+                try:
+                    st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                except OSError:
+                    continue
+                if name.startswith(TMP_PREFIX):
+                    if tmp_found is not None:
+                        tmp_found.append((section, folder, rel, st.st_dev, st.st_ino))
+                    continue
+                if stat.S_ISDIR(st.st_mode):
+                    if st.st_dev == dev:
+                        subdirs.append((parts + (name,), (st.st_dev, st.st_ino)))
+                elif stat.S_ISREG(st.st_mode):
+                    yield FileRef(section, folder, rel, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns,
+                                  st.st_atime_ns, st.st_nlink, st.st_uid, stat.S_IMODE(st.st_mode), st.st_gid,
+                                  st.st_blocks * 512)
+        finally:
+            os.close(fd)
+        stack.extend(reversed(subdirs))
+
+
+def read_error(e):
+    if e.errno == errno.EPERM:
+        return "O_NOATIME refused, so not read"
+    if e.errno == errno.EACCES:
+        return "unreadable (permission denied)"
+    if e.errno in (errno.ENOENT, errno.ELOOP, errno.ENOTDIR):
+        return "changed during scan"
+    return f"unreadable ({e.strerror})"
+
+
+def _note(why, reason):
+    if why is not None:
+        why.append(reason)
+
+
+def _open_read(dir_fd, name, expect, why):
+    """fd of a regular file opened O_NOATIME|O_NOFOLLOW, or None (reason appended to why)."""
+    try:
+        fd = os.open(name, READ_FLAGS, dir_fd=dir_fd)
+    except OSError as e:
+        _note(why, read_error(e))
+        return None
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or (expect is not None and ident(st) != expect):
+        os.close(fd)
+        _note(why, "changed during scan")
+        return None
+    return fd
+
+
+def hash_file(dir_fd, name, expect=None, why=None) -> Optional[str]:
+    """SHA-256 of a file, read only with O_NOATIME; None on any failure (reason appended to why).
+    With expect=(dev, ino, size, mtime_ns), a file that is no longer that scan result is refused."""
+    fd = _open_read(dir_fd, name, expect, why)
+    if fd is None:
+        return None
+    try:
+        before = ident(os.fstat(fd))
+        h = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, CHUNK)
+            if not chunk:
+                break
+            h.update(chunk)
+        if ident(os.fstat(fd)) != before:
+            _note(why, "changed during scan")
+            return None
+        return h.hexdigest()
+    except OSError as e:
+        _note(why, read_error(e))
+        return None
+    finally:
+        os.close(fd)
+
+
+def same_bytes(a, b, why=None, ctimes=None) -> bool:
+    """Byte-for-byte comparison of two scanned files (FileRefs), same open flags as hash_file.
+    With ctimes (a dict), the st_ctime_ns of both inodes while they compared equal is recorded under
+    their (dev, ino): user space cannot set ctime, so a later fstat showing another value means the
+    file was changed (even with its mtime put back). An inode already recorded with another ctime
+    (changed between two comparisons) fails the comparison."""
+    fds = []
+    try:
+        for r in (a, b):
+            try:
+                dfd, name = open_parent(r)
+            except OSError as e:
+                _note(why, read_error(e))
+                return False
+            try:
+                fd = _open_read(dfd, name, r.ident, why)
+            finally:
+                os.close(dfd)
+            if fd is None:
+                return False
+            fds.append(fd)
+        before = [os.fstat(fd).st_ctime_ns for fd in fds]
+        while True:
+            x, y = os.read(fds[0], CHUNK), os.read(fds[1], CHUNK)
+            if x != y:
+                return False
+            if not x:
+                break
+        if [os.fstat(fd).st_ctime_ns for fd in fds] != before:
+            _note(why, CHANGED)
+            return False
+        if ctimes is not None:
+            for r, c in zip((a, b), before):
+                if ctimes.setdefault(r.key, c) != c:
+                    _note(why, CHANGED)
+                    return False
+        return True
+    except OSError as e:
+        _note(why, read_error(e))
+        return False
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+
+def hash_ref(ref, why):
+    try:
+        dfd, name = open_parent(ref)
+    except OSError as e:
+        why.append(read_error(e))
+        return None
+    try:
+        return hash_file(dfd, name, ref.ident, why)
+    finally:
+        os.close(dfd)
+
+
+# ---------------------------------------------------------------- linking
+
+RENAME_EXCHANGE = 2
+EXCHANGE_UNAVAILABLE = "renameat2(RENAME_EXCHANGE) is not available here, so nothing was linked"
+
+
+class ExchangeUnavailable(Exception):
+    pass
+
+
+exchange_unavailable = False   # set for the rest of the run once an exchange is refused
+
+
+def _load_renameat2():
+    try:
+        f = ctypes.CDLL(None, use_errno=True).renameat2
+    except (OSError, AttributeError):
+        return None
+    f.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    f.restype = ctypes.c_int
+    return f
+
+
+_renameat2 = _load_renameat2()
+
+
+def exchange(dir_fd, a, b):
+    """Atomically swap the directory entries a and b in dir_fd (renameat2 RENAME_EXCHANGE): neither
+    entry is ever replaced, so whatever sits at b at that instant survives under the name a.
+    Raises ExchangeUnavailable when the kernel, filesystem or libc cannot do it."""
+    if _renameat2 is None:
+        raise ExchangeUnavailable()
+    if _renameat2(dir_fd, os.fsencode(a), dir_fd, os.fsencode(b), RENAME_EXCHANGE) != 0:
+        err = ctypes.get_errno()
+        if err in (errno.ENOSYS, errno.EINVAL):
+            raise ExchangeUnavailable()
+        raise OSError(err, os.strerror(err))
+
+
+def run_hook(point, ref, tmp=None):
+    """Test hook: AGENT_INPUTS_TEST_HOOK=<point>:<cmd> runs <cmd> (shell) at that point, with the
+    target's host path in AGENT_INPUTS_TEST_TARGET and the temp link's in AGENT_INPUTS_TEST_TMP;
+    <cmd> 'exit' ends the process there. One <point>:<cmd> per line. Points: before-replace,
+    before-rename, after-exchange, after-swap-back, before-cleanup."""
+    for hook in os.environ.get("AGENT_INPUTS_TEST_HOOK", "").splitlines():
+        if not hook.startswith(point + ":"):
+            continue
+        cmd = hook[len(point) + 1:]
+        if cmd == "exit":
+            os._exit(3)
+        env = dict(os.environ, AGENT_INPUTS_TEST_TARGET=ref.host_path)
+        if tmp is not None:
+            env["AGENT_INPUTS_TEST_TMP"] = os.path.join(os.path.dirname(ref.host_path), tmp)
+        subprocess.run(cmd, shell=True, check=False, env=env)
+
+
+def by_inode(refs):
+    out = {}
+    for r in refs:
+        out.setdefault(r.key, []).append(r)
+    return out
+
+
+def pick_kept(inodes):
+    """The inode (list of its refs) to keep: most links, then oldest mtime."""
+    return min(inodes, key=lambda ps: (-ps[0].nlink, ps[0].mtime, ps[0].dev, ps[0].ino))
+
+
+CHANGED = "changed during scan"
+NLINK_CHANGED = "link count changed during scan"
+OPENED_FOR_WRITING = "opened for writing during the scan"
+F_SETLEASE = getattr(fcntl, "F_SETLEASE", 1024)
+
+
+@dataclasses.dataclass
+class Outcome:
+    linked: bool = False            # the path now names the kept inode
+    reason: Optional[str] = None    # why not linked
+    attention: Optional[tuple] = None   # (container path, message) the owner must look at
+    cleaned: bool = False           # the duplicate's old name (the temp link) was removed
+    kept_changed: bool = False      # the kept inode changed since its comparison: link nothing more to it
+    atime: int = 0                  # the duplicate's latest last-read time (ns)
+
+
+def _xattrs(fd):
+    try:
+        return os.listxattr(fd)
+    except OSError as e:
+        if e.errno in (errno.ENOTSUP, errno.EOPNOTSUPP):
+            return []
+        raise
+
+
+def _lease(fd):
+    """Take a read lease: refused while anyone has the file open for writing. None or the reason."""
+    try:
+        fcntl.fcntl(fd, F_SETLEASE, fcntl.F_RDLCK)
+        return None
+    except OSError as e:
+        if e.errno in (errno.EAGAIN, errno.EBUSY):
+            return "open for writing"
+        if e.errno == errno.EINVAL:
+            return "file leases are not supported here, so not linked"
+        return f"could not take a read lease ({e.strerror})"
+
+
+def _lease_broken(fd):
+    """True once someone has started opening the file for writing (the lease is being broken)."""
+    try:
+        return fcntl.fcntl(fd, getattr(fcntl, "F_GETLEASE", 1025)) != fcntl.F_RDLCK
+    except OSError:
+        return True
+
+
+def _unlease(fd):
+    try:
+        fcntl.fcntl(fd, F_SETLEASE, fcntl.F_UNLCK)
+    except OSError:
+        pass
+
+
+def _tmp_path(r, tmp):
+    return container_path(r.folder, "/".join(r.rel.split("/")[:-1] + [tmp]))
+
+
+def _cleanup(r, kept, tdir, tmp, out):
+    """Remove the temp name only if it is exactly the inode expected there: the duplicate after a
+    successful exchange, the kept inode otherwise. Anything else is left and reported."""
+    run_hook("before-cleanup", r, tmp)
+    where = _tmp_path(r, tmp)
+    try:
+        st = os.stat(tmp, dir_fd=tdir, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    except OSError as e:
+        out.attention = (where, f"could not check this temporary link ({e.strerror}); remove it if it is a leftover")
+        return
+    if out.linked:
+        expected = stat.S_ISREG(st.st_mode) and ident(st) == r.ident
+    else:
+        expected = stat.S_ISREG(st.st_mode) and (st.st_dev, st.st_ino) == kept.key
+    if not expected:
+        out.attention = (where, "left in place: it is not the file this job put there; check it, then move or "
+                                "remove it")
+        return
+    try:
+        os.unlink(tmp, dir_fd=tdir)
+        out.cleaned = out.linked
+    except OSError as e:
+        out.attention = (where, f"could not remove this temporary link ({e.strerror}); remove it by hand")
+
+
+def _lstat(dir_fd, name):
+    try:
+        return os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError:
+        return None
+
+
+def _is(st, key):
+    """st (or None) is a regular file with that (dev, ino)."""
+    return st is not None and stat.S_ISREG(st.st_mode) and (st.st_dev, st.st_ino) == key
+
+
+def _replace(r, kept, kfd, kdir, kname, kept_links, target_links, ctimes, kctime) -> Outcome:
+    """Replace r's path by a hard link to the kept inode, atomically (renameat2 RENAME_EXCHANGE).
+    kept_links / target_links: the link counts the two inodes must have right now. ctimes: the
+    st_ctime_ns each inode had when it was compared ((dev, ino) -> ns); kctime: a one-item list, the
+    ctime the kept inode must have now (it changes with this job's own chmod, links and renames, and
+    is refreshed after each). Raises ExchangeUnavailable (nothing changed) when the exchange cannot
+    be done."""
+    out = Outcome()
+    try:
+        tdir, tname = open_parent(r)
+    except OSError:
+        out.reason = CHANGED
+        return out
+    tmp = tfd = None
+    leased = []
+    checked = False   # the under-lease identity check passed: only then are ctimes refreshed
+    try:
+        run_hook("before-replace", r)
+        why = []
+        tfd = _open_read(tdir, tname, r.ident, why)
+        if tfd is None:
+            out.reason = why[0] if why else CHANGED
+            return out
+        tst, kst = os.fstat(tfd), os.fstat(kfd)
+        if tst.st_nlink != target_links or kst.st_nlink != kept_links:
+            out.reason = NLINK_CHANGED
+            return out
+        if (tst.st_mode & 0o7555) != (kst.st_mode & 0o7555) or tst.st_gid != kst.st_gid:
+            out.reason = "different permissions or group"
+            return out
+        if _xattrs(tfd) or _xattrs(kfd):
+            out.reason = "has extended attributes or ACLs, which linking would merge; not linked"
+            return out
+        # Read leases on both inodes, held through the exchange: refused while anyone has either
+        # open for writing (a writer would lose its writes, or change every linked path).
+        for fd in (kfd, tfd):
+            why = _lease(fd)
+            if why:
+                out.reason = why
+                return out
+            leased.append(fd)
+        # With both leases held no write can start unseen. A write that completed between the
+        # comparison and the leases, even one that put the mtime back, shows in the ctime.
+        kst, tst = os.fstat(kfd), os.fstat(tfd)
+        kept_ok = ident(kst) == kept.ident and kst.st_ctime_ns == kctime[0]
+        target_ok = ident(tst) == r.ident and tst.st_ctime_ns == ctimes.get(r.key)
+        if not (kept_ok and target_ok):
+            # Never adopt a changed ctime: forget the expected value, so no later path of the
+            # same inode passes, and stop linking to a changed kept inode.
+            if not target_ok:
+                ctimes.pop(r.key, None)
+            if not kept_ok:
+                kctime[0] = None
+                out.kept_changed = True
+            out.reason = CHANGED
+            return out
+        checked = True
+        tmp = TMP_PREFIX + secrets.token_hex(8)
+        try:
+            os.link(kname, tmp, src_dir_fd=kdir, dst_dir_fd=tdir, follow_symlinks=False)
+        except OSError as e:
+            tmp = None
+            out.reason = f"could not link ({e.strerror})"
+            return out
+        try:
+            lt = os.stat(tmp, dir_fd=tdir, follow_symlinks=False)
+            cur = os.stat(tname, dir_fd=tdir, follow_symlinks=False)
+        except OSError:
+            out.reason = CHANGED
+            return out
+        kst, tst = os.fstat(kfd), os.fstat(tfd)
+        if (not stat.S_ISREG(lt.st_mode) or (lt.st_dev, lt.st_ino) != kept.key
+                or not stat.S_ISREG(cur.st_mode) or ident(cur) != r.ident or ident(kst) != kept.ident):
+            out.reason = CHANGED
+            return out
+        if kst.st_nlink != kept_links + 1 or tst.st_nlink != target_links:
+            out.reason = NLINK_CHANGED
+            return out
+        run_hook("before-rename", r, tmp)
+        # Swap, then look at what came out: only if it is the scanned duplicate is its old name
+        # dropped (its content lives on in the kept inode); anything else is swapped back.
+        try:
+            exchange(tdir, tmp, tname)
+        except OSError as e:
+            out.reason = f"could not replace ({e.strerror})"
+            return out
+        run_hook("after-exchange", r, tmp)
+        # Both names are checked: the target name must now hold the kept inode and the temp name
+        # the scanned duplicate. Nothing is inferred from the exchange having succeeded.
+        o, n = _lstat(tdir, tmp), _lstat(tdir, tname)
+        o_ok = o is not None and stat.S_ISREG(o.st_mode) and ident(o) == r.ident
+        if o_ok and not _is(n, kept.key):
+            out.attention = (_tmp_path(r, tmp),
+                             f"the scanned file from {shown(r.container_path)} is here, but after the swap that path "
+                             "holds a file this job did not put there. Nothing was removed: check both paths, keep "
+                             f"the right file at {shown(r.container_path)} and remove the other by hand.")
+            tmp = None    # never remove anything when the names are not what this job put there
+            return out
+        back_reason = CHANGED
+        if o_ok:
+            # A writer that opened either inode since the leases were taken is blocked until they
+            # are released: undo, so it writes to a file that keeps its name.
+            if not (_lease_broken(kfd) or _lease_broken(tfd)):
+                out.linked = True
+                out.atime = max(r.atime, os.fstat(tfd).st_atime_ns)
+                return out
+            back_reason = OPENED_FOR_WRITING
+        try:
+            exchange(tdir, tmp, tname)
+        except (OSError, ExchangeUnavailable) as e:
+            detail = e.strerror if isinstance(e, OSError) else "exchange unavailable"
+            out.attention = (_tmp_path(r, tmp),
+                             f"a file that appeared at {shown(r.container_path)} during the scan is here; swapping "
+                             f"it back failed ({detail}), so that path may now hold a linked copy. Move it back by hand.")
+            tmp = None    # never remove what someone else put there
+            return out
+        run_hook("after-swap-back", r, tmp)
+        # The swap-back is checked the same way: the target name holds what was there before the
+        # swap (o), and the temp name holds the kept inode again.
+        back = _lstat(tdir, tname)
+        if not (back is not None and o is not None and (back.st_dev, back.st_ino) == (o.st_dev, o.st_ino)
+                and _is(_lstat(tdir, tmp), kept.key)):
+            out.attention = (_tmp_path(r, tmp),
+                             f"{shown(r.container_path)} changed during the scan and was swapped back, but this path "
+                             f"and {shown(r.container_path)} do not hold the files expected. Nothing was removed: "
+                             "check both paths by hand.")
+            tmp = None
+            return out
+        out.reason = back_reason
+        return out
+    finally:
+        # Leases are released only after the temp name is dealt with, so no writer gets an fd
+        # to an inode whose last name this job is about to remove.
+        if tmp is not None:
+            _cleanup(r, kept, tdir, tmp, out)
+        if out.linked and out.cleaned and (_lease_broken(kfd) or _lease_broken(tfd)):
+            out.attention = (r.container_path, "a process opened this file for writing at the instant it was "
+                                               "linked; what it writes may go to a file with no name. Check it.")
+        # This job's own link, renames and unlink changed both ctimes. Only after the under-lease check
+        # passed, with both leases still held and unbroken (so nobody else can have written) and the
+        # identities unchanged, do the new values become the expected ones. Anything else forgets
+        # them, so no later path of either inode is linked. An error here never skips the release.
+        if checked:
+            try:
+                k2 = os.fstat(kfd)
+                kept_fresh = not _lease_broken(kfd) and ident(k2) == kept.ident
+            except OSError:
+                kept_fresh = False
+            try:
+                t2 = os.fstat(tfd)
+                target_fresh = not _lease_broken(tfd) and ident(t2) == r.ident
+            except OSError:
+                target_fresh = False
+            if kept_fresh:
+                kctime[0] = k2.st_ctime_ns
+            else:
+                kctime[0] = None
+                out.kept_changed = True
+            if target_fresh:
+                ctimes[r.key] = t2.st_ctime_ns
+            else:
+                ctimes.pop(r.key, None)
+        for fd in leased:
+            _unlease(fd)
+        if tfd is not None:
+            os.close(tfd)
+        os.close(tdir)
+
+
+def link_group(refs, dry_run, linked=None, skipped=None, attention=None, ctimes=None) -> int:
+    """Link every path in refs (all byte-identical, confirmed) to one kept inode. Returns bytes
+    freed (would be freed, on a dry run), counted in allocated blocks and only once the old name is
+    confirmed gone. linked gets (ref, kept_ref, freed_bytes) per replaced path; skipped gets
+    (ref, reason); attention gets (section name, container path, message). ctimes: the st_ctime_ns
+    recorded by same_bytes for each inode; an inode without one is never linked."""
+    linked = [] if linked is None else linked
+    skipped = [] if skipped is None else skipped
+    attention = [] if attention is None else attention
+    ctimes = {} if ctimes is None else ctimes
+    inodes = by_inode(refs)
+    kept = pick_kept(list(inodes.values()))[0]
+    targets = [r for r in refs if r.key != kept.key]
+    links_left = {k: ps[0].nlink for k, ps in inodes.items()}
+    freed = 0
+
+    def credit(r):
+        nonlocal freed
+        links_left[r.key] -= 1
+        f = r.alloc if links_left[r.key] == 0 else 0
+        freed += f
+        return f
+
+    if dry_run:
+        for r in targets:
+            linked.append((r, kept, credit(r)))
+        return freed
+    global exchange_unavailable
+    if exchange_unavailable:
+        skipped.extend((r, EXCHANGE_UNAVAILABLE) for r in targets)
+        return 0
+    try:
+        kdir, kname = open_parent(kept)
+    except OSError:
+        skipped.extend((r, CHANGED) for r in targets)
+        return 0
+    try:
+        try:
+            kfd = os.open(kname, READ_FLAGS, dir_fd=kdir)
+        except OSError as e:
+            skipped.extend((r, read_error(e)) for r in targets)
+            return 0
+        try:
+            kst = os.fstat(kfd)
+            if (not stat.S_ISREG(kst.st_mode) or ident(kst) != kept.ident
+                    or kst.st_ctime_ns != ctimes.get(kept.key)):
+                skipped.extend((r, CHANGED) for r in targets)
+                return 0
+            if kst.st_nlink != kept.nlink:
+                skipped.extend((r, NLINK_CHANGED) for r in targets)
+                return 0
+            mode = stat.S_IMODE(kst.st_mode)
+            os.fchmod(kfd, mode & ~0o222)   # read-only before any path depends on it
+            kst = os.fstat(kfd)
+            if ident(kst) != kept.ident:
+                os.fchmod(kfd, mode)
+                skipped.extend((r, CHANGED) for r in targets)
+                return 0
+            kctime = [kst.st_ctime_ns]      # the chmod changed it: the new value is the expected one
+            latest = max(kept.atime, kst.st_atime_ns)
+            done = 0
+            kept_changed = False
+            for r in targets:
+                if kept_changed:
+                    skipped.append((r, "kept file changed during scan"))
+                    continue
+                if exchange_unavailable:
+                    skipped.append((r, EXCHANGE_UNAVAILABLE))
+                    continue
+                try:
+                    o = _replace(r, kept, kfd, kdir, kname, kept.nlink + done, links_left[r.key], ctimes, kctime)
+                except ExchangeUnavailable:
+                    exchange_unavailable = True
+                    skipped.append((r, EXCHANGE_UNAVAILABLE))
+                    continue
+                except OSError as e:
+                    skipped.append((r, f"could not replace ({e.strerror})"))
+                    continue
+                if o.attention:
+                    attention.append((r.section.name,) + o.attention)
+                if o.kept_changed:
+                    kept_changed = True
+                if not o.linked:
+                    if o.reason:
+                        skipped.append((r, o.reason))
+                    continue
+                done += 1
+                latest = max(latest, o.atime)
+                linked.append((r, kept, credit(r) if o.cleaned else 0))
+            if done and not kept_changed:
+                kst = os.fstat(kfd)
+                if kst.st_nlink == kept.nlink + done:
+                    os.utime(kfd, ns=(max(latest, kst.st_atime_ns), kept.mtime))
+                else:
+                    skipped.append((kept, NLINK_CHANGED + "; its last-read time was not updated"))
+            elif not done:
+                os.fchmod(kfd, mode)
+        finally:
+            os.close(kfd)
+    finally:
+        os.close(kdir)
+    return freed
+
+
+def remove_leftovers(tmps, skipped):
+    """Remove temp links an interrupted run left. Only a hard link (link count >= 2) is removed, so
+    no data is lost; anything else with that name is left alone and listed."""
+    removed = 0
+    for section, folder, rel, _, _ in tmps:
+        parts = rel.split("/")
+        try:
+            dfd = open_dir(section, folder, parts[:-1])
+        except OSError:
+            continue
+        try:
+            st = os.stat(parts[-1], dir_fd=dfd, follow_symlinks=False)
+            if stat.S_ISREG(st.st_mode) and st.st_nlink >= 2:
+                os.unlink(parts[-1], dir_fd=dfd)
+                removed += 1
+            else:
+                skipped.append((section.name, container_path(folder, rel),
+                                "temporary name but not a leftover link; left alone"))
+        except OSError:
+            pass
+        finally:
+            os.close(dfd)
+    return removed
+
+
+# ---------------------------------------------------------------- report and state
+
+def human(n):
+    for unit in ("bytes", "KiB", "MiB", "GiB", "TiB"):
+        if n < 1024 or unit == "TiB":
+            return f"{n} {unit}" if unit == "bytes" else f"{n:.1f} {unit}"
+        n /= 1024
+
+
+def iso_date(ns):
+    try:
+        return datetime.datetime.fromtimestamp(ns / 1e9, datetime.timezone.utc).strftime("%Y-%m-%d")
+    except (ValueError, OverflowError, OSError):
+        return "(unknown date)"
+
+
+def section_data(section, refs, group_inodes, days, now_ns):
+    """Report numbers for one section from a walk of its group (refs: this section's FileRefs)."""
+    mine = by_inode(refs)
+    old = []
+    for key, ps in mine.items():
+        if ps[0].atime < now_ns - days * DAY_NS:
+            others = sorted({r.section.name for r in group_inodes[key]} - {section.name})
+            outside = ps[0].nlink > len(group_inodes[key])   # more links than paths in the listed folders
+            old.append((ps[0].size, ps[0].atime, [r.container_path for r in ps], others, ps[0].ino, outside))
+    old.sort(key=lambda e: (-e[0], e[2]))
+    shared = sorted((r.container_path, r.size, r.ino) for r in refs if r.folder == section.report and r.nlink == 1)
+    return {
+        "total_bytes": sum(ps[0].alloc for ps in mine.values()),
+        "old": old,
+        "old_bytes": sum(e[0] for e in old),
+        "shared": shared,
+        "scratch": scratch_bytes(section),
+    }
+
+
+def scratch_bytes(section):
+    """Allocated bytes under <report folder>/.tmp (each inode once), or None if it is not a folder."""
+    try:
+        fd = open_dir(section, section.report, [SCRATCH])
+    except OSError:
+        return None
+    try:
+        seen = {r.key: r.alloc for r in _walk_folder(section, section.report + "/" + SCRATCH, fd, None)}
+    finally:
+        os.close(fd)
+    return sum(seen.values())
+
+
+def render_report(section, data):
+    dry = data["dry_run"]
+    out = [f"# Shared inputs report: {section.name}", "",
+           f"- Run: {data['run_time']} ({'dry run: nothing was changed' if dry else 'linking run'})",
+           "- Folders scanned: " + ", ".join(shown(container_path(f)) for f in section.folders),
+           f"- Total size on disk: {human(data['total_bytes'])} (each file counted once)",
+           f"- Space {'that would be freed' if dry else 'freed'} by this run: {human(data['freed_run'])}; "
+           f"freed in total so far: {human(data['freed_total'])}",
+           "- Paths are shown in code spans; \\xNN, \\uNNNN and \\\\ stand for bytes and characters a name "
+           "cannot show as is.",
+           *([f"- Leftover download scratch in {shown(container_path(section.report, SCRATCH))}: "
+              f"{human(data['scratch'])} (safe to delete when no R session in the container is running; "
+              "the owner does this, not the agent)"] if data.get("scratch") is not None else []),
+           *([f"- Linking: {EXCHANGE_UNAVAILABLE}"] if data.get("exchange_unavailable") else [])]
+    if data["attention"]:
+        out += ["", "## Needs the owner's attention", ""]
+        out += [f"- {shown(p)}: {msg}" for p, msg in data["attention"]]
+    out += ["", "## " + ("Would link (dry run)" if dry else "Linked this run"), ""]
+    if data["linked"]:
+        for r, kept, _ in data["linked"]:
+            if kept.section is section:
+                to = shown(kept.container_path)
+            else:
+                to = f"a file in container {kept.section.name}"
+            out.append(f"- {shown(r.container_path)}: same content as {to}")
+    else:
+        out.append("Nothing.")
+    days = data["days"]
+    out += ["", f"## Not read in {days} days", "",
+            "One entry per file, largest first. Deleting one path of a file that other paths still link "
+            "frees nothing; delete every path of an entry to free its space. This list is information only "
+            "and may be out of date: just before deleting, check that each path still has the inode number "
+            "and size shown (`stat -c '%i %s' <path>`).", ""]
+    for size, atime, paths, others, ino, outside in data["old"]:
+        also = f" (also linked from container {', '.join(others)})" if others else ""
+        if outside:
+            also += "; also linked from outside the listed folders: deleting these paths frees nothing"
+        out.append(f"- inode {ino}, size {human(size)} ({size} bytes), last read {iso_date(atime)}: "
+                   f"{', '.join(shown(p) for p in paths)}{also}")
+    if not data["old"]:
+        out.append("Nothing.")
+    out += ["", "## In the shared folder but linked from nowhere else", "",
+            f"Files under {shown(container_path(section.report))} with no other link: deleting one frees its space.", ""]
+    out += [f"- {shown(p)} (inode {i}, size {human(s)}, {s} bytes)" for p, s, i in data["shared"]] or ["Nothing."]
+    out += ["", "## Skipped", ""]
+    out += [f"- {shown(p)}: {why}" for p, why in data["skipped"]] or ["Nothing."]
+    return "\n".join(out) + "\n"
+
+
+def write_report(section, data) -> None:
+    """Publish REPORT.md in the section's report folder: write a temp file O_EXCL|O_NOFOLLOW in the
+    folder's fd, then rename it over REPORT.md (a symlink there is replaced, never followed). The
+    folder is reached like every other one, PROJECT_DIR included, one O_NOFOLLOW step at a time."""
+    text = render_report(section, data).encode()
+    rfd = open_dir(section, section.report)
+    try:
+        try:
+            os.unlink(REPORT_TMP, dir_fd=rfd)
+        except FileNotFoundError:
+            pass
+        fd = os.open(REPORT_TMP, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o644, dir_fd=rfd)
+        try:
+            try:
+                view = memoryview(text)
+                while view:
+                    n = os.write(fd, view)
+                    if n <= 0:
+                        raise OSError(errno.EIO, "short write")
+                    view = view[n:]
+                os.fsync(fd)
+                if os.fstat(fd).st_size != len(text):
+                    raise OSError(errno.EIO, "written size does not match")
+            finally:
+                os.close(fd)
+        except BaseException:
+            try:
+                os.unlink(REPORT_TMP, dir_fd=rfd)
+            except OSError:
+                pass
+            raise
+        os.rename(REPORT_TMP, REPORT, src_dir_fd=rfd, dst_dir_fd=rfd)
+    finally:
+        os.close(rfd)
+
+
+def state_path():
+    return Path.home() / ".local" / "state" / "agent-containers" / "inputs.json"
+
+
+def load_state():
+    try:
+        state = json.loads(state_path().read_text())
+        if isinstance(state, dict) and isinstance(state.get("sections"), dict):
+            return state
+    except (OSError, ValueError):
+        pass
+    return {"sections": {}}
+
+
+def save_state(state) -> None:
+    d = state_path().parent
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(d, 0o700)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".inputs.json.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(state, f, indent=2, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, state_path())
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+# ---------------------------------------------------------------- scan
+
+def scan_group(sections, dry_run, days, state, run_time, now_ns):
+    """Scan, link and report one group. Returns False if a report could not be published or
+    something needs the owner's attention."""
+    skipped = []   # (section name, container path, reason)
+    if not dry_run:
+        tmps = []
+        for s in sections:
+            for _ in walk(s, tmps):
+                pass
+        remove_leftovers(tmps, skipped)
+    tmps = []      # temp links still present (a dry run leaves an interrupted run's ones): inside paths
+    refs = [r for s in sections for r in walk(s, tmps)]
+    tmp_links = {}
+    for t in tmps:
+        tmp_links[t[3:]] = tmp_links.get(t[3:], 0) + 1
+
+    cutoff = now_ns - DAY_NS
+    uid = os.getuid()
+    by_size = {}
+    for ps in by_inode(refs).values():
+        r = ps[0]
+        if r.size >= MIB and r.mtime < cutoff and r.uid == uid:
+            by_size.setdefault(r.size, []).append(ps)
+
+    linked, link_skips, attention = [], [], []
+    for size in sorted(by_size):
+        if len(by_size[size]) < 2:
+            continue
+        # An inode with more links than the paths found in this group also has a path outside the
+        # listed folders: it is never kept, linked, chmodded or retimed.
+        inside = []
+        for ps in by_size[size]:
+            if ps[0].nlink > len(ps) + tmp_links.get(ps[0].key, 0):
+                link_skips.extend((r, "also linked outside the listed folders; left alone") for r in ps)
+            else:
+                inside.append(ps)
+        by_size[size] = inside
+        if len(inside) < 2:
+            continue
+        by_hash = {}
+        for ps in by_size[size]:
+            why = []
+            h = hash_ref(ps[0], why)
+            if h is None:
+                link_skips.extend((r, why[0] if why else "unreadable") for r in ps)
+            else:
+                by_hash.setdefault(h, []).append(ps)
+        for group in by_hash.values():
+            if len(group) < 2:
+                continue
+            kept = pick_kept(group)
+            confirmed = [kept]
+            ctimes = {}
+            for ps in group:
+                if ps is kept:
+                    continue
+                why = []
+                if same_bytes(kept[0], ps[0], why, ctimes):
+                    confirmed.append(ps)
+                elif why:
+                    link_skips.extend((r, why[0]) for r in ps)
+            if len(confirmed) >= 2:
+                link_group([r for ps in confirmed for r in ps], dry_run, linked, link_skips, attention, ctimes)
+    skipped += [(r.section.name, r.container_path, why) for r, why in link_skips]
+
+    for r, kept, _ in linked:
+        verb = "would link" if dry_run else "linked"
+        print(f"{verb} [{r.section.name}] {shown(r.container_path)} -> [{kept.section.name}] {shown(kept.container_path)}")
+    for n, p, msg in attention:
+        print(f"agent-inputs: [{n}] needs attention: {shown(p)}: {msg}", file=sys.stderr)
+
+    after = refs if dry_run else [r for s in sections for r in walk(s)]
+    group_inodes = by_inode(after)
+    ok = not attention
+    for s in sections:
+        prev = state["sections"].get(s.name, {}).get("freed_bytes_total", 0)
+        freed_run = sum(f for r, _, f in linked if r.section is s)
+        freed_total = prev if dry_run else prev + freed_run
+        d = section_data(s, [r for r in after if r.section is s], group_inodes, days, now_ns)
+        d.update(run_time=run_time, dry_run=dry_run, days=days, freed_run=freed_run, freed_total=freed_total,
+                 exchange_unavailable=exchange_unavailable and not dry_run,
+                 linked=[e for e in linked if e[0].section is s],
+                 attention=[(p, msg) for n, p, msg in attention if n == s.name],
+                 skipped=sorted((p, why) for n, p, why in skipped if n == s.name))
+        entry = state["sections"][s.name] = {
+            "last_run": run_time, "dry_run": dry_run, "total_bytes": d["total_bytes"],
+            "freed_bytes_run": freed_run, "freed_bytes_total": freed_total,
+            "old_count": len(d["old"]), "old_bytes": d["old_bytes"], "days": days,
+            "problems": len(d["attention"]),
+        }
+        print(f"[{s.name}] {'would free' if dry_run else 'freed'} {human(freed_run)}; total on disk "
+              f"{human(d['total_bytes'])}; {len(d['old'])} files not read in {days} days ({human(d['old_bytes'])})")
+        try:   # one section's report failing must not stop the others
+            write_report(s, d)
+        except Exception as e:
+            print(f"agent-inputs: [{s.name}] could not publish {shown(container_path(s.report, REPORT))} "
+                  f"({e.strerror if isinstance(e, OSError) else type(e).__name__})", file=sys.stderr)
+            entry["problems"] += 1
+            ok = False
+    return ok
+
+
+def cmd_scan(args):
+    try:
+        sections = load_config(Path.home())
+    except ConfigError as e:
+        print(f"agent-inputs: {e}", file=sys.stderr)
+        return 2
+    now_ns = time.time_ns()
+    run_time = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    state = load_state()
+    groups = {}
+    for s in sections:
+        groups.setdefault(s.group, []).append(s)
+    ok = True
+    for g in groups.values():
+        try:   # one group's failure must not stop the other groups' reports and state
+            ok = scan_group(g, args.dry_run, args.days, state, run_time, now_ns) and ok
+        except Exception as e:
+            names = ", ".join(s.name for s in g)
+            print(f"agent-inputs: group '{g[0].group}' ({names}) failed: {type(e).__name__}: {e}", file=sys.stderr)
+            for s in g:   # keep the last good numbers, but record that this run had problems
+                entry = state["sections"].get(s.name)
+                entry = entry if isinstance(entry, dict) else {}
+                entry.update(last_run=run_time, dry_run=args.dry_run, problems=max(1, int(entry.get("problems", 0) or 0)))
+                state["sections"][s.name] = entry
+            ok = False
+    state["last_exit"] = 0 if ok else 1
+    save_state(state)
+    return state["last_exit"]
+
+
+UNIT_NAMES = ("agent-inputs.service", "agent-inputs.timer")
+
+
+def unit_dir():
+    return Path.home() / ".config" / "systemd" / "user"
+
+
+def systemctl(*args, ok_if=()):
+    """Run systemctl --user; its exit code, or 0 when it failed with a message containing one of
+    ok_if (stderr is passed on otherwise)."""
+    try:
+        p = subprocess.run(["systemctl", "--user", *args], stderr=subprocess.PIPE, text=True, errors="replace")
+    except OSError as e:
+        print(f"agent-inputs: cannot run systemctl: {e}", file=sys.stderr)
+        return 1
+    if p.returncode and any(m in p.stderr for m in ok_if):
+        return 0
+    sys.stderr.write(p.stderr)
+    return p.returncode
+
+
+def cmd_install_timer(args):
+    script = os.path.abspath(__file__)
+    if any(c.isspace() or c in '"\\%$' for c in script):
+        print(f"agent-inputs: the script path {shown(script)} has characters a systemd unit cannot hold safely; "
+              "move the clone to a plain path", file=sys.stderr)
+        return 2
+    service = ("[Unit]\nDescription=Link identical input files read-only and report old ones\n\n"
+               "[Service]\nType=oneshot\n"
+               f"ExecStart=/usr/bin/python3 {script} scan\nNice=19\nIOSchedulingClass=idle\n")
+    timer = ("[Unit]\nDescription=Weekly agent-inputs scan\n\n"
+             "[Timer]\nOnCalendar=weekly\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n")
+    d = unit_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    (d / UNIT_NAMES[0]).write_text(service)
+    (d / UNIT_NAMES[1]).write_text(timer)
+    if systemctl("daemon-reload") or systemctl("enable", "--now", "agent-inputs.timer"):
+        print("agent-inputs: the units are written but systemctl could not enable the timer", file=sys.stderr)
+        return 1
+    print("agent-inputs: weekly timer enabled (systemctl --user status agent-inputs.timer)")
+    return 0
+
+
+def cmd_remove_timer(args):
+    # A timer that was never installed (or is already gone) counts as removed.
+    rc = systemctl("disable", "--now", "agent-inputs.timer", ok_if=("does not exist", "not loaded", "not found"))
+    for n in UNIT_NAMES:
+        try:
+            (unit_dir() / n).unlink()
+        except FileNotFoundError:
+            pass
+    rc = systemctl("daemon-reload") or rc
+    if rc:
+        print("agent-inputs: systemctl could not remove the timer cleanly (see above)", file=sys.stderr)
+    return 1 if rc else 0
+
+
+def cmd_status_line(args):
+    """One line from the host state; nothing (exit 0) without inputs.conf or state for the section."""
+    if not (Path.home() / ".config" / "agent-containers" / "inputs.conf").is_file():
+        return 0
+    e = load_state()["sections"].get(args.section)
+    if not isinstance(e, dict):
+        return 0
+    try:
+        last = str(e["last_run"])
+        line = f"Shared inputs: last run {last[:10]}" + (" (dry run)" if e.get("dry_run") is True else "")
+        if all(k in e for k in ("total_bytes", "freed_bytes_total", "old_count", "old_bytes")):
+            line += (f", {human(int(e['total_bytes']))} on disk, {human(int(e['freed_bytes_total']))} freed so far, "
+                     f"{int(e['old_count'])} files ({human(int(e['old_bytes']))}) not read in "
+                     f"{int(e.get('days', 180))} days")
+        if int(e.get("problems", 0) or 0) > 0:
+            line += "; last run had problems: see REPORT.md"
+        try:
+            when = datetime.datetime.fromisoformat(last)
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=datetime.timezone.utc)
+            if datetime.datetime.now(datetime.timezone.utc) - when > datetime.timedelta(days=8):
+                line += ("; that is more than 8 days ago: check systemctl --user status agent-inputs.service "
+                         "(a renamed or missing listed folder stops every run)")
+        except ValueError:
+            line += "; last run date unreadable"
+    except (KeyError, TypeError, ValueError):
+        return 0
+    print(line)
+    return 0
+
+
+def positive_int(text):
+    n = int(text)
+    if n < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return n
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="agent-inputs", description="Link identical input files read-only "
+                                 "and report files not read for a long time (host side).")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sp = sub.add_parser("scan", help="scan the folders in ~/.config/agent-containers/inputs.conf")
+    sp.add_argument("--dry-run", action="store_true", help="change nothing; print and report what would be linked")
+    sp.add_argument("--days", type=positive_int, default=180, help="old-file threshold in days (default 180)")
+    sp.set_defaults(func=cmd_scan)
+    sub.add_parser("install-timer", help="run scan weekly (systemd user timer)").set_defaults(func=cmd_install_timer)
+    sub.add_parser("remove-timer", help="stop and remove the weekly timer").set_defaults(func=cmd_remove_timer)
+    sp = sub.add_parser("status-line", help="print the one-line summary for a section (used by agent-up status)")
+    sp.add_argument("section")
+    sp.set_defaults(func=cmd_status_line)
+    args = ap.parse_args(argv)
+    for f in (sys.stdout, sys.stderr):
+        f.reconfigure(errors="backslashreplace")
+    # A write past the file-size limit fails with EFBIG instead of killing the job; a lease break
+    # (someone opening a leased file for writing) must not kill it either.
+    signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+    signal.signal(signal.SIGIO, lambda *_: None)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
